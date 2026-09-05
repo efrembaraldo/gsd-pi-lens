@@ -2,5 +2,8 @@
   "yaml.schemas": {
     "./rules/tree-sitter-queries/rule-schema.json": "rules/tree-sitter-queries/**/*.yml",
     "./rules/ast-grep-rules/rule-schema.json": "rules/ast-grep-rules/rules/*.yml"
-  }
+  },
+     "files.watcherExclude": { "**/.gsd-state/**": true },
+     "search.exclude":        { "**/.gsd-state/**": true }
+
 }
