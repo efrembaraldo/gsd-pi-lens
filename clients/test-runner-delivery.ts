@@ -8,11 +8,19 @@
  * delivery gate for this cache.
  */
 
-import type {
-	EntryRenderer,
-	ExtensionAPI,
-	Theme,
-} from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@gsd/pi-coding-agent";
+
+// Local bridge: see the `pi: unknown` sites below. The @gsd/pi-coding-agent
+// ExtensionAPI surface is richer than the previous scope (it adds
+// registerBeforeInstall, registerAfterInstall, registerBeforeRemove,
+// registerAfterRemove, and others). Tests/ still consume the older shape via
+// devDeps (S03 will move them); index.ts renames to the new scope only in
+// T4 — until then, callers continue to pass the legacy ExtensionAPI. This
+// file accesses pi properties only through casts (`pi as unknown as {
+// appendEntry?; registerEntryRenderer? }`), so a permissive local typing
+// (inlined `unknown`) is sufficient and keeps every caller type-compatible
+// across the transition. The upstream ExtensionAPI is not imported here on
+// purpose: the file's casts already narrow before any property access.
 import type { CacheManager } from "./cache-manager.js";
 import { emitBounded } from "./bounded-telemetry.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -46,7 +54,7 @@ const pending = new Map<string, PendingDelivery>();
 
 export interface TestRunnerDeliveryOwner {
 	ownerId: string;
-	pi: ExtensionAPI;
+	pi: unknown;
 	cacheManager: CacheManager;
 	runtime: RuntimeCoordinator;
 	getCtx: () => {
@@ -175,7 +183,7 @@ export function stageTestRunnerDelivery(args: {
 
 /** Deliver the latest staged result during a host-confirmed idle window. */
 export function deliverTestRunnerFindings(args: {
-	pi: ExtensionAPI;
+	pi: unknown;
 	ctx: {
 		cwd?: string;
 		isIdle?: () => boolean;
@@ -296,13 +304,13 @@ export function deliverStagedTestRunnerFindings(args?: {
 	});
 }
 
-export function registerTestRunnerEntryRenderer(pi: ExtensionAPI): boolean {
+export function registerTestRunnerEntryRenderer(pi: unknown): boolean {
 	// SAFETY: registerEntryRenderer is an optional host capability absent from older Pi SDKs.
 	const register = (
 		pi as unknown as {
 			registerEntryRenderer?: (
 				customType: string,
-				renderer: EntryRenderer<TestRunnerDeliveryEntry>,
+				renderer: TestRunnerEntryRenderer,
 			) => void;
 		}
 	).registerEntryRenderer;
@@ -315,7 +323,19 @@ export function registerTestRunnerEntryRenderer(pi: ExtensionAPI): boolean {
 	}
 }
 
-type TestRunnerEntry = Parameters<EntryRenderer<TestRunnerDeliveryEntry>>[0];
+/**
+ * Local structural types: EntryRenderer, EntryRenderOptions and
+ * registerEntryRenderer are absent from @gsd/pi-coding-agent (R004/MEM004).
+ * The renderer reads only entry.data?.content and theme.fg("error", …);
+ * `error` is part of ThemeColor (vendor/pi-coding-agent/dist/theme/theme.d.ts
+ * line 2). Do not replicate CustomEntry in full here.
+ */
+type TestRunnerEntry = { data?: TestRunnerDeliveryEntry };
+type TestRunnerEntryRenderer = (
+	entry: TestRunnerEntry,
+	options: { expanded: boolean },
+	theme: Theme,
+) => Component | undefined;
 
 function renderTestRunnerEntry(
 	entry: TestRunnerEntry,
