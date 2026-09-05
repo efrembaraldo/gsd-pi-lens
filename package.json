@@ -1,6 +1,6 @@
 {
-	"name": "pi-lens",
-	"version": "4.1.3",
+	"name": "@efrembaraldo/gsd-pi-lens",
+	"version": "0.0.1",
 	"type": "module",
 	"description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
 	"repository": {
@@ -107,15 +107,15 @@
 		"vscode-jsonrpc": "^9.0.0"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "^0.84.1",
+		"@gsd/pi-coding-agent": "*",
+		"@gsd/pi-tui": "^1.17.0",
 		"typebox": "^1.0.0"
 	},
 	"peerDependenciesMeta": {
-		"@earendil-works/pi-coding-agent": {
+		"@gsd/pi-coding-agent": {
 			"optional": true
 		},
-		"@earendil-works/pi-tui": {
+		"@gsd/pi-tui": {
 			"optional": true
 		},
 		"typebox": {
