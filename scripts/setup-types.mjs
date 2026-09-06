@@ -3,11 +3,14 @@
 //
 // Two stages, both idempotent and both safe to re-run at any time:
 //
-//   1. Vendor .d.ts (stadio 1) — copies @gsd/pi-coding-agent and @gsd/pi-tui
+//   1. Vendor (stadio 1) — copies @gsd/pi-coding-agent and @gsd/pi-tui
 //      type declarations from a built gsd-pi checkout into
 //      ./vendor/<pkg>/dist/. Required because @gsd/pi-* are workspace packages
 //      inside the gsd-pi monorepo, NOT published as standalone npm packages,
-//      so `npm install` cannot fetch them.
+//      so `npm install` cannot fetch them. pi-coding-agent additionally vendors
+//      its compiled runtime (.js, source maps excluded) plus package.json, so
+//      pi-host-contract.test.ts and host-edit-normalize-sync.test.ts can read
+//      host sources and assert the host version off ./vendor/.
 //
 //   2. Runtime materialization (stadio 2) — copies the runtime JS (plus .d.ts
 //      and source-map siblings) of @gsd/pi-tui, @gsd/native,
@@ -51,11 +54,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(__dirname);
 
-// ─── Stadio 1: vendor .d.ts ────────────────────────────────────────────────
+// ─── Stadio 1: vendor .d.ts (+ runtime .js + package.json for pi-coding-agent) ─
 // Each entry maps a package name to its expected destination (a subdirectory of
-// ./vendor/). Skip is per-package: presence of dist/index.d.ts is the sentinel.
+// ./vendor/). Skip is per-package and multi-sentinel: see vendorSentinels(). A
+// copyJs package vendors .d.ts AND .js (minus .js.map) plus its package.json, so
+// a vendor populated by an earlier S01 run (index.d.ts only) still re-copies the
+// runtime on a partial sentinel (idempotent). pi-tui has no .js consumer in the
+// test suite and stays .d.ts-only.
 const VENDOR_PACKAGES = [
-	{ name: "pi-coding-agent", dest: join(ROOT, "vendor", "pi-coding-agent", "dist") },
+	{
+		name: "pi-coding-agent",
+		dest: join(ROOT, "vendor", "pi-coding-agent", "dist"),
+		copyJs: true,
+	},
 	{ name: "pi-tui", dest: join(ROOT, "vendor", "pi-tui", "dist") },
 ];
 
@@ -124,33 +135,64 @@ const CHECKOUT_CANDIDATES = [
 ];
 
 // ─── Stadio 1 helpers ──────────────────────────────────────────────────────
-function copyDtsOnly(srcDir, dstDir) {
+function copyVendorDir(srcDir, dstDir, copyJs) {
 	for (const entry of readdirSync(srcDir)) {
 		const srcPath = join(srcDir, entry);
 		const dstPath = join(dstDir, entry);
 		const stat = statSync(srcPath);
 		if (stat.isDirectory()) {
 			mkdirSync(dstPath, { recursive: true });
-			copyDtsOnly(srcPath, dstPath);
+			copyVendorDir(srcPath, dstPath, copyJs);
 		} else if (entry.endsWith(".d.ts")) {
+			// .d.ts always; .d.ts.map never (ends with ".map", not ".d.ts").
+			copyFileSync(srcPath, dstPath);
+		} else if (copyJs && entry.endsWith(".js") && !entry.endsWith(".js.map")) {
+			// Widens the S01 .d.ts-only copy to the compiled runtime. Excluding
+			// *.js.map (~1.8 MB) keeps the vendored dist lean; no readHostSource
+			// consumer reads a map. Only pi-coding-agent vendors .js.
 			copyFileSync(srcPath, dstPath);
 		}
 	}
 }
 
+// Returns the skip sentinels for a vendor package, relative to the package root
+// (the parent of the dist destination). A copyJs package needs all three markers
+// to be skipped, so a vendor populated type-only by an earlier S01 run (index.d.ts
+// present, index.js / package.json absent) is re-copied in full on the next run.
+function vendorSentinels(pkg) {
+	const packageRoot = dirname(pkg.dest);
+	if (pkg.copyJs) {
+		return [
+			join(pkg.dest, "index.d.ts"),
+			join(pkg.dest, "index.js"),
+			join(packageRoot, "package.json"),
+		];
+	}
+	return [join(pkg.dest, "index.d.ts")];
+}
+
 function planVendor() {
 	const pending = [];
 	for (const pkg of VENDOR_PACKAGES) {
-		const sentinel = join(pkg.dest, "index.d.ts");
-		if (existsSync(sentinel)) {
+		const sentinels = vendorSentinels(pkg);
+		if (sentinels.every((s) => existsSync(s))) {
+			const rel = sentinels.map((s) => s.replace(join(ROOT, "") + "/", ""));
 			console.log(
-				`[setup-types] vendor/${pkg.name}/dist/index.d.ts already present, skipping`,
+				`[setup-types] ${rel.join(", ")} already present, skipping`,
 			);
 			continue;
 		}
 		pending.push(pkg);
 	}
 	return pending;
+}
+
+function failMissingVendorFile(pkg, sourcePath, kind) {
+	console.error(
+		`[setup-types] FAIL: vendor ${kind} source missing for ${pkg.name}`,
+	);
+	console.error(`  Expected: ${sourcePath}`);
+	process.exit(1);
 }
 
 // ─── Stadio 2 helpers ──────────────────────────────────────────────────────
@@ -253,6 +295,17 @@ function resolveCheckout(pendingVendor, pendingRuntime) {
 				vendorOk = false;
 				break;
 			}
+			// A copyJs package also needs the compiled runtime at source, not just
+			// the type declarations, or the .js re-pin would be unverifiable.
+			if (
+				pkg.copyJs &&
+				!existsSync(
+					join(candidate, "packages", pkg.name, "dist", "index.js"),
+				)
+			) {
+				vendorOk = false;
+				break;
+			}
 		}
 		if (!vendorOk) continue;
 
@@ -287,6 +340,9 @@ function failNoCheckout(pendingVendor, pendingRuntime) {
 		for (const c of CHECKOUT_CANDIDATES.filter(Boolean)) {
 			for (const pkg of pendingVendor) {
 				console.error(`    - ${c}/packages/${pkg.name}/dist/index.d.ts`);
+				if (pkg.copyJs) {
+					console.error(`    - ${c}/packages/${pkg.name}/dist/index.js`);
+				}
 			}
 		}
 		console.error("");
@@ -332,12 +388,22 @@ if (!resolvedCheckout) {
 	failNoCheckout(pendingVendor, pendingRuntime);
 }
 
-// Stadio 1 — vendor .d.ts.
+// Stadio 1 — vendor (.d.ts, plus .js + package.json for copyJs packages).
 for (const pkg of pendingVendor) {
 	const sourceDist = join(resolvedCheckout, "packages", pkg.name, "dist");
-	console.log(`[setup-types] copying .d.ts from ${sourceDist} -> ${pkg.dest}`);
+	const copyJs = !!pkg.copyJs;
+	console.log(
+		`[setup-types] copying ${copyJs ? ".d.ts and .js (+.js.map excluded)" : ".d.ts"} from ${sourceDist} -> ${pkg.dest}`,
+	);
 	mkdirSync(pkg.dest, { recursive: true });
-	copyDtsOnly(sourceDist, pkg.dest);
+	copyVendorDir(sourceDist, pkg.dest, copyJs);
+	if (copyJs) {
+		const srcPkgJson = join(dirname(sourceDist), "package.json");
+		if (!existsSync(srcPkgJson)) {
+			failMissingVendorFile(pkg, srcPkgJson, "package.json");
+		}
+		copyFileSync(srcPkgJson, join(dirname(pkg.dest), "package.json"));
+	}
 }
 
 // Stadio 2 — runtime materialization in node_modules/.
