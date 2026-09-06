@@ -7,7 +7,11 @@
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"lib": ["ES2022"],
-		"types": ["node"]
+		"types": ["node"],
+		"paths": {
+			"@gsd/pi-coding-agent": ["./vendor/pi-coding-agent/dist/index.d.ts"],
+			"@gsd/pi-tui": ["./vendor/pi-tui/dist/index.d.ts"]
+		}
 	},
 	"include": ["**/*.ts"],
 	"exclude": ["node_modules", "test-lsp-files", "_trigger-test.ts", "tests", "vendor"]
