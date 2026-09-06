@@ -1,0 +1,89 @@
+# Publish the fork's package to npm via OIDC Trusted Publishing (R009).
+#
+# This workflow replaces the upstream release.yml. The upstream file published
+# from a stored registry-token secret with tag/tag-tracking logic that does not
+# fit the fork: the fork publishes on every CI iteration with a
+# version-not-already-published guard that forces 0.0.N increments (capped at
+# 0.0.999, R002).
+#
+# Cold start: a `workflow_run` trigger fires only when publish.yml already
+# exists on the default branch while the CI workflow runs. So the first cycle
+# cannot trigger itself; validate it with a manual `workflow_dispatch`
+# dry-run (the default input) before relying on the CI-driven path.
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Validate the publish without uploading (no credentials required)"
+        type: boolean
+        default: true
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify version not already published
+    runs-on: ubuntu-latest
+    # contents: read is inherited from the workflow-level permissions above.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Check version is not already published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view @efrembaraldo/gsd-pi-lens@${VERSION} version >/dev/null 2>&1; then
+            echo "::error::Version ${VERSION} is already published on npm. Bump package.json to a new 0.0.N (cap 0.0.999)."
+            exit 1
+          fi
+          echo "Version ${VERSION} is not published yet — proceeding."
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    # OIDC Trusted Publishing: npm exchanges this job's GitHub Actions ID token
+    # for a short-lived registry token, so no stored registry-token secret is
+    # needed. Configure Trusted Publishing on npmjs.com by linking the repo
+    # efrembaraldo/gsd-pi-lens — a prerequisite outside this repository.
+    permissions:
+      contents: read
+      id-token: write
+    # Publish only when CI succeeded (workflow_run) or the manual dispatch is
+    # not a dry run. Event inputs are strings even for boolean inputs, so the
+    # dry-run input compares against the string 'false'.
+    if: |
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run == 'false')
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Restore host-provided TypeScript deps
+        run: node scripts/setup-types.mjs
+      - name: Publish to npm
+        # Properties from the run expression are unquoted before bash parses
+        # them. Event input values are plain strings and safe here.
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.dry-run }}" == "true" ]]; then
+            # Dry run: validate the tarball without uploading; no credentials
+            # are required or used.
+            npm publish --dry-run
+          else
+            npm publish --provenance --access public
+          fi

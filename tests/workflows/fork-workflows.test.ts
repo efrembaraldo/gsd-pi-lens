@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
@@ -6,7 +6,7 @@ import yaml from "../../clients/deps/js-yaml.js";
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 type Step = { name?: string; run?: string; uses?: string; with?: unknown };
-type Job = { steps?: Step[] };
+type Job = { steps?: Step[]; permissions?: unknown; environment?: unknown; if?: unknown };
 type Workflow = { name?: string; on?: unknown; permissions?: unknown; jobs?: Record<string, Job> };
 
 function readWorkflow(relativePath: string): { content: string; parsed: Workflow } {
@@ -111,5 +111,69 @@ describe("ci.yml (fork)", () => {
 	it("carries no upstream fork identities", () => {
 		expect(content).not.toContain("earendil-works");
 		expect(content).not.toContain("apmantza");
+	});
+});
+
+describe("publish.yml (fork)", () => {
+	const publish = readWorkflow(".github/workflows/publish.yml");
+	const { content, parsed } = publish;
+
+	it("is named Publish", () => {
+		expect(parsed.name).toBe("Publish");
+	});
+
+	it("triggers on workflow_dispatch with a dry-run input defaulting to true", () => {
+		const on = workflowTriggers(parsed.on);
+		expect(on).toHaveProperty("workflow_dispatch");
+		const inputs = (on.workflow_dispatch as { inputs?: Record<string, unknown> } | undefined)?.inputs;
+		const dryRun = (inputs?.["dry-run"] ?? {}) as Record<string, unknown>;
+		expect(dryRun["type"]).toBe("boolean");
+		expect(dryRun["default"]).toBe(true);
+	});
+
+	it("triggers on workflow_run of the CI workflow completing", () => {
+		const on = workflowTriggers(parsed.on);
+		const wr = (on.workflow_run ?? {}) as Record<string, unknown>;
+		const workflows = Array.isArray(wr["workflows"]) ? wr["workflows"] : [];
+		const types = Array.isArray(wr["types"]) ? wr["types"] : [];
+		expect(workflows).toContain("CI");
+		expect(types).toContain("completed");
+	});
+
+	it("declares verify and publish jobs", () => {
+		expect(parsed.jobs).toHaveProperty("verify");
+		expect(parsed.jobs).toHaveProperty("publish");
+	});
+
+	it("gives the publish job id-token:write and contents:read for OIDC", () => {
+		const perms = parsed.jobs?.publish?.permissions as Record<string, unknown> | undefined;
+		expect(perms?.["id-token"]).toBe("write");
+		expect(perms?.["contents"]).toBe("read");
+	});
+
+	it("gates the publish job' conditionally on CI success or dry-run false", () => {
+		// R009: workflow_run publishes only when CI concluded successfully;
+		// workflow_dispatch publishes only when the dry-run input is false.
+		const jobIf = parsed.jobs?.publish?.if;
+		expect(typeof jobIf).toBe("string");
+		const expr = String(jobIf);
+		expect(expr).toContain("workflow_run");
+		expect(expr).toContain("success");
+		expect(expr).toContain("inputs.dry-run");
+	});
+
+	it("checks the registry version and publishes with provenance", () => {
+		expect(jobHasScript(parsed.jobs?.verify, "npm view @efrembaraldo/gsd-pi-lens")).toBe(true);
+		expect(jobHasScript(parsed.jobs?.publish, "--provenance --access public")).toBe(true);
+	});
+
+	it("carries no registry token and no environment key on publish", () => {
+		expect(content).not.toContain("NPM_TOKEN");
+		expect(content).not.toContain("NODE_AUTH_TOKEN");
+		expect(parsed.jobs?.publish?.environment).toBeUndefined();
+	});
+
+	it("removed the upstream release.yml (R009 net replacement)", () => {
+		expect(existsSync(resolve(REPO_ROOT, ".github/workflows/release.yml"))).toBe(false);
 	});
 });
