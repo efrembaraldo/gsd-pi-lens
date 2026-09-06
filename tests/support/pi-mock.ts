@@ -8,14 +8,16 @@
  * (`emit`) or command (`runCommand`) through the *real* handler, so the glue is
  * verified end-to-end instead of each helper in isolation.
  *
- * Typed against the pinned `@earendil-works/pi-coding-agent` types only
+ * Typed against the pinned host SDK `@gsd/pi-coding-agent` types only
  * (type-only import — no runtime dependency, per AGENTS.md install constraints).
+ * Types resolve via `tsconfig.json`'s `@gsd/pi-coding-agent` → `vendor/` path
+ * mapping, materialized by `scripts/setup-types.mjs`.
  */
 
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+} from "@gsd/pi-coding-agent";
 
 export interface RecordedFlag {
 	description?: string;
@@ -381,8 +383,8 @@ export function makeCtx(
  * The exact message the pi SDK's `assertActive()` throws from every accessor
  * on a context invalidated by `ctx.newSession()`, `ctx.fork()`,
  * `ctx.switchSession()`, or `ctx.reload()`
- * (`core/extensions/loader.js` in the installed
- * `@earendil-works/pi-coding-agent`).
+ * (`core/extensions/loader.js` in the vendored
+ * `@gsd/pi-coding-agent`).
  */
 export const STALE_CTX_MESSAGE =
 	"This extension ctx is stale after session replacement or reload. " +

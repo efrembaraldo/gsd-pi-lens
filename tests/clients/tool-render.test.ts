@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Theme, ToolDefinition } from "@gsd/pi-coding-agent";
 import { compactRenderResult } from "../../tools/render-compact.js";
 import {
 	buildCompactToolLine,

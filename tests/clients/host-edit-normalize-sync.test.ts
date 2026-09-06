@@ -15,22 +15,22 @@ import {
  * type-only at runtime, so clients/host-edit-normalize.ts COPIES the host's
  * fuzzy-match code-point sets. This test re-reads the host source from devDeps
  * and fails if the host changes its ladder, so the copy can't silently rot.
+ * The host source is read from the vendored `vendor/pi-coding-agent` copy.
  */
 
-// The SDK's `exports` map blocks subpath + package.json + main resolution, so
-// locate the package by walking up from cwd to the node_modules entry that
-// holds it (devDep; robust to nested node_modules).
+// The host SDK's compiled `.js` + `package.json` are vendored under `vendor/`
+// by `scripts/setup-types.mjs` (a fork of gsd's `packages/pi-coding-agent`,
+// the gsd-bundled `@gsd/pi-coding-agent`). Read the vendored files directly
+// rather than through node_modules — the SDK's `exports` map blocks subpath
+// + package.json resolution.
 function hostPackageDir(): string {
-	const rel = path.join("node_modules", "@earendil-works", "pi-coding-agent");
-	let dir = process.cwd();
-	for (;;) {
-		const candidate = path.join(dir, rel);
-		if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
+	const dir = path.resolve("vendor", "pi-coding-agent");
+	if (!fs.existsSync(path.join(dir, "package.json"))) {
+		throw new Error(
+			`run node scripts/setup-types.mjs — missing vendored host SDK at ${dir}`,
+		);
 	}
-	throw new Error("could not locate @earendil-works/pi-coding-agent");
+	return dir;
 }
 
 function hostEditDiffSource(): string {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@gsd/pi-coding-agent";
 import { renderTurnSummaryMessage } from "../../clients/turn-summary-render.js";
 import { TurnSummaryCollector } from "../../clients/turn-summary.js";
 

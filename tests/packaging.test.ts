@@ -279,12 +279,36 @@ describe("host-provided packages are not vendored (#1926)", () => {
 			).toBe(true);
 		});
 
-		it(`${name} is a devDependency so builds and tests resolve it`, () => {
-			expect(
-				Object.hasOwn(devDeps, name),
-				`${name} must be a devDependency (types + local test resolution)`,
-			).toBe(true);
-		});
+		// Registry-resolvable names keep the devDependency assertion. The
+		// @gsd-scoped host packages (pi-tui, pi-coding-agent) are NOT
+		// installable from npm (gsd fork, MEM002), so their types come from the
+		// vendored fork under `vendor/<basename>/dist/index.d.ts` (materialized by
+		// scripts/setup-types.mjs, resolved via tsconfig paths). Assert that source
+		// exists instead of declaring a devDependency. Closes MEM008.
+		if (name.startsWith("@")) {
+			it(`${name} types resolve from the vendored fork`, () => {
+				const base = name.split("/").pop() ?? name;
+				const dts = path.join(
+					root,
+					"vendor",
+					base,
+					"dist",
+					"index.d.ts",
+				);
+				expect(
+					fs.existsSync(dts),
+					`${name} must be vendored: missing ${dts} — ` +
+						"run node scripts/setup-types.mjs",
+				).toBe(true);
+			});
+		} else {
+			it(`${name} is a devDependency so builds and tests resolve it`, () => {
+				expect(
+					Object.hasOwn(devDeps, name),
+					`${name} must be a devDependency (types + local test resolution)`,
+				).toBe(true);
+			});
+		}
 	}
 
 	it("native/wasm packages keep shipping with the extension", () => {

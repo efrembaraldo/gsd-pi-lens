@@ -20,8 +20,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The host `ExtensionAPI` interface lives in `extension-upstream-types.d.ts`
+// (~:822) in the vendored host SDK (`@gsd/pi-coding-agent`, materialized by
+// `scripts/setup-types.mjs`) — not in `types.d.ts`.
 const TYPES_FILE = path.resolve(
-	"node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts",
+	"vendor/pi-coding-agent/dist/core/extensions/extension-upstream-types.d.ts",
 );
 
 /** Strip `/* */ ` and `; // ...` comments so they cannot confuse brace counting. */
@@ -100,9 +103,11 @@ describe("withConsoleCaptureWindows member coverage, derived from the host's own
 			"registerMessageRenderer",
 			"registerShortcut",
 			"registerFlag",
-			"registerMarkdownTransformer",
-			"registerEntryRenderer",
 			"registerProvider",
+			// gsd host seams that replaced the legacy registerMarkdownTransformer /
+			// registerEntryRenderer (absent from the gsd API, gap MEM004):
+			"registerBeforeInstall",
+			"registerAfterInstall",
 		]) {
 			expect(members).toContain(known);
 		}

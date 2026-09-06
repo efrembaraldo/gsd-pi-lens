@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@gsd/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	__testing,

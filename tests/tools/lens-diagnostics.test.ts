@@ -12,7 +12,7 @@ import {
 } from "../../clients/diagnostic-dispositions.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@gsd/pi-coding-agent";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
 	scanProjectDiagnostics: vi.fn(),

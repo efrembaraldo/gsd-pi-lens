@@ -3,7 +3,7 @@
  * `agent_end` / `agent_settled` test fixtures that put fields on the EVENT
  * object the real pi host never puts there — #1681.
  *
- * Ground truth is the host source (earendil-works/pi), not this repo's own
+ * Ground truth is the vendored host source (gsd / `@gsd/pi-coding-agent`), not this repo's own
  * assumptions. Each of the five events pi-lens registers a handler for
  * (`index.ts`'s `EXPECTED_HOOKS`), by its full field list in
  * `packages/coding-agent/src/core/extensions/types.ts`:
