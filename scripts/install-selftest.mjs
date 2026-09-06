@@ -20,7 +20,7 @@
  * that pnpm/bun skip by default. It runs no model and needs no credentials.
  *
  * WHAT IT NO LONGER COVERS (#1926)
- * pi supplies `typebox` and `@earendil-works/pi-tui` from its own runtime, so
+ * pi supplies `typebox` and `@gsd/pi-tui` from its own runtime, so
  * they are optional peers and no install vendors them. This probe is not pi, so
  * those specifiers cannot resolve here, and `dist/index.js` throws on the FIRST
  * one it imports. A host-provided miss is therefore recorded as EXPECTED rather

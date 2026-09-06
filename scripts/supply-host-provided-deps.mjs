@@ -3,7 +3,7 @@
  * Print what a CI smoke check needs in order to load the compiled entry outside
  * pi. #1926.
  *
- * pi supplies `typebox` and `@earendil-works/pi-tui` from its own runtime, so
+ * pi supplies `typebox` and `@gsd/pi-tui` from its own runtime, so
  * pi-lens declares them as optional peers and no install vendors them. A CI step
  * that runs a bare `node dist/index.js` is not pi, so nothing resolves those
  * specifiers and the entry throws before it can prove anything. Such a step must

@@ -3,7 +3,7 @@ valid:
   - 'import { x } from "./localmod.js"'
   - 'import { y } from "package"'
   - 'import("./dynamic.js")'
-  - 'import { z } from "@earendil-works/pi-ai/compat"'
+  - 'import { z } from "@gsd/pi-ai/compat"'
   - 'import { w } from "lodash/debounce"'
   - 'import("@scope/pkg/sub")'
 invalid:

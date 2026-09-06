@@ -7,7 +7,9 @@
  * `Component` construction is verified practical from an extension: it is
  * just `@gsd/pi-tui`'s `Component` interface —
  * `{ render(width: number): string[] }` — no framework object graph needed.
- * `pi-tui` is already a devDependency (package.json `@gsd/pi-tui`).
+ * `pi-tui` is an optional peer (`@gsd/pi-tui`); types resolve through the
+ * vendored copy (`vendor/pi-tui`) and the runtime binding materializes via
+ * `scripts/setup-types.mjs`.
  */
 
 import type { Component } from "./deps/pi-tui.js";
@@ -17,10 +19,12 @@ import type {
 	MessageRenderOptions,
 } from "@gsd/pi-coding-agent";
 // Local structural Theme (see clients/tool-render.ts and clients/test-runner-
-// delivery.ts for the same pattern). The @gsd vendor class and the @earendil-
-// works devDep class are nominally distinct; tests/clients/turn-summary-render
-// .test.ts passes plain objects cast through `unknown` and we need both
-// vendor Theme instances and those plain objects to satisfy this signature.
+// delivery.ts for the same pattern). The pi-tui surface resolves types through
+// the vendored `@gsd/pi-tui` (seen via `vendor/` and materialized at runtime by
+// `scripts/setup-types.mjs`). We keep a local structural Theme so tests/
+// clients/turn-summary-render.test.ts can pass plain objects cast through
+// `unknown` alongside real vendor Theme instances and still satisfy this
+// signature.
 interface Theme {
 	fg(color: string, text: string): string;
 	bold(input: string): string;

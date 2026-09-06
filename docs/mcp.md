@@ -16,7 +16,7 @@
 ## What the codebase already gives us (the reuse surface)
 
 The host coupling is **thin**. Everything under `clients/` operates on
-`(filePath, content, cwd)` — the host SDK (`@earendil-works/pi-coding-agent`) is
+`(filePath, content, cwd)` — the host SDK (`@gsd/pi-coding-agent`) is
 imported **only** in `index.ts` (the pi adapter) and tests.
 
 Confirmed reuse points:

@@ -3,8 +3,8 @@
  * Assert a production install (`npm install --omit=dev`) did NOT vendor any
  * host-provided package into node_modules. #1926.
  *
- * pi provides `typebox`, `@earendil-works/pi-tui`, and
- * `@earendil-works/pi-coding-agent` from its own runtime. If one of them slips
+ * pi provides `typebox`, `@gsd/pi-tui`, and
+ * `@gsd/pi-coding-agent` from its own runtime. If one of them slips
  * back into `dependencies` — or loses `peerDependenciesMeta.optional`, which
  * makes npm install the peer anyway — the git install gets a private second
  * copy. Node then resolves the bare specifier to that copy and evaluates a whole

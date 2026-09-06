@@ -2,7 +2,7 @@
  * Pure helpers for `scripts/warm-loader-cache.mjs` (#1926).
  *
  * pi loads an extension through jiti (`createJiti(..., { moduleCache: false,
- * alias: … })` in `@earendil-works/pi-coding-agent`'s
+ * alias: … })` in `@gsd/pi-coding-agent`'s
  * `dist/core/extensions/loader.js`). jiti transforms the entry with Babel and
  * stores the result in a filesystem cache. pi-lens's `dist/index.js` is a ~4MB
  * esbuild bundle, so that transform costs seconds: the first session after a
@@ -180,7 +180,7 @@ export function verifyCacheEntry({ cacheDir, fileName, source, fsDeps }) {
  * jiti picks `<dir of the file that created the jiti instance>/node_modules/
  * .cache/jiti` when that `node_modules` exists, and `<tmpdir>/jiti` otherwise.
  * pi creates its instance from `dist/core/extensions/loader.js` inside the
- * installed `@earendil-works/pi-coding-agent`, which has no `node_modules`
+ * installed `@gsd/pi-coding-agent`, which has no `node_modules`
  * sibling, so pi always lands on the tmpdir branch. The warm therefore passes
  * `<tmpdir>/jiti` EXPLICITLY rather than letting jiti derive a directory from
  * this repo's layout: `scripts/` has no `node_modules` sibling today, but a
