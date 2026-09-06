@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * #1334 S6 — `@earendil-works/pi-coding-agent` is an OPTIONAL PEER + devDep,
+ * #1334 S6 — `@gsd/pi-coding-agent` is an OPTIONAL PEER (vendor-fork) dep,
  * never a runtime dependency. pi installs extensions with
  * `npm install --omit=dev` (peers omitted), so any *value* import of the host
  * SDK fails to resolve at user sites, and making it a real dependency drags a
@@ -18,11 +18,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * why pi-lens INLINES the SDK's runtime helpers (`clients/tool-event.ts`)
  * instead of importing `isToolCallEventType` / `isEditToolResult` and friends.
  * Modelled on the #402 `typescript`-runtime-free scan.
+ *
+ * The host SDK here is the GSD fork (`@gsd/pi-coding-agent`), a workspace
+ * package that is not registry-installable (MEM002). Its types reach the build
+ * through a vendor mechanism instead: `scripts/setup-types.mjs` copies
+ * `dist/` into `./vendor/pi-coding-agent/`, and `tsconfig.json` maps
+ * `@gsd/pi-coding-agent` onto that checkout. The type source the third test
+ * asserts on is that vendored `vendor/pi-coding-agent/dist/index.d.ts`.
  */
 const RUNTIME_DIRS = ["clients", "tools", "mcp", "commands"];
 const ROOT_FILES = ["index.ts", "i18n.ts"];
 
-const HOST_SDK = "@earendil-works/pi-coding-agent";
+const HOST_SDK = "@gsd/pi-coding-agent";
 
 /**
  * `import … from "<pkg>"` — the clause is captured for type-only checking.
@@ -85,7 +92,7 @@ function shippedSourceFiles(): string[] {
 }
 
 describe("host SDK is imported type-only, never at runtime (#1334 S6)", () => {
-	it("no shipped source file value-imports @earendil-works/pi-coding-agent", () => {
+	it("no shipped source file value-imports @gsd/pi-coding-agent", () => {
 		const offenders: string[] = [];
 		for (const file of shippedSourceFiles()) {
 			const src = readFileSync(file, "utf8");
@@ -138,6 +145,17 @@ describe("host SDK is imported type-only, never at runtime (#1334 S6)", () => {
 		};
 		expect(pkg.dependencies?.[HOST_SDK]).toBeUndefined();
 		expect(pkg.peerDependencies?.[HOST_SDK]).toBeDefined();
-		expect(pkg.devDependencies?.[HOST_SDK]).toBeDefined();
+		// The gsd fork is not registry-installable (MEM002), so it never appears
+		// as a devDependency. Runtime types reach the build from the vendored
+		// copy below — the fork's real type mechanism — not from a published
+		// package. Assert that source exists so the type-only scan actually has
+		// a `dist/index.d.ts` to protect (defect shape 7: a missing fork would
+		// otherwise make every path mapping silently vacuous).
+		expect(pkg.devDependencies?.[HOST_SDK]).toBeUndefined();
+		expect(
+			existsSync(
+				path.join(root, "vendor", "pi-coding-agent", "dist", "index.d.ts"),
+			),
+		).toBe(true);
 	});
 });

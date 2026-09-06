@@ -11,6 +11,8 @@ const root = path.resolve(
 // Third-party deps that must be imported ONLY through clients/deps/* accessors,
 // never bare elsewhere — so each external dep has a single resolution/degrade/
 // bundling seam (the #285/#335 work). Add new third-party deps here + an accessor.
+// `@gsd/pi-tui` is the GSD-scoped pi-tui fork (S02); `clients/deps/pi-tui.ts`
+// already imports it, so both assertions in this suite cover it.
 const CENTRALIZED = [
 	"minimatch",
 	"js-yaml",
@@ -18,7 +20,7 @@ const CENTRALIZED = [
 	"vscode-jsonrpc",
 	"web-tree-sitter",
 	"@ast-grep/napi",
-	"@earendil-works/pi-tui",
+	"@gsd/pi-tui",
 ];
 
 function* walkTs(dir: string): Generator<string> {

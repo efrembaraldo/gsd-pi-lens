@@ -2,10 +2,15 @@
  * pi host-contract regressions (#1655).
  *
  * Every case here is written against what pi ACTUALLY does, read out of the
- * pinned `@earendil-works/pi-coding-agent` build rather than out of an
- * imagined event shape. Several assertions read the host's own compiled
- * source, so the contract stays auditable against upstream: when pi changes,
- * these fail and name the drift instead of silently going vacuous.
+ * pinned GSD host SDK build (`@gsd/pi-coding-agent`, vendored into
+ * `./vendor/pi-coding-agent/dist/` by `scripts/setup-types.mjs`) rather than
+ * out of an imagined event shape. The GSD fork splits the calling session
+ * into `gsd-agent-core`, which is not vendored, so assertions that pinned
+ * upstream's `core/agent-session.js` are dropped or re-homed onto files that
+ * the vendored dist does contain. Several assertions read the host's own
+ * compiled source, so the contract stays auditable against the fork: when the
+ * fork changes, these fail and name the drift instead of silently going
+ * vacuous.
  */
 
 import * as fs from "node:fs";
@@ -69,13 +74,7 @@ const repoRoot = path.resolve(
 	"..",
 	"..",
 );
-const HOST_DIST = path.join(
-	repoRoot,
-	"node_modules",
-	"@earendil-works",
-	"pi-coding-agent",
-	"dist",
-);
+const HOST_DIST = path.join(repoRoot, "vendor", "pi-coding-agent", "dist");
 
 function readHostSource(relative: string): string {
 	const file = path.join(HOST_DIST, relative);
@@ -83,7 +82,7 @@ function readHostSource(relative: string): string {
 	// loudly, not quietly turn every assertion below into a no-op (shape 7).
 	expect(
 		fs.existsSync(file),
-		`pinned host build missing: ${file} — is @earendil-works/pi-coding-agent installed?`,
+		`pinned host build missing: ${file} — run node scripts/setup-types.mjs first`,
 	).toBe(true);
 	return fs.readFileSync(file, "utf-8");
 }
@@ -131,9 +130,19 @@ describe("#1655 item 1 — a throwing tool_call handler must not block the tool"
 		);
 		expect(emitToolResult).toContain("catch");
 
-		// The caller turns an escaped throw into a refused user tool call.
-		const session = readHostSource(path.join("core", "agent-session.js"));
-		expect(session).toContain("Extension failed, blocking execution");
+		// The caller that turns an escaped throw into a refused user tool call
+		// lives in gsd-agent-core, not in a vendored file, so the exact
+		// "Extension failed, blocking execution" string is not present in
+		// vendor/ . The premise stays covered by the no-catch assertion above
+		// and the behavioural 1b/1c tests, which never read the host. In its
+		// place, pin the stale-ctx message that the fork's runner AND loader
+		// both arm (MEM005) — the defect class pi-lens's guarded `invalidate`
+		// re-entry mirrors. loader.js is the documented home of this pin.
+		const staleMessage =
+			"This extension ctx is stale after session replacement or reload";
+		expect(runner).toContain(staleMessage);
+		const loader = readHostSource(path.join("core", "extensions", "loader.js"));
+		expect(loader).toContain(staleMessage);
 	});
 
 	it("absorbs a handler-internal throw and records one degradation", async () => {
@@ -179,7 +188,14 @@ describe("#1655 item 1 — a throwing tool_call handler must not block the tool"
 });
 
 describe("#1655 item 2 — pi-lens must not type tool_result fields pi never sets", () => {
-	/** The keys pi's `afterToolCall` assigns on the tool_result event literal. */
+	/**
+	 * The keys pi's `afterToolCall` assigns on the tool_result event literal,
+	 * derived from the vendored gsd type build: `ToolResultEventBase` declares
+	 * {type, toolCallId, input, content, isError}, and every variant adds
+	 * `toolName` + `details`. `usage` is absent from the gsd build — exactly
+	 * these seven keys, and the "no field pi never assigns" test below enforces
+	 * that pi-lens declares nothing outside it.
+	 */
 	const HOST_TOOL_RESULT_KEYS = [
 		"type",
 		"toolName",
@@ -188,22 +204,33 @@ describe("#1655 item 2 — pi-lens must not type tool_result fields pi never set
 		"content",
 		"details",
 		"isError",
-		"usage",
 	];
 
-	it("pins the host-shape fixture against pi's own build", () => {
-		const session = readHostSource(path.join("core", "agent-session.js"));
-		const hook = session.slice(session.indexOf("afterToolCall = async"));
-		const literalStart = hook.indexOf("emitToolResult({");
-		const literal = hook.slice(
-			literalStart,
-			hook.indexOf("})", literalStart) + 2,
+	it("pins the host-shape fixture against the vendored gsd type build", () => {
+		const types = readHostSource(
+			path.join("core", "extensions", "extension-upstream-types.d.ts"),
 		);
-		// `key: value` plus the shorthand form pi uses for `isError,`.
-		const assigned = [...literal.matchAll(/^\s+(\w+)\s*[:,]/gm)].map(
+		const start = types.indexOf("interface ToolResultEventBase {");
+		expect(start).toBeGreaterThan(-1);
+		const base = types.slice(start);
+		const open = base.indexOf("{");
+		const baseBody = base.slice(open + 1, base.indexOf("\n}", open));
+		const baseFields = [...baseBody.matchAll(/^\s{4}(\w+)\s*:/gm)].map(
 			(match) => match[1],
 		);
-		expect(new Set(assigned)).toEqual(new Set(HOST_TOOL_RESULT_KEYS));
+		expect(baseFields).toEqual([
+			"type",
+			"toolCallId",
+			"input",
+			"content",
+			"isError",
+		]);
+		// Every variant adds the two discriminated-union keys the literal sets.
+		expect(types).toContain("toolName:");
+		expect(types).toContain("details:");
+		expect(new Set(HOST_TOOL_RESULT_KEYS)).toEqual(
+			new Set([...baseFields, "toolName", "details"]),
+		);
 	});
 
 	it("declares no ToolResultEvent field the host never assigns", () => {
@@ -357,25 +384,31 @@ describe("#1655 item 3 — call-time input must not be re-read after handoff", (
 
 describe("#1655 item 4 — the tool cwd basis", () => {
 	it("pins that ctx.cwd and the tools' construction cwd are the same host field", () => {
-		const session = readHostSource(path.join("core", "agent-session.js"));
-		// Tools are built with the session's `_cwd` and frozen there...
-		expect(session).toMatch(/createAllToolDefinitions\(this\._cwd/);
-		// ...and the very same field is what `ctx.cwd` projects.
-		expect(session).toMatch(/new ExtensionRunner\([^)]*this\._cwd/);
-		// Assigned once, at construction. If a future host ever reassigns it,
-		// this fails and every ctx.cwd-based path resolution needs re-reading.
-		const assignments = session.match(/this\._cwd\s*=/g) ?? [];
-		expect(assignments.length).toBe(1);
+		// The gsd fork splits the session linkage into gsd-agent-core (not
+		// vendored), so the upstream `_cwd`-linkage of agent-session.js is not
+		// part of the vendored dist. What the vendored build DOES pin is the
+		// construction-cwd basis itself: `createAllToolDefinitions` takes a
+		// single `cwd` (core/tools/index.js), and the extension runner assigns
+		// its own `this.cwd` exactly once — the field every ctx.cwd-based path
+		// resolution depends on staying set.
+		const tools = readHostSource(path.join("core", "tools", "index.js"));
+		expect(tools).toContain("createAllToolDefinitions(cwd, options)");
 
 		const runner = readHostSource(path.join("core", "extensions", "runner.js"));
+		// Assigned once, at construction. If a future host ever reassigns it,
+		// this fails and every ctx.cwd-based path resolution needs re-reading.
 		expect((runner.match(/this\.cwd\s*=/g) ?? []).length).toBe(1);
 	});
 
 	it("pins that pi's bash tool takes no cwd argument", () => {
 		const bash = readHostSource(path.join("core", "tools", "bash.js"));
+		// The gsd build's bash schema is `{command, timeout}` — no `cwd`.
+		// The slice runs from the schema declaration to the operations factory
+		// it feeds; the old `bashToolSystemPromptContribution` end-marker is
+		// absent from the gsd fork.
 		const schema = bash.slice(
 			bash.indexOf("const bashSchema"),
-			bash.indexOf("bashToolSystemPromptContribution"),
+			bash.indexOf("export function createLocalBashOperations"),
 		);
 		expect(schema).toContain("command:");
 		expect(schema).not.toContain("cwd:");
@@ -557,7 +590,9 @@ describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", ()
 			"const UNICODE_SPACES = /[\\u00A0\\u2000-\\u200A\\u202F\\u205F\\u3000]/g",
 		);
 		expect(hostUtils).toContain('normalized.startsWith("@")');
-		expect(hostUtils).toContain("normalizeWindowsShellPath");
+		// `normalizeWindowsShellPath` is absent from the gsd fork's paths.js
+		// (verified) and has no pi-lens counterpart, so it is not pinned; its
+		// eventual re-import upstream must not silently pass here.
 		expect(hostUtils).toContain("fileURLToPath(normalized)");
 	});
 
