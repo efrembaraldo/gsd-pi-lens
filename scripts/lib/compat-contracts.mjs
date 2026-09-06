@@ -8,6 +8,16 @@
 // unit-testable without installing any package; the orchestration script
 // (compat-contracts.mjs) owns the npm install + file reads and just calls
 // these functions with file contents.
+//
+// The four SDK contracts (2a-2d) pin the @gsd re-scoped SDK. In the @gsd
+// world the SDK is a gsd-pi monorepo workspace (packages @gsd/pi-coding-agent
+// and @gsd/agent-core), not a standalone npm package — the orchestration
+// script reads the dist sources directly from a gsd-pi checkout, never via
+// `npm install @gsd/`. The resized-lifetime files:
+//   - 2a  @gsd/pi-coding-agent  packages/pi-coding-agent/dist/core/extensions/loader.js
+//   - 2b  @gsd/agent-core       packages/gsd-agent-core/dist/session/agent-session-extensions.js
+//   - 2c  @gsd/agent-core       packages/gsd-agent-core/dist/session/agent-session-events.js
+//   - 2d  @gsd/pi-coding-agent  packages/pi-coding-agent/dist/core/extensions/runner.js
 
 /**
  * Contract 1 (nicobailon/pi-subagents): the child-process env var names the
@@ -82,32 +92,44 @@ export function checkAvtcChildEnv(source) {
 }
 
 /**
- * Contract 2a (pi SDK): the extension loader keeps a process-global cache
- * named `extensionCache`. This is what makes an in-process
- * `bindExtensions()` (tintinweb-style) reuse pi-lens's own module-scope
- * singletons instead of a fresh isolated instance — the root cause #473
- * guards against. Verified against `core/extensions/loader.js`.
+ * Contract 2a (@gsd/pi-coding-agent): the extension loader keeps a
+ * module-scope cache (`const _moduleImporters = new Map()`), consulted
+ * through `.get()`/`.set()` per parent module URL. This is what makes an
+ * in-process `bindExtensions()` reuse pi-lens's own module-scope singletons
+ * instead of a fresh isolated instance — the root cause #473 guards against.
+ * Renamed from the pre-@gsd `extensionCache` but semantically unchanged.
+ * Verified against `packages/pi-coding-agent/dist/core/extensions/loader.js`.
  *
  * @param {string} source contents of the extension loader dist file
+ * @returns {{ pass: boolean, detail: string }}
  */
 export function checkSdkExtensionCache(source) {
-	const pass = /\bextensionCache\s*=\s*new Map\(\)/.test(source);
+	const hasCache = /_moduleImporters\s*=\s*new Map\(\)/.test(source);
+	const consultsGet = /_moduleImporters\.get\(/.test(source);
+	const consultsSet = /_moduleImporters\.set\(/.test(source);
+	const pass = hasCache && consultsGet && consultsSet;
 	return {
 		pass,
 		detail: pass
-			? "process-global `extensionCache = new Map()` present"
-			: "no process-global `extensionCache` Map found in the extension loader",
+			? "module-scope `_moduleImporters = new Map()` present and consulted via `.get()`/`.set()`"
+			: `no module-scope \`_moduleImporters\` Map cache consulted via \`.get()\`/\`.set()\` in the extension loader${
+				!hasCache
+					? " (no `_moduleImporters = new Map()` declaration found)"
+					: ""
+			}`,
 	};
 }
 
 /**
- * Contract 2b (pi SDK): `bindExtensions()` unconditionally emits a
- * `session_start`-typed event. Verified against `core/agent-session.js` —
- * looks for the emit call reaching a `session_start`-typed event object
- * (either inline `{ type: "session_start", ... }` or a field built from one
- * at construction, e.g. `_sessionStartEvent`) inside `bindExtensions`.
+ * Contract 2b (@gsd/agent-core): `bindExtensions()` unconditionally emits a
+ * `session_start`-typed event — `this.host._extensionRunner.emit(
+ * this.host._sessionStartEvent)`. This is why an in-process subagent bind
+ * re-triggers pi-lens's `session_start` handler at all. Fail-closed when the
+ * method is absent. Verified against `packages/gsd-agent-core/dist/session/
+ * agent-session-extensions.js`.
  *
- * @param {string} source contents of agent-session.js
+ * @param {string} source contents of agent-session-extensions.js
+ * @returns {{ pass: boolean, detail: string }}
  */
 export function checkSdkBindExtensionsEmitsSessionStart(source) {
 	const bindMatch = source.match(
@@ -117,56 +139,52 @@ export function checkSdkBindExtensionsEmitsSessionStart(source) {
 		return { pass: false, detail: "bindExtensions() method not found" };
 	}
 	const body = bindMatch[1];
-	const emitsSomething = /_extensionRunner\.emit\(/.test(body);
-	// The emitted value must resolve to a session_start-typed event — either
-	// inline or via a field that was constructed with `type: "session_start"`
-	// somewhere in the file (covers the `_sessionStartEvent` indirection).
-	const fieldName = body.match(/_extensionRunner\.emit\((this\.\w+)\)/)?.[1];
-	const inlineSessionStart =
-		/_extensionRunner\.emit\(\s*\{\s*type:\s*["']session_start["']/.test(body);
-	const fieldIsSessionStart =
-		fieldName !== undefined &&
-		new RegExp(
-			`${fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace("this.", "")}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*\\{\\s*type:\\s*["']session_start["']`,
-		).test(source);
-	const pass = emitsSomething && (inlineSessionStart || fieldIsSessionStart);
+	const pass =
+		/this\.host\._extensionRunner\.emit\(\s*this\.host\._sessionStartEvent\s*\)/.test(
+			body,
+		);
 	return {
 		pass,
 		detail: pass
-			? "bindExtensions() unconditionally emits a session_start-typed event"
-			: emitsSomething
-				? "bindExtensions() emits, but the emitted event could not be confirmed as session_start-typed"
-				: "bindExtensions() does not call _extensionRunner.emit(...)",
+			? "bindExtensions() unconditionally emits this.host._extensionRunner.emit(this.host._sessionStartEvent)"
+			: "bindExtensions() body does not emit this.host._extensionRunner.emit(this.host._sessionStartEvent)",
 	};
 }
 
 /**
- * Contract 2c (pi SDK): `invalidate(` is called on the extension runner from
- * the sequential session-replacement path (newSession/fork/switchSession/
- * reload's dispose route) — the mechanism `probeCtxActive()` in
- * session-lifecycle.ts relies on to distinguish a stale (replaced) ctx from
- * a live concurrent one. Verified against `core/agent-session.js`.
+ * Contract 2c (@gsd/agent-core): `this.host._extensionRunner.invalidate(`
+ * is called from the sequential session-replacement path (newSession/fork/
+ * switchSession/reload's dispose route) — the mechanism `probeCtxActive()`
+ * in session-lifecycle.ts relies on to distinguish a stale (replaced) ctx
+ * from a live concurrent one. Verified against `packages/gsd-agent-core/
+ * dist/session/agent-session-events.js`.
  *
- * @param {string} source contents of agent-session.js
+ * @param {string} source contents of agent-session-events.js
+ * @returns {{ pass: boolean, detail: string }}
  */
 export function checkSdkInvalidateCalled(source) {
-	const pass = /_extensionRunner\.invalidate\(/.test(source);
+	const pass = /this\.host\._extensionRunner\.invalidate\(/.test(source);
 	return {
 		pass,
 		detail: pass
-			? "_extensionRunner.invalidate(...) call site found"
-			: "no _extensionRunner.invalidate(...) call site found",
+			? "this.host._extensionRunner.invalidate(...) call site found"
+			: "no this.host._extensionRunner.invalidate(...) call site found",
 	};
 }
 
 /**
- * Contract 2d (pi SDK): the stale-ctx error message contains the exact
- * fragment `session-lifecycle.ts`'s `probeCtxActive()` matches on. If this
- * wording changes upstream, the probe silently degrades to "inconclusive"
- * (fail-safe = sequential-replacement, never a false concurrent-secondary),
- * but that's exactly the drift we want the nightly to flag loudly.
+ * Contract 2d (@gsd/pi-coding-agent): the stale-ctx error message contains
+ * the exact fragment `session-lifecycle.ts`'s `probeCtxActive()` matches on.
+ * If this wording changes upstream, the probe silently degrades to
+ * "inconclusive" (fail-safe = sequential-replacement, never a false
+ * concurrent-secondary), but that's exactly the drift we want the nightly to
+ * flag loudly. Verified against the `invalidate(...)` default-param message
+ * in `packages/pi-coding-agent/dist/core/extensions/runner.js` (the canonical
+ * source; the message also appears in agent-session-events.js's dispose call).
  *
- * @param {string} source contents of agent-session.js
+ * @param {string} source contents of runner.js (or any file carrying the
+ *   stale-ctx invalidate message)
+ * @returns {{ pass: boolean, detail: string }}
  */
 export function checkSdkStaleCtxMessage(source) {
 	const pass = source.includes("stale after session replacement");
@@ -185,6 +203,7 @@ export function checkSdkStaleCtxMessage(source) {
  * exists to protect against. Verified against `src/agent-runner.ts`.
  *
  * @param {string} source contents of agent-runner.ts
+ * @returns {{ pass: boolean, detail: string }}
  */
 export function checkTintinwebInProcessBind(source) {
 	const usesResourceLoader = /new DefaultResourceLoader\(/.test(source);
@@ -209,11 +228,19 @@ export function checkTintinwebInProcessBind(source) {
  * matches what the workflow step / alert-issue body prints, so a failure is
  * traceable straight back to a specific dependency + source file.
  *
+ * The four SDK inputs map to files read from a gsd-pi checkout:
+ *   - sdkLoaderSource                 .../pi-coding-agent/dist/core/extensions/loader.js
+ *   - sdkRunnerSource                 .../pi-coding-agent/dist/core/extensions/runner.js
+ *   - sdkAgentSessionExtensionsSource .../gsd-agent-core/dist/session/agent-session-extensions.js
+ *   - sdkAgentSessionEventsSource     .../gsd-agent-core/dist/session/agent-session-events.js
+ *
  * @param {{
  *   nicobailonPiArgsSource: string,
  *   avtcProcessRunnerSource: string,
  *   sdkLoaderSource: string,
- *   sdkAgentSessionSource: string,
+ *   sdkRunnerSource: string,
+ *   sdkAgentSessionExtensionsSource: string,
+ *   sdkAgentSessionEventsSource: string,
  *   tintinwebAgentRunnerSource: string,
  * }} inputs
  */
@@ -235,30 +262,32 @@ export function runAllContractChecks(inputs) {
 		},
 		{
 			id: "sdk.extension-cache",
-			package: "@earendil-works/pi-coding-agent",
-			description: "process-global extensionCache Map in the extension loader",
+			package: "@gsd/pi-coding-agent",
+			description: "module-scope _moduleImporters Map in the extension loader",
 			...checkSdkExtensionCache(inputs.sdkLoaderSource),
 		},
 		{
 			id: "sdk.bind-extensions-session-start",
-			package: "@earendil-works/pi-coding-agent",
+			package: "@gsd/agent-core",
 			description:
-				"bindExtensions() unconditionally emits a session_start-typed event",
-			...checkSdkBindExtensionsEmitsSessionStart(inputs.sdkAgentSessionSource),
+				"bindExtensions() unconditionally emits this.host._sessionStartEvent",
+			...checkSdkBindExtensionsEmitsSessionStart(
+				inputs.sdkAgentSessionExtensionsSource,
+			),
 		},
 		{
 			id: "sdk.invalidate-called",
-			package: "@earendil-works/pi-coding-agent",
+			package: "@gsd/agent-core",
 			description:
 				"invalidate() called from the sequential session-replacement path",
-			...checkSdkInvalidateCalled(inputs.sdkAgentSessionSource),
+			...checkSdkInvalidateCalled(inputs.sdkAgentSessionEventsSource),
 		},
 		{
 			id: "sdk.stale-ctx-message",
-			package: "@earendil-works/pi-coding-agent",
+			package: "@gsd/pi-coding-agent",
 			description:
 				'stale-ctx error message contains "stale after session replacement"',
-			...checkSdkStaleCtxMessage(inputs.sdkAgentSessionSource),
+			...checkSdkStaleCtxMessage(inputs.sdkRunnerSource),
 		},
 		{
 			id: "tintinweb.in-process-bind",

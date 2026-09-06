@@ -27,7 +27,9 @@ export interface ContractCheckInputs {
 	nicobailonPiArgsSource: string;
 	avtcProcessRunnerSource: string;
 	sdkLoaderSource: string;
-	sdkAgentSessionSource: string;
+	sdkRunnerSource: string;
+	sdkAgentSessionExtensionsSource: string;
+	sdkAgentSessionEventsSource: string;
 	tintinwebAgentRunnerSource: string;
 }
 

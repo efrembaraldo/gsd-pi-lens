@@ -8,29 +8,41 @@ across their releases. This doc records exactly what we depend on, where, and
 how the nightly `compat-smoke` workflow (`.github/workflows/compat-smoke.yml`)
 verifies it. See issue #476 for the design rationale.
 
+In the @gsd world the SDK (`@gsd/pi-coding-agent` + `@gsd/agent-core`) is a
+gsd-pi monorepo workspace, not a published npm package — `npm install @gsd/`
+returns 404. Its contracts are therefore read from a built gsd-pi checkout
+(resolved through the same candidate list as `scripts/setup-types.mjs`:
+`GSD_PI_CHECKOUT`, the canonical local dev path, `/tmp/gsd-pi`), never from an
+npm install. Only the three third-party extensions are npm-installed.
+
 ## Pinned contracts
 
-Versions below are what was installed and verified while building this smoke
-(2026-07). Re-verify against current versions any time the nightly alerts —
-`scripts/compat-contracts.mjs` prints the versions it actually installed on
-every run.
+Versions below are what is installed/read while running the smoke.
+Re-verify against current versions any time the nightly alerts —
+`scripts/compat-contracts.mjs` prints the versions it actually verified on
+every run. `pi-subagents` is **pinned** to 0.34.0: its newer releases dropped
+`PI_SUBAGENT_RUN_ID` / `PI_SUBAGENT_CHILD_AGENT`, so the frozen contract 1
+verifies against the baseline that still carries the full shape (see
+"What to do when the nightly alerts" for the re-derivation follow-up).
 
 | # | Contract | Depended on by | Third-party file (as of the versions below) | Verified against |
 |---|----------|-----------------|-------------------------------------------------|-------------------|
-| 1 | `PI_SUBAGENT_CHILD` is set to the literal string `"1"` in every spawned child's env; `PI_SUBAGENT_RUN_ID` / `PI_SUBAGENT_CHILD_AGENT` are set alongside it for best-effort identity. | `clients/subagent-mode.ts` (`isSubagentSession()`, `getSubagentIdentity()`) | `pi-subagents@0.34.0` — `src/runs/shared/pi-args.ts` (`SUBAGENT_CHILD_ENV`/`SUBAGENT_RUN_ID_ENV`/`SUBAGENT_CHILD_AGENT_ENV` consts + the `env[SUBAGENT_CHILD_ENV] = "1"` assignment) | `checkNicobailonChildEnv` |
-| 1b | avtc-pi-subagent sets `PI_SUBAGENT_CHILD_AGENT` + `PI_SUBAGENT_PARENT_PID` (never `PI_SUBAGENT_CHILD`) on the per-spawn subagent env; `isSubagentSession()` treats the PAIR (both non-empty) as an additional subagent signal (#507). | `clients/subagent-mode.ts` (`isSubagentSession()`, `getSubagentIdentity()`) | `avtc-pi-subagent@1.0.3` — `src/process-runner.ts` (`subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name` + `subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid)`) | `checkAvtcChildEnv` |
-| 2a | The pi SDK's extension loader keeps a **process-global** cache (`extensionCache = new Map()`). This is what makes an in-process `bindExtensions()` reuse pi-lens's own module-scope singletons instead of a fresh isolated instance. | `clients/session-lifecycle.ts` (the whole premise of the concurrent-session guard) | `@earendil-works/pi-coding-agent@0.80.6` — `dist/core/extensions/loader.js` | `checkSdkExtensionCache` |
-| 2b | `AgentSession.bindExtensions()` **unconditionally** emits a `session_start`-typed event (`this._extensionRunner.emit(this._sessionStartEvent)`). | Same as 2a — this is why an in-process subagent bind re-triggers pi-lens's `session_start` handler at all. | `@earendil-works/pi-coding-agent@0.80.6` — `dist/core/agent-session.js` (`bindExtensions()`, ~line 1717) | `checkSdkBindExtensionsEmitsSessionStart` |
-| 2c | `_extensionRunner.invalidate(...)` is called from the sequential session-replacement path (`newSession`/`fork`/`switchSession`/`reload`'s dispose route), never from a concurrent sibling bind. | `clients/session-lifecycle.ts` (`probeCtxActive()` — the asymmetry this whole guard relies on) | `@earendil-works/pi-coding-agent@0.80.6` — `dist/core/agent-session.js` (~line 551) | `checkSdkInvalidateCalled` |
-| 2d | The stale-ctx error thrown by an invalidated context's accessors contains the literal fragment `"stale after session replacement"`. | `clients/session-lifecycle.ts` (`probeCtxActive()` matches on this exact fragment) | `@earendil-works/pi-coding-agent@0.80.6` — `dist/core/agent-session.js` (the `invalidate(...)` message string) | `checkSdkStaleCtxMessage` |
-| 3 | tintinweb's subagent runner constructs a `DefaultResourceLoader` and calls `session.bindExtensions(...)` on a freshly created `AgentSession`, **inside the same Node process** as the parent pi session. | `clients/session-lifecycle.ts` (the concurrent-secondary case #473 exists to protect against) | `@tintinweb/pi-subagents@0.13.0` — `src/agent-runner.ts` (`new DefaultResourceLoader({...})` ~line 433, `await session.bindExtensions({...})` ~line 597) | `checkTintinwebInProcessBind` |
+| 1 | `PI_SUBAGENT_CHILD` is set to the literal string `"1"` in every spawned child's env; `PI_SUBAGENT_RUN_ID` / `PI_SUBAGENT_CHILD_AGENT` are set alongside it for best-effort identity. | `clients/subagent-mode.ts` (`isSubagentSession()`, `getSubagentIdentity()`) | `pi-subagents@0.34.0` (pinned) — `src/runs/shared/pi-args.ts` (`SUBAGENT_CHILD_ENV`/`SUBAGENT_RUN_ID_ENV`/`SUBAGENT_CHILD_AGENT_ENV` consts + the `env[SUBAGENT_CHILD_ENV] = "1"` assignment) | `checkNicobailonChildEnv` |
+| 1b | avtc-pi-subagent sets `PI_SUBAGENT_CHILD_AGENT` + `PI_SUBAGENT_PARENT_PID` (never `PI_SUBAGENT_CHILD`) on the per-spawn subagent env; `isSubagentSession()` treats the PAIR (both non-empty) as an additional subagent signal (#507). | `clients/subagent-mode.ts` (`isSubagentSession()`, `getSubagentIdentity()`) | `avtc-pi-subagent@1.0.8` — `src/process-runner.ts` (`subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name` + `subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid)`) | `checkAvtcChildEnv` |
+| 2a | The pi SDK's extension loader keeps a module-scope cache (`_moduleImporters = new Map()`, consulted via `.get()`/`.set()` per parent module URL — the renamed `extensionCache`). This is what makes an in-process `bindExtensions()` reuse pi-lens's own module-scope singletons instead of a fresh isolated instance. | `clients/session-lifecycle.ts` (the whole premise of the concurrent-session guard) | `@gsd/pi-coding-agent@1.17.0` — `packages/pi-coding-agent/dist/core/extensions/loader.js` | `checkSdkExtensionCache` |
+| 2b | `AgentSession.bindExtensions()` **unconditionally** emits a `session_start`-typed event (`this.host._extensionRunner.emit(this.host._sessionStartEvent)`). | Same as 2a — this is why an in-process subagent bind re-triggers pi-lens's `session_start` handler at all. | `@gsd/agent-core@1.17.0` — `packages/gsd-agent-core/dist/session/agent-session-extensions.js` (`bindExtensions()`) | `checkSdkBindExtensionsEmitsSessionStart` |
+| 2c | `this.host._extensionRunner.invalidate(...)` is called from the sequential session-replacement path (`newSession`/`fork`/`switchSession`/`reload`'s dispose route), never from a concurrent sibling bind. | `clients/session-lifecycle.ts` (`probeCtxActive()` — the asymmetry this whole guard relies on) | `@gsd/agent-core@1.17.0` — `packages/gsd-agent-core/dist/session/agent-session-events.js` (dispose route) | `checkSdkInvalidateCalled` |
+| 2d | The stale-ctx error thrown by an invalidated context's accessors contains the literal fragment `"stale after session replacement"`. | `clients/session-lifecycle.ts` (`probeCtxActive()` matches on this exact fragment) | `@gsd/pi-coding-agent@1.17.0` — `packages/pi-coding-agent/dist/core/extensions/runner.js` (the `invalidate(...)` default-param message, the canonical source of the fragment) | `checkSdkStaleCtxMessage` |
+| 3 | tintinweb's subagent runner constructs a `DefaultResourceLoader` and calls `session.bindExtensions(...)` on a freshly created `AgentSession`, **inside the same Node process** as the parent pi session. | `clients/session-lifecycle.ts` (the concurrent-secondary case #473 exists to protect against) | `@tintinweb/pi-subagents@0.19.0` — `src/agent-runner.ts` (`new DefaultResourceLoader({...})`, `await session.bindExtensions({...})`) | `checkTintinwebInProcessBind` |
 
 All seven checks live in `scripts/lib/compat-contracts.mjs` as pure,
 unit-tested regex matchers against RESILIENT semantic shapes (never a line
 number — those drift on every third-party release). `scripts/compat-contracts.mjs`
-is the orchestration script: it `npm install`s the four packages (SDK,
-`pi-subagents`, `avtc-pi-subagent`, `@tintinweb/pi-subagents`) into a scratch
-directory, reads the specific files above, and runs every check.
+is the orchestration script: it npm-installs the three third-party extensions
+(`pi-subagents`, `avtc-pi-subagent`, `@tintinweb/pi-subagents` — the @gsd SDK
+is never installed) into a scratch directory, reads the four SDK dist sources
+directly from a built gsd-pi checkout, and runs every check. A missing checkout
+or SDK dist file is a fail-loud infrastructure error (exit 2).
 
 ## The three env levers
 
@@ -45,7 +57,7 @@ directory, reads the specific files above, and runs every check.
 ### Layer A — pinned-contract verification (`scripts/compat-contracts.mjs`)
 
 No `pi` process, no LLM turn. Installs the real packages (table above) and
-mechanically re-checks all six contracts against the installed source. Exit
+mechanically re-checks all seven contracts against the installed source. Exit
 0 = all pass; exit 1 = at least one contract check failed (real drift); exit
 2 = infrastructure failure (npm install of the third-party packages itself
 failed — usually a registry/network issue, not a contract regression).

@@ -4,8 +4,18 @@
  *
  * Each matcher is exercised against a MINIMAL synthetic snippet that carries
  * just the semantic shape it looks for (never real vendor source — that's
- * what scripts/compat-contracts.mjs verifies live against an npm install),
- * plus a mutated/absent variant to confirm the matcher actually fails closed.
+ * what scripts/compat-contracts.mjs verifies live against either a real npm
+ * install, for the third-party extensions, or the gsd-pi checkout, for the
+ * @gsd SDK packages), plus a mutated/absent variant to confirm the matcher
+ * actually fails closed.
+ *
+ * The four SDK contracts (2a-2d) now pin the @gsd re-scoped SDK. They read
+ * from a gsd-pi checkout (the SDK is a monorepo workspace, absent from the
+ * npm registry), so the fixtures mirror the real dist sources:
+ *   - 2a  loader.js  (@gsd/pi-coding-agent)         `_moduleImporters` cache
+ *   - 2b  agent-session-extensions.js (@gsd/agent-core) bindExtensions emit
+ *   - 2c  agent-session-events.js (@gsd/agent-core)  invalidate call site
+ *   - 2d  runner.js  (@gsd/pi-coding-agent)          stale-ctx message
  */
 
 import { describe, expect, it } from "vitest";
@@ -105,54 +115,96 @@ subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
 });
 
 describe("checkSdkExtensionCache", () => {
-	it("passes when the process-global cache Map exists", () => {
-		const result = checkSdkExtensionCache("const extensionCache = new Map();");
+	// 2a — @gsd/pi-coding-agent dist/core/extensions/loader.js: the
+	// module-scope `_moduleImporters` Map cache consulted via get/set. This
+	// (formely `extensionCache`) is what makes an in-process bindExtensions()
+	// reuse pi-lens's own module-scope singletons instead of a fresh isolated
+	// instance.
+	const GOOD = `
+const _moduleImporters = new Map();
+function getModuleImporter(parentModuleUrl) {
+    let importer = _moduleImporters.get(parentModuleUrl);
+    if (!importer) {
+        importer = createJiti(parentModuleUrl, { moduleCache: true });
+        _moduleImporters.set(parentModuleUrl, importer);
+    }
+    return importer;
+}
+`;
+
+	it("passes when the module-scope Map cache exists AND is consulted via get/set", () => {
+		const result = checkSdkExtensionCache(GOOD);
 		expect(result.pass).toBe(true);
 	});
 
 	it("fails when the cache is a plain object, not a Map", () => {
-		const result = checkSdkExtensionCache("const extensionCache = {};");
+		const result = checkSdkExtensionCache(
+			"const _moduleImporters = {};\n_moduleImporters.get(k);\n_moduleImporters.set(k, v);",
+		);
 		expect(result.pass).toBe(false);
 	});
 
-	it("fails when there is no extensionCache at all", () => {
+	it("fails when the Map is declared but never consulted via get", () => {
+		const noGet = GOOD.replace("_moduleImporters.get(parentModuleUrl);", "");
+		const result = checkSdkExtensionCache(noGet);
+		expect(result.pass).toBe(false);
+	});
+
+	it("fails when the Map is declared but never consulted via set", () => {
+		const noSet = GOOD.replace(
+			"_moduleImporters.set(parentModuleUrl, importer);",
+			"",
+		);
+		const result = checkSdkExtensionCache(noSet);
+		expect(result.pass).toBe(false);
+	});
+
+	it("fails when there is no cache Map at all", () => {
 		const result = checkSdkExtensionCache("const somethingElse = new Map();");
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkBindExtensionsEmitsSessionStart", () => {
-	it("passes with an inline session_start emit inside bindExtensions", () => {
-		const source = `
+	// 2b — @gsd/agent-core dist/session/agent-session-extensions.js: the
+	// real bindExtensions() body emits `this.host._sessionStartEvent`.
+	const GOOD = `
     async bindExtensions(bindings) {
-        this._applyExtensionBindings(this._extensionRunner);
-        await this._extensionRunner.emit({ type: "session_start", reason: "startup" });
+        this.applyExtensionBindings(this.host._extensionRunner);
+        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
     }
 `;
-		const result = checkSdkBindExtensionsEmitsSessionStart(source);
+
+	it("passes when bindExtensions() unconditionally emits this.host._sessionStartEvent", () => {
+		const result = checkSdkBindExtensionsEmitsSessionStart(GOOD);
 		expect(result.pass).toBe(true);
 	});
 
-	it("passes with the field-indirection form (_sessionStartEvent)", () => {
-		const source = `
-class AgentSession {
-    constructor(config) {
-        this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
-    }
+	it("passes with extra statements between the emit and the closing brace", () => {
+		const withTail = `
     async bindExtensions(bindings) {
-        this._applyExtensionBindings(this._extensionRunner);
-        await this._extensionRunner.emit(this._sessionStartEvent);
+        this.applyExtensionBindings(this.host._extensionRunner);
+        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
+        await this.extendResourcesFromExtensions("startup");
     }
-}
 `;
-		const result = checkSdkBindExtensionsEmitsSessionStart(source);
+		const result = checkSdkBindExtensionsEmitsSessionStart(withTail);
 		expect(result.pass).toBe(true);
+	});
+
+	it("fails when bindExtensions exists but emits a different event", () => {
+		const otherEmit = GOOD.replace(
+			"this.host._extensionRunner.emit(this.host._sessionStartEvent)",
+			"this.host._extensionRunner.emit({ type: \"other_event\" })",
+		);
+		const result = checkSdkBindExtensionsEmitsSessionStart(otherEmit);
+		expect(result.pass).toBe(false);
 	});
 
 	it("fails when bindExtensions exists but never emits", () => {
 		const source = `
     async bindExtensions(bindings) {
-        this._applyExtensionBindings(this._extensionRunner);
+        this.applyExtensionBindings(this.host._extensionRunner);
     }
 `;
 		const result = checkSdkBindExtensionsEmitsSessionStart(source);
@@ -165,37 +217,46 @@ class AgentSession {
 		expect(result.detail).toContain("not found");
 	});
 
-	it("fails when the emitted event is not session_start-typed", () => {
-		const source = `
-    async bindExtensions(bindings) {
-        await this._extensionRunner.emit({ type: "other_event" });
-    }
-`;
-		const result = checkSdkBindExtensionsEmitsSessionStart(source);
+	it("fails when the emit uses the legacy this._ (non-host) receiver", () => {
+		const legacyReceiver = GOOD.replaceAll("this.host.", "this.");
+		const result = checkSdkBindExtensionsEmitsSessionStart(legacyReceiver);
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkInvalidateCalled", () => {
-	it("passes when invalidate() is called on the extension runner", () => {
+	// 2c — @gsd/agent-core dist/session/agent-session-events.js: the dispose
+	// route calls this.host._extensionRunner.invalidate(...), which is what
+	// probeCtxActive() in session-lifecycle.ts depends on.
+	it("passes when invalidate() is called on the host extension runner", () => {
 		const result = checkSdkInvalidateCalled(
-			'this._extensionRunner.invalidate("stale after session replacement");',
+			'this.host._extensionRunner.invalidate("This extension ctx is stale after session replacement");',
 		);
 		expect(result.pass).toBe(true);
 	});
 
+	it("fails when invalidate uses the legacy this._ (non-host) receiver", () => {
+		const result = checkSdkInvalidateCalled(
+			'this._extensionRunner.invalidate("stale after session replacement");',
+		);
+		expect(result.pass).toBe(false);
+	});
+
 	it("fails when invalidate is never called", () => {
 		const result = checkSdkInvalidateCalled(
-			"this._extensionRunner.emit(event);",
+			"this.host._extensionRunner.emit(event);",
 		);
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkStaleCtxMessage", () => {
+	// 2d — @gsd/pi-coding-agent dist/core/extensions/runner.js: the default
+	// param of invalidate() (canonical source) carries the exact fragment
+	// probeCtxActive() matches on.
 	it("passes when the exact fragment is present", () => {
 		const result = checkSdkStaleCtxMessage(
-			'invalidate("This extension ctx is stale after session replacement or reload.");',
+			'invalidate(message = "This extension ctx is stale after session replacement or reload.") {',
 		);
 		expect(result.pass).toBe(true);
 	});
@@ -236,6 +297,36 @@ await session.bindExtensions({ onError });
 	});
 });
 
+// Shared SDK fixtures used by the runAllContractChecks aggregate tests.
+const SDK_LOADER_GOOD = `
+const _moduleImporters = new Map();
+function getModuleImporter(parentModuleUrl) {
+    let importer = _moduleImporters.get(parentModuleUrl);
+    if (!importer) {
+        importer = createJiti(parentModuleUrl, { moduleCache: true });
+        _moduleImporters.set(parentModuleUrl, importer);
+    }
+    return importer;
+}
+`;
+
+const SDK_RUNNER_GOOD = `invalidate(message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession().") { ... }`;
+
+const SDK_EXTENSIONS_GOOD = `
+    async bindExtensions(bindings) {
+        this.applyExtensionBindings(this.host._extensionRunner);
+        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
+    }
+`;
+
+const SDK_EVENTS_GOOD = `
+class AgentSessionEvents {
+    dispose() {
+        this.host._extensionRunner.invalidate("This extension ctx is stale after session replacement");
+    }
+}
+`;
+
 describe("runAllContractChecks", () => {
 	it("aggregates all seven checks and reports allPass=false on any single failure", () => {
 		const inputs = {
@@ -244,13 +335,10 @@ describe("runAllContractChecks", () => {
 if (agent.name) subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name;
 subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
 `,
-			sdkLoaderSource: "const extensionCache = new Map();",
-			sdkAgentSessionSource: `
-    async bindExtensions(bindings) {
-        await this._extensionRunner.emit({ type: "session_start" });
-    }
-    invalidate() { this._extensionRunner.invalidate("stale after session replacement"); }
-`,
+			sdkLoaderSource: SDK_LOADER_GOOD,
+			sdkRunnerSource: SDK_RUNNER_GOOD,
+			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
+			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
 			tintinwebAgentRunnerSource: `
 const loader = new DefaultResourceLoader({ cwd });
 await session.bindExtensions({});
@@ -275,13 +363,10 @@ env[SUBAGENT_CHILD_ENV] = "1";
 if (agent.name) subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name;
 subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
 `,
-			sdkLoaderSource: "const extensionCache = new Map();",
-			sdkAgentSessionSource: `
-    async bindExtensions(bindings) {
-        await this._extensionRunner.emit({ type: "session_start" });
-    }
-    invalidate() { this._extensionRunner.invalidate("stale after session replacement"); }
-`,
+			sdkLoaderSource: SDK_LOADER_GOOD,
+			sdkRunnerSource: SDK_RUNNER_GOOD,
+			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
+			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
 			tintinwebAgentRunnerSource: `
 const loader = new DefaultResourceLoader({ cwd });
 await session.bindExtensions({});
@@ -289,5 +374,27 @@ await session.bindExtensions({});
 		};
 		const { allPass } = runAllContractChecks(inputs);
 		expect(allPass).toBe(true);
+	});
+
+	it("exposes the re-scoped @gsd package names on the SDK result rows", () => {
+		const { results } = runAllContractChecks({
+			nicobailonPiArgsSource: "export const X = 1;",
+			avtcProcessRunnerSource: "no",
+			sdkLoaderSource: SDK_LOADER_GOOD,
+			sdkRunnerSource: SDK_RUNNER_GOOD,
+			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
+			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
+			tintinwebAgentRunnerSource: "no",
+		});
+		const sdkRows = results.filter((r) => r.id.startsWith("sdk."));
+		const byPackage = Object.fromEntries(
+			sdkRows.map((r) => [r.id, r.package]),
+		);
+		expect(byPackage["sdk.extension-cache"]).toBe("@gsd/pi-coding-agent");
+		expect(byPackage["sdk.bind-extensions-session-start"]).toBe(
+			"@gsd/agent-core",
+		);
+		expect(byPackage["sdk.invalidate-called"]).toBe("@gsd/agent-core");
+		expect(byPackage["sdk.stale-ctx-message"]).toBe("@gsd/pi-coding-agent");
 	});
 });
