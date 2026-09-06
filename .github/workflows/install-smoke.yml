@@ -237,6 +237,13 @@ jobs:
   # the pnpm symlink store (#285) end to end. Installs the PUBLISHED pi-lens (what
   # users get) — guards the shipped artifact; the `smoke` job guards current code.
   pi-load:
+    # DISABLED via `if: false`. This job installs the HOST the way users do
+    # (npm/pnpm/bun global + the curl installer), but in the @gsd world there is
+    # no registry-installable host (no published `pi` bin, workspace:* deps). The
+    # functional retarget of these host-install jobs is owned by CI milestone
+    # M002. The `smoke` job (guards current code, no host dependency) stays
+    # active — see the workflow header for the job split.
+    if: false
     name: pi-load · ${{ matrix.os }} · ${{ matrix.pi_install }}
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
@@ -299,7 +306,10 @@ jobs:
           # Pinned deliberately (bump by hand when a newer pi release is
           # verified — see #731): keeps a token-bearing CI job from pulling an
           # arbitrary newest-on-registry version of a third-party package.
-          PKG="@earendil-works/pi-coding-agent@0.80.10"
+          # Host-install removed: the @gsd host is not registry-installable (no
+          # published `pi` bin, workspace:* deps). This job is disabled via
+          # `if: false` (functional retarget owned by M002) — if ever
+          # re-enabled, restore the real host install mechanism here.
           case "${{ matrix.pi_install }}" in
             npm-global)
               # pi-lens-ignore: zizmor:adhoc-packages
@@ -379,6 +389,11 @@ jobs:
   # mise.run curl + npm backend are external-dep-heavy, and a green cell is not proof
   # of #285 coverage.
   mise-repro:
+    # DISABLED via `if: false`. This job installs the host through mise's npm
+    # backend / a registry host package, both structurally absent in the @gsd
+    # world (no published `pi` bin, workspace:* deps). The functional retarget
+    # of these host-install jobs is owned by CI milestone M002.
+    if: false
     name: mise repro (#285) · ${{ matrix.os }} · ${{ matrix.pi_via }}
     needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
@@ -477,7 +492,10 @@ jobs:
           set -uxo pipefail
           # Pinned deliberately (bump by hand when a newer pi release is
           # verified — see #731).
-          PKG="@earendil-works/pi-coding-agent@0.80.10"
+          # Host-install removed: the @gsd host is not registry-installable (no
+          # published `pi` bin, workspace:* deps). This job is disabled via
+          # `if: false` (functional retarget owned by M002) — if ever
+          # re-enabled, restore the real host install mechanism here.
           case "${{ matrix.pi_via }}" in
             mise-node)
               # node from mise; pi as a plain npm-global under that node.
