@@ -38,7 +38,7 @@
  * defined for its own future consumers has nothing to trip here.
  *
  * Feature detection: `pi.events.on(channel, handler)` per
- * node_modules/@earendil-works/pi-coding-agent/dist/core/event-bus.d.ts;
+ * node_modules/@gsd/pi-coding-agent/dist/core/event-bus.d.ts;
  * `pi.events` itself is typed at
  * dist/core/extensions/types.d.ts:977. Both are guarded with optional
  * chaining / try-catch so an older host that lacks `pi.events` (or a future

@@ -9,7 +9,7 @@
  * question on the user's behalf.
  *
  * Verified against the pinned host types
- * (`@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts`):
+ * (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`):
  *   - `ExtensionContext.isProjectTrusted(): boolean`  (line 234)
  *   - `ProjectTrustEventDecision = "yes" | "no" | "undecided"`  (line 390)
  *

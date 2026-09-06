@@ -1,4 +1,4 @@
-import type { EditToolInput } from "@earendil-works/pi-coding-agent";
+import type { EditToolInput } from "@gsd/pi-coding-agent";
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { BoundedFifoMap } from "./bounded-cache.js";

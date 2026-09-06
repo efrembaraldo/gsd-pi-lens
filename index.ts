@@ -29,7 +29,71 @@ import {
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// Local structural ExtensionAPI (T2 pattern continuation, see clients/
+// test-runner-delivery.ts). The @gsd vendor ExtensionAPI adds
+// registerBeforeInstall/After/Remove + scopedModels + isProjectTrusted that
+// the devDep ExtensionAPI used by tests/ via the legacy scope
+// NOT have. This interface lists ONLY the methods this module uses; both
+// vendor classes have more methods than listed here, so both satisfy this
+// structural type. Tests/ continue to construct the legacy-scope ExtensionAPI
+// mocks and pass them through this boundary unchanged; production code
+// retains direct typed access without per-call casts.
+//
+// `registerTool` deliberately takes `tool: any` instead of an imported
+// ToolDefinition type because @gsd's ToolDefinition.execute(ctx:
+// ExtensionContext) requires ExtensionContext.ui.setGsdProgress (a @gsd fork
+// addition), while the legacy-scope ToolDefinition has no such constraint.
+// Accepting the parameter as `any` lets the test mock's ToolDefinition (any
+// TParams/TDetails/TState generic) and the production-side @gsd ToolDefinition
+// both satisfy this surface; the internal tool dispatch path casts locally
+// where it needs the typed shape (see clients/runtime-tool-call.ts).
+interface ExtensionAPI {
+	registerTool: (tool: any) => void;
+	registerCommand: (
+		name: string,
+		options: {
+			description: string;
+			handler: (args: string, ctx: any) => Promise<void>;
+		},
+	) => void;
+	registerFlag: (
+		name: string,
+		options: {
+			description?: string;
+			type: "boolean" | "string";
+			default?: boolean | string;
+		},
+	) => void;
+	getFlag: (name: string) => boolean | string | undefined;
+	registerMessageRenderer: (
+		customType: string,
+		renderer: any,
+	) => void;
+	on(event: "resources_discover", listener: (...args: any[]) => any): void;
+	on(event: "session_start", listener: (...args: any[]) => any): void;
+	on(event: "tool_call", listener: (...args: any[]) => any): void;
+	on(event: "turn_start", listener: (...args: any[]) => any): void;
+	on(event: "agent_end", listener: (...args: any[]) => any): void;
+	on(event: "turn_end", listener: (...args: any[]) => any): void;
+	events: {
+		on: (channel: string, handler: (data: unknown) => void) => () => void;
+		emit: (channel: string, payload?: unknown) => void;
+	};
+	sendMessage: (message: any) => void;
+	sessionId?: string;
+	session?: any;
+	model?: any;
+	hasUI?: boolean;
+	newSession?: (options?: any) => Promise<any>;
+	fork?: (entryId: string, options?: any) => Promise<any>;
+	switchSession?: (
+		sessionPath: string,
+		switchOpts?: any,
+	) => Promise<any>;
+	reload?: () => Promise<void>;
+	getActiveTools?: () => string[];
+	setActiveTools?: (tools: string[]) => void;
+}
 import {
 	createDefaultHostPorts,
 	type HostPorts,
@@ -434,6 +498,13 @@ export interface CreateHostPortsOptions {
 }
 
 /** Assemble pi's live ExtensionAPI/context projections behind HostPorts. */
+// SAFETY: `pi` is typed as the LOCAL structural `ExtensionAPI` (declared
+// above) — not as `ExtensionAPI` from @gsd — so the production signature
+// accepts both the @gsd vendor ExtensionAPI (the real host runtime, which
+// has more methods than the local interface) and the legacy-scope
+// devDep ExtensionAPI mock used by tests/. Internal call sites retain
+// direct typed access to the methods this module actually uses without
+// per-call casts.
 export function createHostPorts(
 	pi: ExtensionAPI,
 	options: CreateHostPortsOptions,
@@ -562,6 +633,9 @@ let _mutationBridgeGetFlag:
 let _turnSummaryEmitRegistered = false;
 let _turnSummaryEmitCtx:
 	| {
+			// SAFETY: see createHostPorts — stored pi uses the local
+			// structural ExtensionAPI so the emit path tolerates both
+			// vendor shapes.
 			pi: ExtensionAPI;
 			getLensFlag: (name: string) => boolean | string | undefined;
 			isLensEnabled: () => boolean;
@@ -586,17 +660,17 @@ async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
  * This used to read `provider`/`model`/`sessionId`/`session.id`/`id` off the
  * EVENT. pi sets none of them on either event that called it: `session_start`
  * is `{ type, reason }`
- * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:152`,
- * `:2072`), and `tool_result` is exactly
+ * (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`'s `SessionStartEvent`
+ * interface), and `tool_result` is exactly
  * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
- * (`dist/core/agent-session.js:243-256`, source
- * `src/core/agent-session.ts:502-516`). So every call passed all-undefined,
- * `setTelemetryIdentity` ignored it, and `runtime.telemetryModel` stayed
- * `"unknown"` for the whole session against a real host.
+ * (same `types.d.ts`'s `ToolResultEvent` interface). So every call passed
+ * all-undefined, `setTelemetryIdentity` ignored it, and `runtime.telemetryModel`
+ * stayed `"unknown"` for the whole session against a real host.
  *
  * The ctx DOES carry the model. `ExtensionContext.model` is the live `Model`
- * (`dist/core/extensions/runner.js:488-491` → `AgentSession.model`, `:580-582`)
- * with `id` and `provider` (`@earendil-works/pi-ai/dist/types.d.ts:661-667`).
+ * (`@gsd/pi-coding-agent/dist/core/extensions/runner.js:488-491` →
+ * `AgentSession.model`) with `id` and `provider`, defined by the host
+ * `@gsd/pi-ai` package's model types.
  *
  * SESSION ID IS DELIBERATELY NOT SET HERE. `runtime.setSessionLifecycle`
  * already pins it from `ctx.sessionManager.getSessionId()` inside
@@ -1726,6 +1800,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// handler below.
 	const rememberedLazyTools = new Set<string>();
 	const activateToolsTool = createActivateToolsTool(
+		// SAFETY: `getActiveTools`/`setActiveTools` are not on the pinned
+		// host's ExtensionAPI baseline (they live behind a dynamic-tooling
+		// feature flag); the cast narrows pi to the minimal surface
+		// createActivateToolsTool actually reads, with the methods
+		// themselves optional to tolerate older hosts.
 		pi as unknown as {
 			getActiveTools?: () => string[];
 			setActiveTools?: (names: string[]) => void;
@@ -2034,12 +2113,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 					//
 					// Feature-detected the same way as elsewhere in this handler:
 					// `pi.getActiveTools`/`setActiveTools` aren't guaranteed present on
-					// every host the broad `@earendil-works/pi-coding-agent` peer
+					// every host the broad `@gsd/pi-coding-agent` peer
 					// dependency allows, so probe with typeof rather than assuming the
 					// pinned devDependency version's API exists at runtime. Under
 					// `--no-lazy-tools` nothing is touched at all: all-active IS the
 					// requested posture.
 					try {
+						// SAFETY: same narrowing as the createActivateToolsTool
+						// call above — these methods are not on every host's
+						// ExtensionAPI baseline, so we cast through `unknown`
+						// and probe with `typeof` rather than assuming the
+						// pinned devDependency version's API exists at runtime.
 						const piWithActiveTools = pi as unknown as {
 							getActiveTools?: () => string[];
 							setActiveTools?: (names: string[]) => void;
@@ -2355,7 +2439,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		return handleToolCall({
+			// SAFETY: `event` and `ctx` are typed as the host SDK's
+			// `ToolCallEvent`/`ExtensionContext` (devDep-narrowed to the
+			// the legacy-scope devDep), but the production `handleToolCall`
+			// parameter type uses the local structural shapes from
+			// `clients/runtime-tool-call.ts` (post-T4 #2435 bridge).
+			// The runtime contract is identical; the cast widens only
+			// the compile-time nominal type.
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],
+			// SAFETY: same nominal-type widening as the `event` cast above —
+			// the host SDK types event/ctx against the legacy-scope devDep
+			// while handleToolCall uses the local structural shapes from
+			// clients/runtime-tool-call.ts; runtime contract is identical.
 			ctx: ctx as unknown as Parameters<typeof handleToolCall>[0]["ctx"],
 			lensEnabled,
 			getFlag: (name: string) => getLensFlag(name),
@@ -2512,7 +2607,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// after overflow-compaction. pi computes `willRetry` only AFTER emitting
 	// this event and never exposes it to extensions (source-level audit:
 	// `AgentEndEvent` is `{type, messages}` only, pi agent-session.ts:643-645;
-	// see node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts).
+	// see vendor/pi-coding-agent/dist/core/extensions/types.d.ts).
 	// The #1387 deferred-format/autofix drain below therefore used to be able
 	// to fire MID-RUN, between retries — formatting files the agent is still
 	// actively working on, which can shift lines under queued work and stale

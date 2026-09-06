@@ -147,12 +147,12 @@ function getToolCallRawFilePath(
  * Resolve a tool_call's raw path to the file pi will actually touch.
  *
  * The `cwd` basis is the host `ctx.cwd`, which for the pinned host IS the same
- * value the tools were constructed with — `AgentSession` passes its one `_cwd`
- * to both `createAllToolDefinitions`
- * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:2026`, source
- * `src/core/tools/index.ts:99-124`) and the `ExtensionRunner` behind `ctx.cwd`
- * (`dist/core/agent-session.js:2037`; `runner.js:154`, `:476-479`). Neither is
- * reassigned after construction, so there is no drift TODAY (#1655 item 4).
+ * value the tools were constructed with — the host's session runtime passes
+ * its one `_cwd` to both `createAllToolDefinitions` (not exposed in the
+ * @gsd vendored types) and the `ExtensionRunner` behind `ctx.cwd`
+ * (`@gsd/pi-coding-agent/dist/core/extensions/runner.d.ts`'s `ExtensionRunner`
+ * constructor takes `cwd: string`). Neither is reassigned after construction,
+ * so there is no drift TODAY (#1655 item 4).
  * `tests/clients/pi-host-contract.test.ts` pins that, because the day a host
  * lets one move independently, every path here silently retargets.
  *
@@ -373,7 +373,7 @@ export type ToolCallResult = { block: true; reason?: string } | void;
  * `tool_call` is the ONE pi emit path with no per-handler `try`/`catch`. Every
  * sibling wraps each handler and routes a throw to `emitError`
  * (`emitToolResult` at
- * `@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:649-707`,
+ * `@gsd/pi-coding-agent/dist/core/extensions/runner.js:649-707`,
  * source `src/core/extensions/runner.ts:877-930`; the generic `emit` at
  * source `runner.ts:801-832`). `emitToolCall`
  * (`dist/core/extensions/runner.js:701-717`, source `runner.ts:932-953`) calls
@@ -510,7 +510,7 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 	// #1655 item 3: SNAPSHOT the requested batch width here, at handler entry.
 	// `input` is a live, mutable, extension-ordered object — pi types it
 	// `Record<string, unknown>` and hands the SAME reference to every handler in
-	// turn (`@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:701-716`
+	// turn (`@gsd/pi-coding-agent/dist/core/extensions/runner.js:701-716`
 	// passes `event` unchanged through the loop; source
 	// `src/core/extensions/types.ts:914-919`), and pi-lens itself rewrites it in
 	// place further down (indent correction, hashline resolution, range
@@ -1385,8 +1385,8 @@ async function handleToolCallImpl(deps: ToolCallDeps): Promise<ToolCallResult> {
 										// used to be forwarded here from the tool_call event.
 										// pi builds a `tool_call` with exactly
 										// `type`/`toolName`/`toolCallId`/`input`
-										// (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:230-234`,
-										// source `src/core/agent-session.ts:~228-236`), so all
+										// (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`'s
+										// `ToolCallEvent` interface), so all
 										// four were always `undefined` and the tool_result
 										// branch they fed was unreachable.
 									},

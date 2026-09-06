@@ -1605,10 +1605,9 @@ export class RuntimeCoordinator {
  *
  * `ExtensionContext.model` is `AgentSession.model`, projected through a lazy
  * getter guarded by `assertActive()`
- * (`@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:488-491`;
- * `dist/core/agent-session.js:580-582`). The value is a `Model` with `id` and
- * `provider` (`@earendil-works/pi-ai/dist/types.d.ts:661-667`), or `undefined`
- * when no model is selected.
+ * (`@gsd/pi-coding-agent/dist/core/extensions/runner.js:488-491`). The value is
+ * a `Model` with `id` and `provider` (defined by the host `@gsd/pi-ai`
+ * package's model types), or `undefined` when no model is selected.
  *
  * Because the getter is lazy and guarded, reading it on a REPLACED runner
  * throws. Telemetry identity is advisory; a stale ctx must degrade to "no

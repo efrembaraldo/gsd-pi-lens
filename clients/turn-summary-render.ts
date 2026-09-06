@@ -5,18 +5,26 @@
  * formats/autofixes/diagnostics with tool + rule id + line.
  *
  * `Component` construction is verified practical from an extension: it is
- * just `@earendil-works/pi-tui`'s `Component` interface —
+ * just `@gsd/pi-tui`'s `Component` interface —
  * `{ render(width: number): string[] }` — no framework object graph needed.
- * `pi-tui` is already a devDependency (package.json `@earendil-works/pi-tui`).
+ * `pi-tui` is already a devDependency (package.json `@gsd/pi-tui`).
  */
 
+import type { Component } from "./deps/pi-tui.js";
+import { fitLines } from "./tui-fit.js";
 import type {
 	MessageRenderer,
 	MessageRenderOptions,
-} from "@earendil-works/pi-coding-agent";
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component } from "./deps/pi-tui.js";
-import { fitLines } from "./tui-fit.js";
+} from "@gsd/pi-coding-agent";
+// Local structural Theme (see clients/tool-render.ts and clients/test-runner-
+// delivery.ts for the same pattern). The @gsd vendor class and the @earendil-
+// works devDep class are nominally distinct; tests/clients/turn-summary-render
+// .test.ts passes plain objects cast through `unknown` and we need both
+// vendor Theme instances and those plain objects to satisfy this signature.
+interface Theme {
+	fg(color: string, text: string): string;
+	bold(input: string): string;
+}
 import {
 	formatTurnSummaryLine,
 	type TurnSummaryDetails,

@@ -6,7 +6,7 @@
  * `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.reload()`.
  * Every accessor on that ctx then throws from the SDK's `assertActive()`
  * (`core/extensions/loader.js` in the installed
- * `@earendil-works/pi-coding-agent`). An event already queued when the swap
+ * `@gsd/pi-coding-agent`). An event already queued when the swap
  * happens still reaches pi-lens, carrying the dead ctx, and the first
  * unguarded `ctx.signal` / `ctx.ui` / `ctx.cwd` read throws.
  *

@@ -7,7 +7,7 @@
  * useful on many turns, but not every turn. On hosts that support it, pi
  * lets an extension register such tools inactive and expose a small
  * always-active loader the model calls to activate a subset by name
- * (docs: https://github.com/earendil-works/pi, packages/coding-agent/docs/
+ * (docs: https://github.com/open-gsd/gsd-pi, packages/coding-agent/docs/
  * extensions.md, "Dynamic Tool Loading"). Newly activated tools appear
  * starting the NEXT turn — no reload needed.
  *

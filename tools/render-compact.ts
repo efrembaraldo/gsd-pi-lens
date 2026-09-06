@@ -20,7 +20,20 @@
 // with a globally-installed renderer extension.
 
 import { Text } from "../clients/deps/pi-tui.js";
-import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+// Local structural Theme (see clients/tool-render.ts and clients/test-runner-
+// delivery.ts for the same T2 pattern). The @gsd vendor Theme class and the
+// legacy-scope devDep Theme class are nominally distinct (separate
+// declarations of a private `fgColors` member) so this module accepts the
+// structural intersection — just the one method this file actually invokes.
+// `ThemeColor` is left as a plain `string` for the same reason: the @gsd
+// literal-union and the legacy-scope one overlap on the tokens this file
+// uses ("error", "toolOutput") but neither is a structural subtype of the
+// other, so pinning the parameter type as `string` lets either satisfy the
+// slot.
+interface Theme {
+	fg(color: string, text: string): string;
+}
+type ThemeColor = string;
 
 /** Minimal shape of the tool result handed to renderResult — kept structural so
  * this helper does not depend on the exact AgentToolResult generic. */

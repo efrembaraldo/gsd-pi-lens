@@ -2,7 +2,7 @@
  * Host run-mode awareness (#1334 S2).
  *
  * pi tells every extension which mode it is running in — verified against the
- * pinned host types (`@earendil-works/pi-coding-agent/dist/core/extensions/
+ * pinned host types (`@gsd/pi-coding-agent/dist/core/extensions/
  * types.d.ts`):
  *
  *   export type ExtensionMode = "tui" | "rpc" | "json" | "print";   // line 208

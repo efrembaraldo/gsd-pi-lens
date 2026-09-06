@@ -7,7 +7,7 @@
  * turn-summary one-liner (133 cols vs 120) took down a pi session (#513).
  *
  * Two incompatible truncateToWidth signatures ship under the
- * "@earendil-works/pi-tui" specifier depending on which runtime resolves it:
+ * "@gsd/pi-tui" specifier depending on which runtime resolves it:
  *   - pure-JS pi-tui:        (text, maxWidth, ellipsis: string, pad?)
  *   - native @oh-my-pi >=16: (text, maxWidth, ellipsisKind: Ellipsis enum, pad, tabWidth: i32)
  * Passing a string to the native one throws "Failed to convert napi value into

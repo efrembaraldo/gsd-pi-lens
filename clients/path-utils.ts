@@ -663,7 +663,7 @@ const RIGHT_SINGLE_QUOTE = "\u2019";
 
 /**
  * The unicode space class pi folds to U+0020, copied character-for-character
- * from `@earendil-works/pi-coding-agent/dist/utils/paths.js:6`
+ * from `@gsd/pi-coding-agent/dist/utils/paths.js:6`
  * (`UNICODE_SPACES`, source `src/utils/paths.ts`). Widening or narrowing this
  * set makes pi-lens resolve a different file than pi does.
  */
@@ -671,7 +671,7 @@ const HOST_UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
 /**
  * Mirror pi's `normalizeWindowsShellPath`
- * (`@earendil-works/pi-coding-agent/dist/utils/paths.js:47-56`): convert Git
+ * (`@gsd/pi-coding-agent/dist/utils/paths.js:47-56`): convert Git
  * Bash, MSYS, Cygwin, and WSL drive paths to a form native Windows APIs
  * accept.
  */
@@ -698,7 +698,7 @@ interface HostNormalizeOptions {
 
 /**
  * Mirror pi's `normalizePath`
- * (`@earendil-works/pi-coding-agent/dist/utils/paths.js:57-79`, source
+ * (`@gsd/pi-coding-agent/dist/utils/paths.js:57-79`, source
  * `src/utils/paths.ts`), in pi's order, which is load-bearing: the unicode
  * fold runs BEFORE the `@` strip, and the tilde expansion before the
  * `file://` conversion.
@@ -748,7 +748,7 @@ export function normalizeHostToolPath(
 
 /**
  * Mirror pi's `resolveToCwd`
- * (`@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:42-44`,
+ * (`@gsd/pi-coding-agent/dist/core/tools/path-utils.js:42-44`,
  * source `src/core/tools/path-utils.ts:~44-46`) \u2014 the BASE resolution every
  * read/edit/write path goes through before the variant ladder below ever
  * runs.
@@ -797,7 +797,7 @@ export interface HostPathVariantResolution {
  * Mirror pi's read-path fallback ladder (#1655 item 5).
  *
  * pi does NOT open `resolve(cwd, input.path)`. `resolveReadPath`
- * (`@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:45-70`,
+ * (`@gsd/pi-coding-agent/dist/core/tools/path-utils.js:45-70`,
  * source `src/core/tools/path-utils.ts:52-83`) resolves, and when that path
  * does not exist it silently retries four unicode/spacing variants in this
  * exact order:

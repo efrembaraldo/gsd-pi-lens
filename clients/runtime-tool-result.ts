@@ -63,7 +63,7 @@ import {
 	logReadGuardEvent,
 } from "./read-guard-logger.js";
 import type { PiLensFlagSource } from "./lens-config.js";
-import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
+import type { EditToolDetails } from "@gsd/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { notifyExternalFileChange } from "./lsp/index.js";
 import type { MetricsClient } from "./metrics-client.js";
@@ -157,10 +157,10 @@ export function isFailedGitIntegrationCommand(
  * carry. `AgentSession._installAgentToolHooks`'s `afterToolCall` constructs the
  * event literal with exactly eight keys —
  * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
- * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`, source
- * `src/core/agent-session.ts:502-516`) — and `ExtensionRunner.emitToolResult`
- * forwards that same object to every handler
- * (`dist/core/extensions/runner.js:649-651`, source `runner.ts:877-880`).
+ * (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`'s `ToolResultEvent`
+ * interface) — and `ExtensionRunner.emitToolResult` forwards that same object
+ * to every handler
+ * (`@gsd/pi-coding-agent/dist/core/extensions/runner.d.ts`'s `emitToolResult`).
  *
  * #1655 item 2 removed seven fields this interface used to declare that pi
  * never sets on the wire: `id`, `callId`, `requestId`, `provider`, `model`,
@@ -1056,7 +1056,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// (`runtime.projectRoot`), with no idea the call actually ran under a
 	// different cwd/worktree.
 	//
-	// Source-level correction (pi host audit, earendil-works/pi): tool_call's
+	// Source-level correction (pi host audit, open-gsd/gsd-pi): tool_call's
 	// own resolved path is NOT authoritative for what executed —
 	// `agent-session.ts:914-919`'s extension-handler contract lets a LATER
 	// `tool_call` handler mutate `event.input` in place with no
@@ -1884,8 +1884,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	// `event.model`/`provider`/`sessionId`/`session.id`. pi sets none of those on
 	// a `tool_result` — `afterToolCall` builds the event with exactly
 	// `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
-	// (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:243-256`,
-	// source `src/core/agent-session.ts:502-516`), so the gate was always false
+	// (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`'s `ToolResultEvent`
+	// interface), so the gate was always false
 	// against a real host and the branch never ran. Identity for this dispatch
 	// comes from the runtime, which `message_start`/`session_start` populate —
 	// see the `telemetry:` block handed to `runPipeline` below.

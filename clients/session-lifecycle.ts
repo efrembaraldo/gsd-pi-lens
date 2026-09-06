@@ -204,7 +204,7 @@ function guardEnabled(): boolean {
  * `"stale after session replacement"`
  * (`ExtensionRunner.invalidate()`'s default message,
  * `core/extensions/runner.js` in the installed
- * `@earendil-works/pi-coding-agent` SDK dist). `isIdle` was picked over the
+ * `@gsd/pi-coding-agent` SDK dist). `isIdle` was picked over the
  * plain getters (`cwd`, `mode`, `hasUI`) only for readability at call sites
  * that already branch on idle state elsewhere in pi-lens; any of the other
  * assertActive()-wrapped accessors would work identically for this probe.

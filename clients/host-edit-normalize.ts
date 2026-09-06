@@ -3,7 +3,7 @@
  * the read-guard's oldText->range matching agrees *by construction* with how the
  * host actually applies edits (exact-then-fuzzy in normalized space).
  *
- * SOURCE OF TRUTH: `@earendil-works/pi-coding-agent`
+ * SOURCE OF TRUTH: `@gsd/pi-coding-agent`
  *   `dist/core/tools/edit-diff.js` -- `normalizeForFuzzyMatch`, `normalizeToLF`,
  *   `detectLineEnding`, `restoreLineEndings`, `stripBom`.
  *

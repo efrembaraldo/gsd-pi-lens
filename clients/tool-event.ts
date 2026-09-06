@@ -1,7 +1,7 @@
 /**
  * Local re-implementation of the host SDK's `isToolCallEventType`.
  *
- * Why this exists instead of importing from `@earendil-works/pi-coding-agent`:
+ * Why this exists instead of importing from `@gsd/pi-coding-agent`:
  * pi installs extension dependencies with `npm install --omit=dev`, so the host
  * coding-agent package is NOT present in the extension's `node_modules` at
  * runtime. Importing a *runtime value* from it therefore fails to resolve on a
@@ -10,7 +10,7 @@
  * MAX_PATH, which breaks `git clean -fdx` during `pi update`.
  *
  * The SDK function is a one-line discriminant check, so we inline it and keep
- * every `@earendil-works/pi-coding-agent` import type-only (types compile away).
+ * every `@gsd/pi-coding-agent` import type-only (types compile away).
  * `tests/host-sdk-type-only.test.ts` pins that invariant.
  *
  * ## S6 audit: the per-tool `is*ToolResult` discriminators (#1334)

@@ -33,7 +33,30 @@
  * terminal (#513's crash class).
  */
 
-import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+// Local structural Theme and ToolDefinition (see clients/test-runner-delivery.ts
+// for the same T2 pattern). @gsd/pi-coding-agent exports both as classes whose
+// private members (`fgColors` on Theme; nominal `execute` parameter on
+// ToolDefinition) make them nominally distinct from the legacy-scope devDep
+// versions tests/clients/tool-render.test.ts constructs. Accepting the
+// structural intersection — just the methods/properties this module actually
+// uses — lets tests pass plain objects cast through `unknown` and the production
+// code keep using its real implementations. This file is the SINGLE producer of
+// collapsed compact lines; the runtime call surface (theme.fg, theme.bold,
+// tool.renderResult, tool.renderCall, tool.name) is identical regardless of
+// which vendor Theme/ToolDefinition the caller supplies.
+interface Theme {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+}
+interface ToolDefinition {
+	name: string;
+	label?: string;
+	description?: string;
+	parameters?: unknown;
+	renderCall?: (...args: any[]) => Component;
+	renderResult?: (...args: any[]) => Component;
+	execute?: (...args: any[]) => Promise<unknown>;
+}
 import type { Component } from "./deps/pi-tui.js";
 import { stripAnsi } from "./sanitize.js";
 import { fitLines } from "./tui-fit.js";
@@ -113,14 +136,14 @@ function captureComponentText(component: Component): string {
  * is what keeps the off path byte-identical to today rather than this
  * function branching on a live flag read per render.
  */
-export function wrapToolForCompactLine<T extends ToolDefinition<any, any, any>>(
+export function wrapToolForCompactLine<T extends ToolDefinition>(
 	tool: T,
 ): T {
 	const originalRenderResult = tool.renderResult;
 	if (!originalRenderResult) return tool;
 	const originalRenderCall = tool.renderCall;
 
-	const renderCall: ToolDefinition<any, any, any>["renderCall"] = (
+	const renderCall: ToolDefinition["renderCall"] = (
 		args,
 		theme,
 		context,
@@ -142,7 +165,7 @@ export function wrapToolForCompactLine<T extends ToolDefinition<any, any, any>>(
 		};
 	};
 
-	const renderResult: ToolDefinition<any, any, any>["renderResult"] = (
+	const renderResult: ToolDefinition["renderResult"] = (
 		result,
 		options,
 		theme,
@@ -193,7 +216,7 @@ export function wrapToolForCompactLine<T extends ToolDefinition<any, any, any>>(
  * unchanged. Used by index.ts's registerTool loop, only when the
  * `ui.compactToolLine` flag resolved on for this session. */
 export function wrapToolsForCompactLine<
-	T extends ToolDefinition<any, any, any>,
+	T extends ToolDefinition,
 >(tools: readonly T[]): T[] {
 	return tools.map((tool) => wrapToolForCompactLine(tool));
 }
