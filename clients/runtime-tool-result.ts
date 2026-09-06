@@ -1058,11 +1058,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	//
 	// Source-level correction (pi host audit, open-gsd/gsd-pi): tool_call's
 	// own resolved path is NOT authoritative for what executed —
-	// `agent-session.ts:914-919`'s extension-handler contract lets a LATER
-	// `tool_call` handler mutate `event.input` in place with no
-	// re-validation, and edit's `prepareArguments` rewrites args before the
-	// event fires at all. `tool_result.input`, by contrast, is populated
-	// from the EXECUTED args (`agent-session.ts:502-516`) — it is the
+	// the extension-handler contract on `event.input` (`@gsd/pi-coding-agent/
+	// dist/core/extensions/types.d.ts`'s `ToolCallEvent` — mutable input,
+	// "No re-validation") lets a LATER `tool_call` handler mutate
+	// `event.input` in place with no re-validation, and edit's
+	// `prepareArguments` rewrites args before the event fires at all.
+	// `tool_result.input`, by contrast, is populated from the EXECUTED args
+	// (host session runtime del @gsd host) — it is the
 	// authoritative path source. So the correlation record's job is narrower
 	// than "the path": it is the RESOLUTION BASIS (the cwd/worktree the call
 	// actually ran under). Every tool_result resolves ITS OWN authoritative

@@ -2606,8 +2606,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// finishes A run — including a run that is about to auto-retry or resume
 	// after overflow-compaction. pi computes `willRetry` only AFTER emitting
 	// this event and never exposes it to extensions (source-level audit:
-	// `AgentEndEvent` is `{type, messages}` only, pi agent-session.ts:643-645;
-	// see vendor/pi-coding-agent/dist/core/extensions/types.d.ts).
+	// `AgentEndEvent` is `{type, messages}` only; see
+	// vendor/pi-coding-agent/dist/core/extensions/types.d.ts).
 	// The #1387 deferred-format/autofix drain below therefore used to be able
 	// to fire MID-RUN, between retries — formatting files the agent is still
 	// actively working on, which can shift lines under queued work and stale

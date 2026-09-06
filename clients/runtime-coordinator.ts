@@ -223,7 +223,9 @@ export interface ToolCallAttribution {
 	 * NOT authoritative for what actually executed (a later `tool_call`
 	 * extension handler can mutate `event.input` in place with no
 	 * re-validation, and `edit`'s own `prepareArguments` rewrites args before
-	 * the event fires — pi host `agent-session.ts`/`types.ts`). Kept only for
+	 * the event fires — pi host `types.ts` (see the
+	 * `ToolCallEvent` contract in
+	 * `@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`)). Kept only for
 	 * the divergence diagnostic in `runtime-tool-result.ts`; never trusted as
 	 * the actual target.
 	 */
@@ -237,7 +239,10 @@ export interface ToolCallAttribution {
 	/**
 	 * The cwd/worktree `tool_call` actually ran under. THIS is the field that
 	 * matters: `tool_result`'s own authoritative `input.path` (populated from
-	 * the EXECUTED args, pi host `agent-session.ts`) is resolved against this
+	 * the EXECUTED args — see the
+	 * `ToolResultEvent.input` contract in
+	 * `@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`) is resolved
+	 * against this
 	 * basis instead of the project root — the fix for #1642's worktree→parent
 	 * collapse.
 	 */

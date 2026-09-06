@@ -41,8 +41,9 @@
  *    `sessionId`/`session` "for the telemetry-identity path" — #1655 item 2
  *    deleted all seven, because pi's `afterToolCall` builds the event with
  *    exactly `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/
- *    `isError`/`usage` (`dist/core/agent-session.js:243-256`, source
- *    `src/core/agent-session.ts:502-516`), so the branch reading them was dead
+ *    `isError`/`usage` (the host `ToolResultEvent` in
+ *    `@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`), so the branch
+ *    reading them was dead
  *    code. The standing reason not to narrow is point 3: pi-lens also
  *    synthesizes its OWN `tool_result` payloads (bash-derived writes,
  *    partial-apply) that no host discriminator would admit.
@@ -100,7 +101,8 @@ export function resolveToolCallCorrelationId(
 		// parallel calls in the same turn under the same id. Stated plainly:
 		// real pi builds `tool_call`/`tool_result` events with exactly
 		// `toolCallId` and no bare `id` field at all (see the file header
-		// above, #1655 item 2, `src/core/agent-session.ts:502-516`), so this
+		// above, #1655 item 2, the host `ToolResultEvent` shape in
+		// `@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`), so this
 		// rung is dead code against today's host — kept only in case a
 		// different host shape needs it; drop it once #1655's audit confirms
 		// none does.

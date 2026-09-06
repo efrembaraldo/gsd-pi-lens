@@ -378,9 +378,9 @@ export type ToolCallResult = { block: true; reason?: string } | void;
  * source `runner.ts:801-832`). `emitToolCall`
  * (`dist/core/extensions/runner.js:701-717`, source `runner.ts:932-953`) calls
  * `await handler(event, ctx)` bare, and its caller
- * `AgentSession._installAgentToolHooks`'s `beforeToolCall`
- * (`dist/core/agent-session.js:229-241`, source `agent-session.ts:~228-242`)
- * rethrows: `throw new Error("Extension failed, blocking execution: ...")`.
+ * `AgentSession._installAgentToolHooks`'s `beforeToolCall` (host session
+ * runtime del @gsd host) rethrows:
+ * `throw new Error("Extension failed, blocking execution: ...")`.
  *
  * So an unguarded throw anywhere in pi-lens's `tool_call` handler does not
  * degrade pi-lens — it BLOCKS the user's tool call outright. Advisory

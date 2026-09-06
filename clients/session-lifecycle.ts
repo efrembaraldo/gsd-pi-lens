@@ -13,7 +13,8 @@
  *
  * pi's own SDK contract only invalidates a captured ctx for SEQUENTIAL
  * session replacement (`newSession`/`fork`/`switchSession`/`reload` —
- * `ExtensionRunner.invalidate()`, called from `core/agent-session.js` on
+ * `ExtensionRunner.invalidate()` in
+ * `@gsd/pi-coding-agent/dist/core/extensions/runner.d.ts`, invoked on
  * dispose). A concurrently-live sibling session's bind invalidates nothing.
  * That asymmetry — is the PRIOR ctx still active or not — is the reliable,
  * empirically-verified discriminator this module implements.
