@@ -1,9 +1,7 @@
 name: Stale issues and PRs
 
+# Disabled for fork (S01): automated stale-issue closing not applicable to low-traffic fork.
 on:
-  schedule:
-    # Run once a day at 00:00 UTC
-    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:

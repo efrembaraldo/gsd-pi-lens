@@ -1,8 +1,7 @@
 name: Stale open-issue detector (weekly)
 
+# Disabled for fork (S01): weekly stale-issue detection not applicable to low-traffic fork.
 on:
-  schedule:
-    - cron: "0 7 * * 1" # Monday 07:00 UTC
   workflow_dispatch: {}
 
 permissions: {}

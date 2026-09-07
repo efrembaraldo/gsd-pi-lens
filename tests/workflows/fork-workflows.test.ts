@@ -177,3 +177,86 @@ describe("publish.yml (fork)", () => {
 		expect(existsSync(resolve(REPO_ROOT, ".github/workflows/release.yml"))).toBe(false);
 	});
 });
+
+describe("default-branch policy (all workflows)", () => {
+	/** Load all workflow files and verify branch pin invariant. */
+
+	function extractBranchesFromTrigger(triggerValue: unknown): string[] {
+		if (!triggerValue || typeof triggerValue !== "object" || Array.isArray(triggerValue)) {
+			return [];
+		}
+		const trigger = triggerValue as Record<string, unknown>;
+		const branches = trigger.branches;
+		return toBranches(branches);
+	}
+
+	it("pins every branch-gated workflow to include 'master' (T03 pin: fork default branch is master)", () => {
+		// The fork's default branch is 'master', not 'main' (Github's new default).
+		// Workflows with branch filters must include 'master' to gate on the
+		// fork's own branch. Omitting 'master' silently disables the workflow.
+		// This test is mutation-proof: removing 'master' from any branch filter,
+		// or adding a workflow with only 'main', will fail this assertion.
+
+		const workflows = [
+			"ci.yml",
+			"ci-infra-kill-rerun.yml",
+			"close-keyword-verification.yml",
+			"compat-smoke.yml",
+			"grammar-health.yml",
+			"greetings.yml",
+			"install-smoke.yml",
+			"labels.yml",
+			"lifecycle-smoke.yml",
+			"lint.yml",
+			"merge-train-lane.yml",
+			"merge-train-warden.yml",
+			"osv-scan.yml",
+			"parser-smoke.yml",
+			"publish.yml",
+			"stale-open-issues.yml",
+			"stale.yml",
+			"tool-smoke.yml",
+		];
+
+		const branchPolicy: Record<string, { pushBranches: string[]; prBranches: string[] }> = {};
+
+		for (const workflowFile of workflows) {
+			const { parsed } = readWorkflow(`.github/workflows/${workflowFile}`);
+			const on = workflowTriggers(parsed.on);
+
+			const pushTrigger = on.push as { branches?: unknown } | undefined;
+			const pushBranches = extractBranchesFromTrigger(pushTrigger?.branches);
+
+			const prTrigger = on.pull_request as { branches?: unknown } | undefined;
+			const prBranches = extractBranchesFromTrigger(prTrigger?.branches);
+
+			branchPolicy[workflowFile] = { pushBranches, prBranches };
+
+			// For each workflow: if push.branches is a non-empty list, it must include 'master'.
+			if (pushBranches.length > 0) {
+				expect(
+					pushBranches,
+					`${workflowFile} push.branches must include 'master', got [${pushBranches.join(", ")}]`,
+				).toContain("master");
+			}
+
+			// Similarly for pull_request.branches
+			if (prBranches.length > 0) {
+				expect(
+					prBranches,
+					`${workflowFile} pull_request.branches must include 'master', got [${prBranches.join(", ")}]`,
+				).toContain("master");
+			}
+		}
+
+		// Log the policy table for inspection
+		console.log("\n=== Branch Policy Summary (T03 confirmation table) ===");
+		console.table(
+			workflows.map((w) => ({
+				Workflow: w,
+				"push.branches": branchPolicy[w].pushBranches.join(", ") || "(none)",
+				"pull_request.branches": branchPolicy[w].prBranches.join(", ") || "(none)",
+			}))
+		);
+	});
+});

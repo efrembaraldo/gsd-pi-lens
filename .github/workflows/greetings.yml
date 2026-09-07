@@ -1,11 +1,8 @@
 name: Greetings
 
+# Disabled for fork (S01): greeting automation not applicable to single-maintainer fork.
 on:
-  # Greeting-only; never checks out or executes PR code.
-  pull_request_target: # zizmor: ignore[dangerous-triggers]
-    types: [opened]
-  issues:
-    types: [opened]
+  workflow_dispatch: {}
 
 permissions:
   issues: write

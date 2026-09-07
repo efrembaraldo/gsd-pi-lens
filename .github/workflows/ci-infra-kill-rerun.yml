@@ -2,10 +2,9 @@ name: CI infra-kill rerun
 
 # Moves #2042's judged rerun from session-side polling into a bounded
 # workflow. The classifier remains the single source for log interpretation.
+# Disabled for fork (S01): CI infra-kill rerun automation depends on upstream CI strategy and issue routing.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  workflow_dispatch: {}
 
 permissions: {}
 

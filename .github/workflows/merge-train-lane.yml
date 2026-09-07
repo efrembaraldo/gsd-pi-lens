@@ -33,11 +33,8 @@ name: Merge train
 # checkout to its payload SHA; their per-SHA concurrency groups collapse a
 # duplicate event without allowing concurrent validation of one commit.
 
+# Disabled for fork (S01): merge-train automation requires upstream label approval and multi-maintainer workflow.
 on:
-  schedule:
-    - cron: "*/10 * * * *"
-  check_suite:
-    types: [completed]
   workflow_dispatch: {}
 
 # One lane run at a time: two concurrent runs could both read the same green

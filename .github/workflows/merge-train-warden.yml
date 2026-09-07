@@ -23,9 +23,8 @@ name: Merge-train warden
 # merge -- a scheduled trigger cannot be exercised pre-merge (see the PR body
 # for what was and was not testable before this landed).
 
+# Disabled for fork (S01): merge-train warden automation requires multi-PR polling and upstream label state.
 on:
-  schedule:
-    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 # A run still going at the 10-minute mark should finish, not race a fresh

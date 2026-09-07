@@ -1,14 +1,8 @@
 name: Sync labels
 
+# Disabled for fork (S01): label synchronization driven by upstream merge automation not applicable to fork.
 on:
-  push:
-    branches: [master]
-    paths:
-      - ".github/labels.yml"
-      - ".github/workflows/labels.yml"
   workflow_dispatch:
-  repository_dispatch:
-    types: [merge-train-post-merge]
 
 concurrency:
   group: labels-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
