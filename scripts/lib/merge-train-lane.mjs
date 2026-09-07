@@ -41,11 +41,14 @@ export const POST_MERGE_RECONCILE_PAGE_SIZE = 100;
 export const POST_MERGE_RECONCILE_MAX_PAGES = 10;
 export const POST_MERGE_RECONCILE_MAX_RECORDS =
 	POST_MERGE_RECONCILE_PAGE_SIZE * POST_MERGE_RECONCILE_MAX_PAGES;
+// labels.yml is excluded (T04/S01): the fork disabled its automatic
+// label-sync workflow (now workflow_dispatch-only), so it no longer
+// validates post-merge dispatches on master. Validation stays pinned to
+// the workflows that ARE actively master-gated: ci, lint, install-smoke.
 export const POST_MERGE_VALIDATION_WORKFLOWS = Object.freeze([
 	"ci.yml",
 	"lint.yml",
 	"install-smoke.yml",
-	"labels.yml",
 ]);
 const POST_MERGE_ERROR_CAP = 200;
 const POST_MERGE_BOT_LOGIN = "github-actions[bot]";
