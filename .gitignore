@@ -240,7 +240,8 @@ lpt[1-9].*
 *.swo
 *~
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.code-workspace
 .env
 .env.*
@@ -250,7 +251,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-vendor/
+vendor/*
+!vendor/grammars/
+vendor/grammars/*
+!vendor/grammars/tree-sitter-cue.wasm
 *.log
+!tests/fixtures/ci-failure-logs/**
 .cache/
 tmp/

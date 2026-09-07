@@ -199,11 +199,17 @@ describe("deprecated config surface registry (#2418)", () => {
 
 	it("reads the last released version off the changelog, not package.json", () => {
 		expect(LAST_RELEASED_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
-		// The two agree today (4.1.3 shipped, no bump yet); the test must not
-		// silently start reading package.json if that ever stops being true.
+		// Fork version model (S01/T06): the fork resets its own package.json to
+		// its release baseline (0.0.1) while CHANGELOG.md retains the full
+		// upstream history (newest shipped 4.1.3). So the changelog's newest
+		// released version is STRICTLY NEWER than the fork's package baseline —
+		// the reverse of the upstream "same number right after a release"
+		// relationship. The test must not silently start reading package.json as
+		// the last-released source: if a regression did, LAST_RELEASED_VERSION
+		// would collapse to 0.0.1 == PACKAGE_VERSION and this `> 0` would red.
 		expect(
 			compareSemver(LAST_RELEASED_VERSION, PACKAGE_VERSION),
-		).toBeLessThanOrEqual(0);
+		).toBeGreaterThan(0);
 	});
 
 	it("points every row at a registered diagnostic code", () => {
