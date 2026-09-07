@@ -36,8 +36,11 @@
 //
 // Resolution priority for the gsd-pi checkout (shared by both stages):
 //   1. GSD_PI_CHECKOUT env var (explicit override; CI uses /tmp/gsd-pi)
-//   2. /home/opengsd/repos/open-gsd_gsd-pi (canonical local dev path)
-//   3. /tmp/gsd-pi (CI default)
+//   2. /tmp/gsd-pi (checkout default, also CI's path)
+// A machine-specific canonical dev path is deliberately NOT a candidate: it
+// cannot be portable, and a hardcoded author-machine literal is exactly what
+// tests/scripts/no-hardcoded-machine-paths.test.ts (#1728) forbids. Set
+// GSD_PI_CHECKOUT to point at your local checkout instead.
 
 import {
 	existsSync,
@@ -107,7 +110,8 @@ const RUNTIME_PACKAGES = [
 		scope: "",
 		name: "get-east-asian-width",
 		sentinel: ["package.json"],
-		sourcePath: (checkout) => join(checkout, "node_modules", "get-east-asian-width"),
+		sourcePath: (checkout) =>
+			join(checkout, "node_modules", "get-east-asian-width"),
 		copyFiles: [
 			"package.json",
 			"index.d.ts",
@@ -128,11 +132,7 @@ const RUNTIME_PACKAGES = [
 	},
 ];
 
-const CHECKOUT_CANDIDATES = [
-	process.env.GSD_PI_CHECKOUT,
-	"/home/opengsd/repos/open-gsd_gsd-pi",
-	"/tmp/gsd-pi",
-];
+const CHECKOUT_CANDIDATES = [process.env.GSD_PI_CHECKOUT, "/tmp/gsd-pi"];
 
 // ─── Stadio 1 helpers ──────────────────────────────────────────────────────
 function copyVendorDir(srcDir, dstDir, copyJs) {
@@ -177,9 +177,7 @@ function planVendor() {
 		const sentinels = vendorSentinels(pkg);
 		if (sentinels.every((s) => existsSync(s))) {
 			const rel = sentinels.map((s) => s.replace(join(ROOT, "") + "/", ""));
-			console.log(
-				`[setup-types] ${rel.join(", ")} already present, skipping`,
-			);
+			console.log(`[setup-types] ${rel.join(", ")} already present, skipping`);
 			continue;
 		}
 		pending.push(pkg);
@@ -288,9 +286,7 @@ function resolveCheckout(pendingVendor, pendingRuntime) {
 		let vendorOk = true;
 		for (const pkg of pendingVendor) {
 			if (
-				!existsSync(
-					join(candidate, "packages", pkg.name, "dist", "index.d.ts"),
-				)
+				!existsSync(join(candidate, "packages", pkg.name, "dist", "index.d.ts"))
 			) {
 				vendorOk = false;
 				break;
@@ -299,9 +295,7 @@ function resolveCheckout(pendingVendor, pendingRuntime) {
 			// the type declarations, or the .js re-pin would be unverifiable.
 			if (
 				pkg.copyJs &&
-				!existsSync(
-					join(candidate, "packages", pkg.name, "dist", "index.js"),
-				)
+				!existsSync(join(candidate, "packages", pkg.name, "dist", "index.js"))
 			) {
 				vendorOk = false;
 				break;

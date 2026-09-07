@@ -11,6 +11,14 @@ name: CI
 on:
   push:
     branches: [main, master]
+  # #2185: a merge made with GITHUB_TOKEN suppresses its push event, so the
+  # post-merge validation lane re-triggers ci.yml via repository_dispatch
+  # (type merge-train-post-merge). Reinforced from upstream — the fork's
+  # integral ci.yml replacement had dropped this trigger, which the
+  # POST_MERGE_VALIDATION_WORKFLOWS floor (merge-train-warden.test.ts)
+  # enforces.
+  repository_dispatch:
+    types: [merge-train-post-merge]
   pull_request:
   workflow_dispatch:
 
@@ -20,16 +28,72 @@ permissions:
 # Serialize runs per branch. Only a newer PR commit cancels the in-flight run;
 # a pushed branch is allowed to run to completion.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  # #2185: a merge made with GITHUB_TOKEN suppresses its push event; the
+  # replayed repository_dispatch must validate the exact merge commit before
+  # any downstream job trusts it. Same contract the other post-merge
+  # workflows (lint.yml, install-smoke.yml, labels.yml) keep — re-added to
+  # ci.yml after the fork's integral replacement dropped it.
+  validate-merge-train-dispatch:
+    name: Validate merge-train dispatch
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: github.event_name == 'repository_dispatch'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate merge-train dispatch ancestry
+        if: github.event_name == 'repository_dispatch'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: node scripts/lib/merge-train-dispatch-validation.mjs
+
+  # #2267: a malformed close-keyword list (e.g. "Closes #123, #456") makes
+  # GitHub apply only the first issue, silently dropping the rest. This job
+  # lints the live PR body in seconds (pure Node against the GitHub API, no
+  # npm install) so a bad close list fails fast instead of shipping a PR that
+  # only half-closes its issues.
+  close-keyword-lint:
+    name: Close-keyword syntax
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Validate per-issue close keywords
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-close-keywords.mjs --lint-pr
+
+  build:
+    needs: validate-merge-train-dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Replayed merge-train dispatch must checkout the exact merge SHA.
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          persist-credentials: false
+      - name: Validate merge-train dispatch payload
+        if: github.event_name == 'repository_dispatch'
+        env:
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+        run: node scripts/lib/merge-train-dispatch-validation.mjs
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: 22
@@ -54,19 +118,93 @@ jobs:
         run: node scripts/setup-types.mjs
       - name: Lint
         run: npm run lint
+
+      # #2042: the size of the box the fork pool is budgeted against. The suite
+      # was OOM-killed here repeatedly and no log line said how much memory the
+      # runner actually had, so every diagnosis started from a guess.
+      - name: Runner capacity
+        run: |
+          echo "nproc=$(nproc)"
+          free -m
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+
       # npm test routes through scripts/with-test-lock.mjs, which acquires the
-      # machine-wide test-suite lock before running vitest.
+      # machine-wide test-suite lock before running vitest. CI runners are
+      # isolated, so the lock is skipped explicitly and the suite runs under
+      # the #2042 memory watch (forwards the exit code, prints the host's
+      # memory low-water mark + a verdict line so an OOM kill is attributable).
       - name: Test
-        run: npm test
+        env:
+          PI_LENS_TEST_TIMEOUT_SCALE: '3'
+          PI_LENS_TEST_NO_LOCK: '1'
+        run: node scripts/with-memory-watch.mjs -- npm test
+
+      # #2042 round 2: the low-water mark cannot name what sent the SIGKILL.
+      # The kernel can, and only while the runner is still alive — so the
+      # record is taken inside the job, on failure. Every arm distinguishes
+      # "asked, nothing there" from "could not ask".
+      - name: Kernel kill evidence
+        if: failure()
+        run: |
+          set +e
+          # Round-2 review F2: an empty arm must distinguish "asked, nothing
+          # there" from "could not ask". Silence alone reads as the first and
+          # can be the second.
+          echo "--- kernel OOM/kill records ---"
+          dm=$(sudo dmesg -T 2>/dev/null)
+          if [ -z "$dm" ]; then
+            echo "(dmesg unavailable or empty - no evidence either way)"
+          else
+            hits=$(printf '%s\n' "$dm" |
+              grep -iE 'out of memory|oom-kill|oom_reaper|killed process' |
+              tail -40)
+            if [ -z "$hits" ]; then
+              echo "(dmesg readable, zero OOM/kill records - the kernel OOM killer did not fire)"
+            else
+              printf '%s\n' "$hits"
+            fi
+          fi
+          echo "--- systemd-oomd ---"
+          sudo journalctl -u systemd-oomd --no-pager -n 40 2>/dev/null ||
+            echo "(journalctl unavailable)"
+          # Round-2 review F1: reading /sys/fs/cgroup/memory.events reads the
+          # ROOT cgroup, which cgroup v2 does not populate. It printed nothing
+          # whether or not an event had occurred, so it could never support a
+          # claim either way. Resolve this process's OWN cgroup and walk up to
+          # the first ancestor that actually has the file.
+          echo "--- cgroup memory.events ---"
+          cg=$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null)
+          p="$cg"
+          found=""
+          while [ -n "$p" ]; do
+            f="/sys/fs/cgroup${p%/}/memory.events"
+            if [ -r "$f" ]; then
+              echo "cgroup=${p} file=${f}"
+              cat "$f"
+              found=1
+              break
+            fi
+            if [ "$p" = "/" ]; then break; fi
+            p=$(dirname "$p")
+          done
+          if [ -z "$found" ]; then
+            echo "(memory.events absent or unreadable from '${cg:-unknown}' up to root - no cgroup evidence either way)"
+          fi
+          echo "--- memory now ---"
+          free -m
+          exit 0
 
   # Production install shape: verifies that a clean `npm install --omit=dev`
   # produces a package whose compiled entry loads and whose host-provided
   # dependencies are resolved exactly the way pi resolves them.
   prod-install-build:
+    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # Replayed merge-train dispatch must checkout the exact merge SHA.
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
@@ -79,3 +217,43 @@ jobs:
         run: npm prune --omit=dev
       - name: Check production install shape
         run: node scripts/check-prod-install-shape.mjs
+
+  # #2185: terminal recorder for the post-merge validation lane. Only fires on
+  # a replayed repository_dispatch (a GITHUB_TOKEN merge suppresses its push
+  # event) and only after the validator proved the exact merge SHA, then
+  # records the combined outcome with a mergeable marker.
+  record-post-merge-validation:
+    name: Record post-merge validation
+    if: always() && github.event_name == 'repository_dispatch' && needs.validate-merge-train-dispatch.result == 'success'
+    needs: [validate-merge-train-dispatch, build, prod-install-build]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Record exact-SHA terminal state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          INSTALL_RESULT: ${{ needs.prod-install-build.result }}
+        run: |
+          set -euo pipefail
+          state=succeeded
+          unknown=0
+          for result in "$BUILD_RESULT" "$INSTALL_RESULT"; do
+            case "$result" in
+              success) ;;
+              failure) state=failed ;;
+              *) unknown=1 ;;
+            esac
+          done
+          if [[ "$state" != failed && "$unknown" == 1 ]]; then exit 0; fi
+          marker="<!-- merge-train-post-merge:sha=$PAYLOAD_SHA:workflow=ci.yml:state=$state -->"
+          body="Post-merge validation $state for $PAYLOAD_SHA.\n\n$marker"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PAYLOAD_PR_NUMBER/comments" \
+            --data "$(jq -n --arg body "$body" '{body:$body}')"

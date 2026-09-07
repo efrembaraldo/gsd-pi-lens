@@ -175,7 +175,13 @@ function findRepoRoot(start: string): string {
 				const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
 					name?: string;
 				};
-				if (pkg.name === "pi-lens") return dir;
+				// Upstream package is named `pi-lens`; this fork renamed the scope to
+				// @gsd (own name @efrembaraldo/gsd-pi-lens). Accept both so a source
+				// checkout resolves its own root here — a bare `=== "pi-lens"` match
+				// walks past this package after the rename and the fallback climbs
+				// one directory too high, hiding pilens_rebuild (canRebuildPiLens).
+				if (pkg.name === "pi-lens" || pkg.name?.endsWith("/gsd-pi-lens"))
+					return dir;
 			} catch {
 				// keep walking up
 			}

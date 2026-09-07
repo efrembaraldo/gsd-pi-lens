@@ -61,12 +61,12 @@ const PACKAGES = {
 
 // gsd-pi checkout resolution — same candidate list as scripts/setup-types.mjs
 // (which we deliberately do NOT import: it executes its logic at top level).
-// The SDK dist sources are read from the resolved checkout.
-const CHECKOUT_CANDIDATES = [
-	process.env.GSD_PI_CHECKOUT,
-	"/home/opengsd/repos/open-gsd_gsd-pi",
-	"/tmp/gsd-pi",
-];
+// The SDK dist sources are read from the resolved checkout. A
+// machine-specific canonical dev path is deliberately NOT a candidate: it
+// cannot be portable, and a hardcoded author-machine literal is exactly what
+// tests/scripts/no-hardcoded-machine-paths.test.ts (#1728) forbids. Set
+// GSD_PI_CHECKOUT to point at your local checkout instead.
+const CHECKOUT_CANDIDATES = [process.env.GSD_PI_CHECKOUT, "/tmp/gsd-pi"];
 
 const SDK_SOURCES = {
 	sdkLoaderSource: "packages/pi-coding-agent/dist/core/extensions/loader.js",
