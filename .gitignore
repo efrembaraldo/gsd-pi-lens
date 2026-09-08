@@ -261,3 +261,7 @@ vendor/grammars/*
 tmp/
 
 # ── GSD baseline (auto-generated) ──
+
+# ── GSD baseline (auto-generated) ──
+.vscode/
+vendor/
