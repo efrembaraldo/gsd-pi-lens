@@ -259,3 +259,7 @@ vendor/grammars/*
 !tests/fixtures/ci-failure-logs/**
 .cache/
 tmp/
+
+# ── GSD baseline (auto-generated) ──
+.vscode/
+vendor/
