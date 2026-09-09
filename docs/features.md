@@ -406,6 +406,7 @@ pi-lens ships an MCP (Model Context Protocol) server so Claude Code — or any M
 **Honest limits** (live-tested, documented in `mcp.md`):
 
 - **`fresh` always cold-spawns the LSP**, so it systematically under-reports LSP diagnostics on large TS projects (`typescript-language-server` must index the whole project first). The result carries an explicit `lsp` honesty signal (`ran` / `status` / `diagnosticCount` / `durationMs`) so a cold `0` is never read as "clean" — use `warm` for LSP-complete reviews.
+- **`mode=fresh` reports `warmup-timeout` instead of a silent `0`** when the LSP warm-up call (`LSPService.touchFile`) does not return within `PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS` (default `10000` ms). The summary embeds `lsp 0 (warmup-timeout, <ms>ms)` so a cold LSP that simply took too long is reported with its cause — distinct from `skipped` (LSP unsupported for this file) and `clean` (a real affirmative result). Use the warm server for LSP-complete reviews when this fires.
 - **`pilens_analyze` by default surfaces everything** (`blockingOnly=false`); the per-edit fast path in the pi extension is still blocking-first.
 - **The MCP server keeps the LSP warm across calls** within its process; `fresh` is for benchmarking a real cold spawn, not for steady-state usage.
 

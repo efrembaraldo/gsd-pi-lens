@@ -170,6 +170,31 @@ Unset or `0` preserves the prior local-LSP behavior exactly. Any transport,
 schema, freshness, deadline, or incumbent-liveness failure permanently falls
 back to a local LSP fleet for that session.
 
+## MCP
+
+### `PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS`
+
+Wall-clock budget (ms) for the LSP warm-up call (`LSPService.touchFile`) on
+the MCP `pilens_analyze` `mode=fresh` path — i.e. when the worker forks a
+fresh subprocess that loads the latest built code from disk. **Default:**
+`10000` ms (10 s). Read at call time inside the fresh worker, so the budget
+can be tightened for tests or loosened for very large cold indexes without
+restarting the MCP server. Env-only — there is no matching CLI flag or
+config key, because `mode=fresh` has no other input surface that could carry it.
+
+Distinct from `PI_LENS_LSP_WARMUP_TIMEOUT_MS`: that variable bounds the
+generic `LSPService.ensureReadyForSweep` warm-up used by the workspace pull
+diagnostics sweep inside the warm MCP server (and inside the pi extension).
+This variable bounds the cold LSP warm-up on the fresh-worker fork path
+specifically. The two do not share a value because their cost profiles differ
+— a cold `typescript-language-server` index is seconds-to-tens-of-seconds on
+a real workspace, while a warm sweep can usually reuse the existing LSP.
+
+When the budget elapses without the warm-up returning a ready LSP,
+`pilens_analyze` reports `lsp.status: "warmup-timeout"` (with
+`diagnosticCount: 0`) instead of a silent `0` — so a cold LSP that simply
+took too long is reported with its cause, not read as clean.
+
 ## Language-specific
 
 ### `PI_LENS_VULTURE_MIN_CONFIDENCE`
