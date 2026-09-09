@@ -36,7 +36,7 @@ const CHANGELOG_DISCLOSURE_HEADING =
 // substring check suffices.
 const CHANGELOG_DISCLOSURE_ANCHOR = "modifiche-strutturali-rispetto-a-pi-lens";
 
-describe("README fork disclosure (S02)", () => {
+describe("README disclosure (S02)", () => {
 	const readmeText = readFileSync(resolve(REPO_ROOT, README_FILE_PATH), "utf8");
 
 	it("places the '## Fork di pi-lens' heading between '# pi-lens' and '## What It Does'", () => {

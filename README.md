@@ -12,7 +12,7 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 
 ## Fork di pi-lens
 
-Questo repository è un fork di [apmantza/pi-lens](https://github.com/apmantza/pi-lens), pubblicato in modo indipendente come pacchetto npm `@efrembaraldo/gsd-pi-lens`, a partire dalla release `0.0.1`. I pacchetti host sono ripubblicati sotto lo scope `@gsd/*` (non più `@earendil-works`/`@apmantza`). Il branch di default del fork è `master`. Il fork mantiene una pipeline CI e un workflow publish dedicati, separati da quelli upstream. Per i dettagli delle modifiche strutturali, vedi [CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens](CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens).
+This repository is an independent fork of [apmantza/pi-lens](https://github.com/apmantza/pi-lens), published on npm as `@efrembaraldo/gsd-pi-lens` starting from release `0.0.1`. The host packages are republished under the `@gsd/*` scope. The fork's default branch is `master`, and it runs its own dedicated CI pipeline and publish workflow, separate from the upstream repository. For the full list of structural transformations, see the [structural changes relative to pi-lens](CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens) section in the changelog.
 
 ## What It Does
 
@@ -161,7 +161,7 @@ pi install git:github.com/apmantza/pi-lens
 > unreviewed install scripts, review and allow them with
 > `npm approve-scripts`, or trust the `allowScripts` entries already declared
 > in this package's `package.json`. Installing from a git source (`pi install
-> git:...` / `pi update --extension git:...`) may similarly prompt for
+git:...` / `pi update --extension git:...`) may similarly prompt for
 > git-dependency approval; accept it to let the `prepare` build step run.
 
 ## Documentation
