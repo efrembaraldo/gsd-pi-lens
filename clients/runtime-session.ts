@@ -82,7 +82,7 @@ import {
 import { scanProjectRules } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { resetRustAvailability } from "./rust-client.js";
-import { resetSafeSpawnWindowsCommandCache } from "./safe-spawn.js";
+import { resetSafeSpawnWindowsCommandCache, safeSpawnAsync } from "./safe-spawn.js";
 import {
 	type BootstrapClients,
 	resetAnalyzerBootstrapSessionState,
@@ -1214,6 +1214,7 @@ function scheduleStartupScansWithClients(
 		"codebase-model": 5200,
 		"ast-grep exports": 5400,
 		"project index": 5400,
+		"error-debt-baseline": 5600,
 	};
 	const runTask = (name: string, task: () => Promise<void>): Promise<void> => {
 		const queuedAt = Date.now();
@@ -1757,6 +1758,43 @@ function scheduleStartupScansWithClients(
 			snapshotRoot,
 			dbg,
 		});
+	});
+
+	// error-debt-baseline — opt-in (`errorDebtBaseline.enabled`, default off)
+	// captures whether `npm test` and `npm run build` were clean at the start
+	// of this session, so the agent can know whether any subsequent test/build
+	// failure was already broken before its edits. Treat a "missing script"
+	// stderr as success — `package.json` simply does not declare that script,
+	// not a test failure. `ignoreAmbientSignal: true` keeps both spawns from
+	// being cancelled by Esc mid-turn, matching the installer convention.
+	runTask("error-debt-baseline", async () => {
+		if (!runtime.isCurrentSession(sessionGeneration)) return;
+		if (!deps.getFlag("error-debt-baseline")) return;
+
+		const testsResult = await safeSpawnAsync("npm", ["test"], {
+			timeout: 60_000,
+			maxOutputBytes: 1024 * 1024,
+			cwd: analysisRoot,
+			ignoreAmbientSignal: true,
+		});
+		if (!runtime.isCurrentSession(sessionGeneration)) return;
+
+		const buildResult = await safeSpawnAsync("npm", ["run", "build"], {
+			timeout: 60_000,
+			maxOutputBytes: 1024 * 1024,
+			cwd: analysisRoot,
+			ignoreAmbientSignal: true,
+		});
+		if (!runtime.isCurrentSession(sessionGeneration)) return;
+
+		const testsPassed =
+			testsResult.status === 0 || /missing script/i.test(testsResult.stderr);
+		const buildPassed =
+			buildResult.status === 0 || /missing script/i.test(buildResult.stderr);
+		runtime.errorDebtBaseline = { testsPassed, buildPassed };
+		dbg(
+			`session_start error-debt-baseline: tests=${testsPassed} build=${buildPassed}`,
+		);
 	});
 }
 
