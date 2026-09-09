@@ -81,6 +81,18 @@ function positiveEnv(name: string, fallback: number): number {
 	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * Per-call configurable timeout (in milliseconds) for the LSP warm-up that
+ * `warmLspForFile` performs on the `mode=fresh` MCP path. Read at call time
+ * via `positiveEnv` so a re-armed env var (tests, debug) takes effect without a
+ * process restart. Default 10000 matches the previous hardcoded
+ * `WARMUP_CLIENT_WAIT_MS` so the public behavior is unchanged when the env var
+ * is absent.
+ */
+function mcpFreshWarmupTimeoutMs(): number {
+	return positiveEnv("PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS", 10_000);
+}
+
 function idleEvictMs(): number {
 	return positiveEnv(
 		"PI_LENS_WORD_INDEX_IDLE_EVICT_MS",
@@ -214,16 +226,16 @@ export function _getWarmWordIndexCacheStateForTests(): {
 	};
 }
 
-// Generous warm-up budgets: a cold language server needs to spawn AND publish
-// diagnostics. The per-edit dispatch runner caps these tightly (spawn budget +
+// Generous warm-up budget: a cold language server needs to spawn AND publish
+// diagnostics. The per-edit dispatch runner caps this tightly (spawn budget +
 // 2500ms) for latency; a review tool prioritises completeness, so we pre-warm
 // with room to spare, then the measured dispatch reads the warm cache.
 // Bounded so a cold analysis can't hang: enough for fast servers (pyright,
 // rust-analyzer, gopls) and a warm typescript-language-server, but NOT enough to
 // fully load a large TS project from cold — that exceeds any per-call budget and
 // is the persistent warm server's job (see the `lsp` honesty signal + Tier 2).
-const WARMUP_CLIENT_WAIT_MS = 10_000;
-const WARMUP_DIAGNOSTICS_WAIT_MS = 6_000;
+// The default 10000ms is overridable per-process via
+// `PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS`; see `mcpFreshWarmupTimeoutMs()` above.
 
 /** One diagnostic, flattened to the fields an MCP consumer needs. */
 /**
@@ -385,34 +397,77 @@ function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
 }
 
 /**
+ * Structured result of the LSP warm-up attempt. Distinguishes the pre-conditions
+ * (`no-lsp`, `unsupported` — LSP never touched) from measured outcomes
+ * (`warmup-timeout`, `warmup-failed`, `warmed` — we attempted and recorded the
+ * elapsed time). Exposing these distinctly is what lets the caller build an
+ * honest `lsp.status` instead of collapsing every non-success into a single
+ * `skipped` / 0-diagnostic read-as-clean bucket.
+ */
+type WarmupOutcome = {
+	outcome: "warmed" | "warmup-timeout" | "warmup-failed" | "unsupported" | "no-lsp";
+	durationMs: number;
+};
+
+/**
  * Pre-warm the LSP for a file: spawn the server and wait for it to publish
  * diagnostics, so the subsequent dispatch reads a warm cache instead of a cold
- * (empty) one. Best-effort — failures never block the analysis.
+ * (empty) one.
+ *
+ * Returns a {@link WarmupOutcome} distinguishing five cases so the caller can
+ * build an honest `lsp.status`:
+ *
+ * - `"no-lsp"` and `"unsupported"` are PRE-CONDITIONS — the host has the
+ *   `no-lsp` flag set, or the LSP service declines to handle this file
+ *   (`!supportsLSP(absPath)`). LSP was never touched, so exposing either as
+ *   `"warmup-timeout"` would conflate "we never tried" with "we tried and the
+ *   server didn't answer in time". `durationMs` is 0 for both — no work was
+ *   measured.
+ * - `"warmup-timeout"` is a measured time-bound breach: `LSPService.touchFile`
+ *   returned `undefined` (server alive but no diagnostics published within
+ *   `mcpFreshWarmupTimeoutMs()`). `durationMs` is the elapsed time.
+ * - `"warmup-failed"` is a thrown or I/O error from the warm-up itself —
+ *   `fs.readFileSync` couldn't read the file, or `touchFile` rejected.
+ *   `durationMs` is the elapsed time when measurable, else 0.
+ * - `"warmed"` is the success path: the server published diagnostics (a
+ *   truthy `touchFile` result) within the budget.
  */
 async function warmLspForFile(
 	absPath: string,
 	host: ReturnType<typeof createMcpHost>,
-): Promise<void> {
-	if (host.getFlag("no-lsp")) return;
+): Promise<WarmupOutcome> {
+	if (host.getFlag("no-lsp")) {
+		return { outcome: "no-lsp", durationMs: 0 };
+	}
 	const lspService = getLSPService();
-	if (!lspService.supportsLSP(absPath)) return;
+	if (!lspService.supportsLSP(absPath)) {
+		return { outcome: "unsupported", durationMs: 0 };
+	}
 	let content: string;
 	try {
 		content = fs.readFileSync(absPath, "utf8");
 	} catch {
-		return;
+		return { outcome: "warmup-failed", durationMs: 0 };
 	}
+	const startedAt = Date.now();
+	const timeoutMs = mcpFreshWarmupTimeoutMs();
 	try {
-		await lspService.touchFile(absPath, content, {
+		const result = await lspService.touchFile(absPath, content, {
 			diagnostics: "document",
 			collectDiagnostics: true,
 			clientScope: "primary",
-			maxClientWaitMs: WARMUP_CLIENT_WAIT_MS,
-			maxDiagnosticsWaitMs: WARMUP_DIAGNOSTICS_WAIT_MS,
+			maxClientWaitMs: timeoutMs,
+			maxDiagnosticsWaitMs: timeoutMs,
 			source: "mcp-warmup",
 		});
+		const durationMs = Date.now() - startedAt;
+		if (result === undefined) {
+			return { outcome: "warmup-timeout", durationMs };
+		}
+		return { outcome: "warmed", durationMs };
 	} catch {
-		// Best-effort warm-up; the dispatch runner still tries on its own.
+		const durationMs = Date.now() - startedAt;
+		return { outcome: "warmup-failed", durationMs };
 	}
 }
 
@@ -442,7 +497,14 @@ export async function analyzeFile(
 	const host = createMcpHost({ "no-delta": true, ...options.flags }, cwd);
 
 	if (options.warmLsp !== false) {
-		await warmLspForFile(absPath, host);
+		const warmupOutcome = await warmLspForFile(absPath, host);
+		// T01 scope: capture the structured warm-up outcome into a local so
+		// T02 can promote it to `lsp.status` with precedence over the dispatch
+		// runner (today the dispatch runner's `skipped` for an unready LSP
+		// client silently wins, producing the cold-0 read-as-clean bug). The
+		// `void` marker documents that T01 deliberately does not yet read it,
+		// so the change stays reviewable as a pure plumbing refactor.
+		void warmupOutcome;
 	}
 
 	const reportsBefore = getLatencyReports().length;
