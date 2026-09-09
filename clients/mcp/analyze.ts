@@ -315,6 +315,17 @@ export interface McpAnalyzeResult {
 	 * cold language server can take longer to load than any per-call warm-up, so
 	 * `ran` + `status` + `durationMs` let the consumer judge completeness (and
 	 * prefer warm mode / a re-run once the persistent server has indexed).
+	 *
+	 * `status` is normally the dispatch runner's status string (`"succeeded"`,
+	 * `"skipped"`, `"when_skipped"`, `"test_file_skipped"`, …). When the
+	 * pre-dispatch LSP warm-up itself fails — `"warmup-timeout"` (server alive
+	 * but no diagnostics within `PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS`) or
+	 * `"warmup-failed"` (`touchFile` threw, or the file was unreadable) —
+	 * those values OVERRIDE the dispatch runner, so a cold 0-diagnostic read
+	 * never reaches the consumer as a false clean. For all other warm-up
+	 * outcomes (`"warmed"`, `"unsupported"`, `"no-lsp"`) the dispatch runner
+	 * remains authoritative — its `"skipped"` is preserved as honest (the
+	 * client really didn't publish for this file).
 	 */
 	lsp?: {
 		ran: boolean;
@@ -496,15 +507,16 @@ export async function analyzeFile(
 	// caller flags win over the default.
 	const host = createMcpHost({ "no-delta": true, ...options.flags }, cwd);
 
+	// #S03/T02: hoist the structured warm-up outcome to the function scope so
+	// the `lsp` assembly below can promote it to `lsp.status` with precedence
+	// over the dispatch runner. Without this, the dispatch runner's `skipped`
+	// for an unready LSP client silently wins and produces the cold-0
+	// read-as-clean bug. `undefined` here means "warm-up was skipped"
+	// (`warmLsp === false`), in which case the dispatch runner alone is
+	// authoritative, exactly as before T02.
+	let warmupOutcome: WarmupOutcome | undefined;
 	if (options.warmLsp !== false) {
-		const warmupOutcome = await warmLspForFile(absPath, host);
-		// T01 scope: capture the structured warm-up outcome into a local so
-		// T02 can promote it to `lsp.status` with precedence over the dispatch
-		// runner (today the dispatch runner's `skipped` for an unready LSP
-		// client silently wins, producing the cold-0 read-as-clean bug). The
-		// `void` marker documents that T01 deliberately does not yet read it,
-		// so the change stays reviewable as a pure plumbing refactor.
-		void warmupOutcome;
+		warmupOutcome = await warmLspForFile(absPath, host);
 	}
 
 	const reportsBefore = getLatencyReports().length;
@@ -629,17 +641,60 @@ export async function analyzeFile(
 	const lspRunner = latencyReport?.runners.find(
 		(runner) => runner.runnerId === "lsp",
 	);
-	const lsp = lspRunner
-		? {
-				ran:
-					lspRunner.status !== "skipped" &&
-					lspRunner.status !== "when_skipped" &&
-					lspRunner.status !== "test_file_skipped",
-				status: lspRunner.status,
-				diagnosticCount: lspRunner.diagnosticCount,
-				durationMs: lspRunner.durationMs,
-			}
-		: undefined;
+	// Precedence — warm-up time-out or warm-up failure WIN over the dispatch
+	// runner's status, so a cold 0-diagnostic read never reaches the consumer
+	// as a false clean. For every other warm-up outcome (`warmed`, `no-lsp`,
+	// `unsupported`) the dispatch runner's status remains authoritative — its
+	// `skipped` is honest (the client really didn't publish for this file) and
+	// we preserve it as the onesto signal. The boolean inversion is what
+	// closes the cold-0 read-as-clean bug: a `skipped` from the dispatch runner
+	// for a server that never answered gets OBLITERATED by the `warmup-timeout`
+	// warm-up outcome. Written as an if/else (not a ternary) so TypeScript
+	// preserves the `warmupOutcome !== undefined` narrowing inside the true
+	// branch — a `warmupOverride: boolean` intermediate would erase it and
+	// force three `Object is possibly 'undefined'` errors here.
+	let lsp: McpAnalyzeResult["lsp"];
+	if (
+		warmupOutcome !== undefined &&
+		(warmupOutcome.outcome === "warmup-timeout" ||
+			warmupOutcome.outcome === "warmup-failed")
+	) {
+		lsp = {
+			// ran=false here, ALWAYS, by construction: the override branch only
+			// fires when `warmupOutcome.outcome` is `warmup-timeout` or
+			// `warmup-failed` (narrowed at the `if` guard above), neither of
+			// which is `"warmed"`. TS narrows that union through the `||` clause,
+			// making any `=== "warmed"` comparison a provably-false comparison;
+			// we hardcode `false` instead so the literal expression matches the
+			// semantic guarantee. Both override outcomes mean "we tried and the
+			// server didn't give us a usable result" — the same honest "no
+			// useful answer" the dispatch runner's `skipped` already encoded
+			// via its `ran` formula. The success path (`warmed`) lands in the
+			// dispatch-runner `else` branch, where the dispatch's own `ran`
+			// formula decides.
+			ran: false,
+			status: warmupOutcome.outcome,
+			diagnosticCount: 0,
+			// warm-up-only duration — the dispatch did no real LSP work when
+			// the warm-up itself failed, so this is the only honest duration
+			// on the override path (the dispatch runner's `durationMs` would
+			// measure "how long the LSP runner spent skipping", not the actual
+			// wait).
+			durationMs: warmupOutcome.durationMs,
+		};
+	} else if (lspRunner) {
+		lsp = {
+			ran:
+				lspRunner.status !== "skipped" &&
+				lspRunner.status !== "when_skipped" &&
+				lspRunner.status !== "test_file_skipped",
+			status: lspRunner.status,
+			diagnosticCount: lspRunner.diagnosticCount,
+			durationMs: lspRunner.durationMs,
+		};
+	} else {
+		lsp = undefined;
+	}
 
 	return {
 		filePath: absPath,

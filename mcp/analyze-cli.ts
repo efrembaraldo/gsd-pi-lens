@@ -71,10 +71,27 @@ function formatReport(result: McpAnalyzeResult, cwd: string): string {
 	if (result.diagnostics.length > 30) {
 		lines.push(`  … ${result.diagnostics.length - 30} more`);
 	}
-	if (result.lsp && result.lsp.status === "skipped") {
-		lines.push(
-			"  (LSP type-check skipped — run pilens_analyze on the warm MCP server for type errors)",
-		);
+	// #S03/T02: surface the LSP warm-up / type-check outcome honestly so a cold
+	// 0-diagnostic read never passes as clean. Three flavors, three messages —
+	// the remedies differ (start/restart the warm server for a fresh-timeout,
+	// retry the edited file for a transient warm-up failure, switch to warm
+	// mode for an opt-out skip). Keeping the messages distinct avoids the
+	// pre-T02 trap where every non-success collapsed to one "skipped" line
+	// that hid the real cause from the agent.
+	if (result.lsp) {
+		if (result.lsp.status === "warmup-timeout") {
+			lines.push(
+				"  (LSP warmup timed out — run on the warm MCP server for type errors)",
+			);
+		} else if (result.lsp.status === "warmup-failed") {
+			lines.push(
+				"  (LSP warmup failed — run on the warm MCP server for type errors)",
+			);
+		} else if (result.lsp.status === "skipped") {
+			lines.push(
+				"  (LSP type-check skipped — run pilens_analyze on the warm MCP server for type errors)",
+			);
+		}
 	}
 	return lines.join("\n");
 }

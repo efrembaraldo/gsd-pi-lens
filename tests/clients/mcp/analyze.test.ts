@@ -106,9 +106,14 @@ const emptyResult = {
 let tmpDir: string;
 let tsFile: string;
 let previousDataDir: string | undefined;
+let previousMcpFreshWarmupTimeoutMs: string | undefined;
 
 beforeEach(() => {
 	previousDataDir = process.env.PILENS_DATA_DIR;
+	// #S03/T02: save the warm-up env so test cases that set it don't leak
+	// across files — mirrors the PILENS_DATA_DIR save/restore pattern above.
+	previousMcpFreshWarmupTimeoutMs =
+		process.env.PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS;
 	resetDispatchBaselines();
 	clearWidgetState();
 	vi.mocked(dispatchForFile).mockReset();
@@ -127,6 +132,13 @@ beforeEach(() => {
 afterEach(() => {
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
+	// #S03/T02: restore the warm-up env var (delete if it was unset on entry).
+	if (previousMcpFreshWarmupTimeoutMs === undefined) {
+		delete process.env.PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS;
+	} else {
+		process.env.PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS =
+			previousMcpFreshWarmupTimeoutMs;
+	}
 	removeTempDirSync(tmpDir);
 });
 
@@ -549,5 +561,183 @@ describe("analyzeFile", () => {
 		mockBuildOrUpdateGraph.mockRejectedValueOnce(new Error("graph boom"));
 		const result = await analyzeFile(tsFile, tmpDir, { updateGraph: true });
 		expect(result.counts.diagnostics).toBe(0);
+	});
+
+	// ── #S03/T02: warm-up outcome precedence over the dispatch runner ──────────
+	//
+	// Matrix (warm-up outcome × dispatch lspRunner.status → final lsp.status):
+	//
+	//   | warm-up outcome    | dispatch lspRunner.status | final lsp.status      |
+	//   | ------------------ | ------------------------- | --------------------- |
+	//   | warmup-timeout     | any                       | warmup-timeout (over) |
+	//   | warmup-failed      | any                       | warmup-failed (over)  |
+	//   | warmed             | succeeded                 | succeeded (dispatch)  |
+	//   | warmed             | skipped                   | skipped (dispatch)    |
+	//   | unsupported        | any                       | dispatch status       |
+	//   | no-lsp             | any                       | dispatch status       |
+	//
+	// The two OVER rows close the cold-0 read-as-clean bug: a `skipped` from
+	// the dispatch runner for an LSP client that never answered is OBLITERATED
+	// by the `warmup-timeout` warm-up outcome. For every other warm-up outcome
+	// the dispatch runner remains authoritative — its `skipped` is honest (the
+	// client really didn't publish for this file) and we preserve it.
+
+	it("warmup-timeout overrides dispatch 'skipped' on lsp.status (#S03/T02 case A)", async () => {
+		process.env.PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS = "50";
+		mockSupportsLSP.mockReturnValue(true);
+		// Simulate the warm-up exceeding the 50ms timeout without publishing
+		// diagnostics — the real touchFile honours `maxClientWaitMs` and returns
+		// `undefined` on a timeout; our mock reproduces that by waiting long
+		// enough that Date.now() reflects the exceeded budget.
+		mockTouchFile.mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			return undefined;
+		});
+		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
+		vi.mocked(getLatencyReports).mockReset();
+		vi.mocked(getLatencyReports).mockReturnValue([]);
+
+		const report: DispatchLatencyReport = {
+			filePath: tsFile,
+			fileKind: "jsts",
+			overallStartMs: 0,
+			overallEndMs: 200,
+			totalDurationMs: 200,
+			runners: [
+				{
+					runnerId: "lsp",
+					startTime: 0,
+					endTime: 50,
+					durationMs: 50,
+					// The dispatch's LSP runner saw the unready client and reported
+					// 'skipped' — without precedence, this would surface as the
+					// final lsp.status (the cold-0 read-as-clean bug).
+					status: "skipped",
+					diagnosticCount: 0,
+					semantic: "blocking",
+				},
+			],
+			stoppedEarly: false,
+			totalDiagnostics: 0,
+			blockers: 0,
+			warnings: 0,
+		};
+		vi.mocked(getLatencyReports)
+			.mockReturnValueOnce([])
+			.mockReturnValueOnce([report]);
+
+		const result = await analyzeFile(tsFile, tmpDir, {
+			flags: { "no-lsp": false },
+		});
+
+		expect(result.lsp).toBeDefined();
+		expect(result.lsp!.status).toBe("warmup-timeout");
+		expect(result.lsp!.ran).toBe(false);
+		expect(result.lsp!.diagnosticCount).toBe(0);
+		// The warm-up waited at least the 50ms timeout before returning
+		// undefined, so warmup-only durationMs is bounded below by 50.
+		expect(result.lsp!.durationMs).toBeGreaterThanOrEqual(50);
+	});
+
+	it("warmup-failed overrides dispatch 'succeeded' on lsp.status (#S03/T02 case B)", async () => {
+		mockSupportsLSP.mockReturnValue(true);
+		mockTouchFile.mockRejectedValue(new Error("boom"));
+		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
+		vi.mocked(getLatencyReports).mockReset();
+		vi.mocked(getLatencyReports).mockReturnValue([]);
+
+		const report: DispatchLatencyReport = {
+			filePath: tsFile,
+			fileKind: "jsts",
+			overallStartMs: 0,
+			overallEndMs: 500,
+			totalDurationMs: 500,
+			runners: [
+				{
+					runnerId: "lsp",
+					startTime: 0,
+					endTime: 500,
+					durationMs: 500,
+					// Dispatch ran the LSP runner and reported `succeeded` — but
+					// the warm-up threw, so precedence lets `warmup-failed` win.
+					// Without precedence the agent would see 'succeeded' with 0
+					// diagnostics, the false-clean signal that broke the warm
+					// pre-fix flow.
+					status: "succeeded",
+					diagnosticCount: 0,
+					semantic: "blocking",
+				},
+			],
+			stoppedEarly: false,
+			totalDiagnostics: 0,
+			blockers: 0,
+			warnings: 0,
+		};
+		vi.mocked(getLatencyReports)
+			.mockReturnValueOnce([])
+			.mockReturnValueOnce([report]);
+
+		const result = await analyzeFile(tsFile, tmpDir, {
+			flags: { "no-lsp": false },
+		});
+
+		expect(result.lsp).toBeDefined();
+		// warmup-failed wins regardless of dispatch status: that's the precedence
+		// contract on the override branch.
+		expect(result.lsp!.status).toBe("warmup-failed");
+		expect(result.lsp!.diagnosticCount).toBe(0);
+	});
+
+	it("preserves the dispatch runner's status when the warm-up succeeded (#S03/T02 case C)", async () => {
+		mockSupportsLSP.mockReturnValue(true);
+		// Simulate a successful warm-up: touchFile returns a non-undefined
+		// value (any truthy result is enough for warmLspForFile to classify
+		// the outcome as "warmed"). `mockResolvedValue({})` would fail typing
+		// because the hoisted `mockTouchFile` is typed `vi.fn(async () =>
+		// undefined)` — its return type is `Promise<undefined>`. `mockImplementation`
+		// is the untyped seam the production return type doesn't constrain.
+		mockTouchFile.mockImplementation(
+			async () => ({} as unknown as undefined),
+		);
+		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
+		vi.mocked(getLatencyReports).mockReset();
+		vi.mocked(getLatencyReports).mockReturnValue([]);
+
+		const report: DispatchLatencyReport = {
+			filePath: tsFile,
+			fileKind: "jsts",
+			overallStartMs: 0,
+			overallEndMs: 1200,
+			totalDurationMs: 1200,
+			runners: [
+				{
+					runnerId: "lsp",
+					startTime: 0,
+					endTime: 1000,
+					durationMs: 1000,
+					status: "succeeded",
+					diagnosticCount: 0,
+					semantic: "blocking",
+				},
+			],
+			stoppedEarly: false,
+			totalDiagnostics: 0,
+			blockers: 0,
+			warnings: 0,
+		};
+		vi.mocked(getLatencyReports)
+			.mockReturnValueOnce([])
+			.mockReturnValueOnce([report]);
+
+		const result = await analyzeFile(tsFile, tmpDir, {
+			flags: { "no-lsp": false },
+		});
+
+		// Backward compat: a successful warm-up delegates the LSP verdict to
+		// the dispatch runner. The pre-T02 behaviour is preserved exactly.
+		expect(result.lsp).toBeDefined();
+		expect(result.lsp!.status).toBe("succeeded");
+		expect(result.lsp!.ran).toBe(true);
+		expect(result.lsp!.diagnosticCount).toBe(0);
 	});
 });
