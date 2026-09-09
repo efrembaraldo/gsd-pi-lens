@@ -242,6 +242,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		default: false,
 		scope: "global",
 	},
+	{
+		name: "error-debt-baseline",
+		description:
+			"Opt-in: populate the runtime error-debt baseline (npm test + npm run build) at session_start when the flag is enabled. Off by default because both commands are expensive. Also via errorDebtBaseline.enabled=true in ~/.pi-lens/config.json.",
+		configKey: "errorDebtBaseline.enabled",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
 ];
 
 const byName = new Map(LENS_FLAGS.map((spec) => [spec.name, spec]));
