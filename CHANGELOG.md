@@ -4,7 +4,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ## Modifiche strutturali rispetto a pi-lens
 
-Fork di [apmantza/pi-lens](https://github.com/apmantza/pi-lens), divergente dalla release upstream `4.1.3` (ultima release upstream preservata integralmente nella cronologia). Release indipendente del fork a partire da `0.0.1`, pubblicata come `@efrembaraldo/gsd-pi-lens` sotto lo scope host `@gsd/*`. Branch di default: `master`. Pubblicazione tramite provenance OIDC (id-token: write), nessun NPM_TOKEN. Guardie di verifica dedicate al fork: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`.
+Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging from upstream release `4.1.3` (the last upstream release preserved verbatim in the history above). Independent fork release line starting at `0.0.1`, published on npm as `@efrembaraldo/gsd-pi-lens` under the host scope `@gsd/*`. Default branch: `master`. Dedicated CI pipeline and publish workflow on `master`; the publish job uses OIDC provenance (`id-token: write`, no `NPM_TOKEN`). Host type declarations are regenerated from a verified GSD checkout: `.d.ts` (and runtime `.js` where required) for `@gsd/pi-coding-agent` and `@gsd/pi-tui` are vendored, and the runtime closure (`@gsd/native`, `get-east-asian-width`, `marked`) is materialized into the package's dependency closure — both stages idempotent and re-run after every install. Fork-specific verification guards: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`.
 
 ## [Unreleased]
 
