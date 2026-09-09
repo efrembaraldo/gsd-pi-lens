@@ -10,6 +10,10 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 > for how pi-lens surfaces diagnostics (honesty labels, blockers, read-before-edit)
 > and how to respond.
 
+## Fork di pi-lens
+
+Questo repository è un fork di [apmantza/pi-lens](https://github.com/apmantza/pi-lens), pubblicato in modo indipendente come pacchetto npm `@efrembaraldo/gsd-pi-lens`, a partire dalla release `0.0.1`. I pacchetti host sono ripubblicati sotto lo scope `@gsd/*` (non più `@earendil-works`/`@apmantza`). Il branch di default del fork è `master`. Il fork mantiene una pipeline CI e un workflow publish dedicati, separati da quelli upstream. Per i dettagli delle modifiche strutturali, vedi [CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens](CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens).
+
 ## What It Does
 
 - LSP diagnostics and navigation across supported languages

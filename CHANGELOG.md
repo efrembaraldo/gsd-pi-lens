@@ -2,6 +2,10 @@
 
 All notable changes to pi-lens will be documented in this file.
 
+## Modifiche strutturali rispetto a pi-lens
+
+Fork di [apmantza/pi-lens](https://github.com/apmantza/pi-lens), divergente dalla release upstream `4.1.3` (ultima release upstream preservata integralmente nella cronologia). Release indipendente del fork a partire da `0.0.1`, pubblicata come `@efrembaraldo/gsd-pi-lens` sotto lo scope host `@gsd/*`. Branch di default: `master`. Pubblicazione tramite provenance OIDC (id-token: write), nessun NPM_TOKEN. Guardie di verifica dedicate al fork: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`.
+
 ## [Unreleased]
 
 ### Added
