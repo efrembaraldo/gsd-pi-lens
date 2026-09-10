@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import { extname } from "node:path";
 import { withBudget } from "./deadline-utils.js";
 import { EXTENSION_TO_GRAMMAR } from "./language-registry.js";
+import { getMarkdownFrontmatterAlwaysRead } from "./runtime-config.js";
 import type { TreeSitterClient } from "./tree-sitter-client.js";
 
 /** Only expand reads smaller than this (lines). Larger reads don't benefit. */
@@ -177,11 +178,82 @@ function buildAncestryChain(node: any, types: string[]): AncestorSymbol[] {
 	return chain.reverse(); // outermost first
 }
 
+/**
+ * Detect a YAML frontmatter block at the top of a markdown file. Returns
+ * the 0-indexed row of the closing `---` line when found, undefined otherwise.
+ * The opening `---` must occupy row 0 (after leading whitespace trimming) and
+ * the closing `---`, on its own row, terminates the block. The block may be
+ * empty (opening followed by closing on row 1).
+ */
+function detectFrontmatterEnd(allLines: string[]): number | undefined {
+	if (allLines.length === 0) return undefined;
+	if (allLines[0].trim() !== "---") return undefined;
+	for (let i = 1; i < allLines.length; i++) {
+		if (allLines[i].trim() === "---") return i;
+	}
+	return undefined;
+}
+
+/** True when `line` is a markdown table row (begins, after left-trim, with `|`). */
+function isTableRow(line: string | undefined): boolean {
+	return !!line && line.trimStart().startsWith("|");
+}
+
+/**
+ * True when `line` is a markdown table separator, e.g. `| --- | --- |` or
+ * `|:---:|:---|`. Accepts any combination of `:`, `-`, and `|` plus
+ * surrounding whitespace; requires at least one `-` per column.
+ */
+function isTableSeparator(line: string | undefined): boolean {
+	if (!line) return false;
+	const pattern = /^\|\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+	return pattern.test(line.trimStart());
+}
+
+/**
+ * If the row immediately above `upperRow` is a markdown table separator,
+ * walk backward through consecutive `|`-prefixed rows and return the new
+ * upper bound. Returns `upperRow` unchanged when no adjacent table is
+ * detected.
+ */
+function expandToTableAbove(allLines: string[], upperRow: number): number {
+	if (upperRow <= 0) return upperRow;
+	const above = upperRow - 1;
+	if (!isTableSeparator(allLines[above])) return upperRow;
+	let first = above - 1;
+	while (first >= 0 && isTableRow(allLines[first])) {
+		first--;
+	}
+	return first + 1;
+}
+
+/**
+ * If the row immediately below `lowerRow` is a markdown table separator,
+ * walk forward through consecutive `|`-prefixed rows and return the new
+ * lower bound. Returns `lowerRow` unchanged when no adjacent table is
+ * detected.
+ */
+function expandToTableBelow(
+	allLines: string[],
+	lowerRow: number,
+	lastRow: number,
+): number {
+	const below = lowerRow + 1;
+	if (below > lastRow) return lowerRow;
+	if (!isTableSeparator(allLines[below])) return lowerRow;
+	let last = below + 1;
+	while (last <= lastRow && isTableRow(allLines[last])) {
+		last++;
+	}
+	return last - 1;
+}
+
 function tryExpandMarkdownSection(
 	content: string,
 	requestedStartRow: number,
 	requestedLimit: number,
 	totalLines: number,
+	frontmatterAlwaysRead: boolean = getMarkdownFrontmatterAlwaysRead(),
 ): Omit<ExpandedRead, "durationMs"> | undefined {
 	const lines = content.split(/\r?\n/);
 	const lastRow = totalLines - 1;
@@ -209,6 +281,22 @@ function tryExpandMarkdownSection(
 			sectionEndRow = i - 1;
 			break;
 		}
+	}
+
+	// S06/T02: when the toggle is on, widen the heading-derived range to
+	// include YAML frontmatter at the top of the file and any markdown tables
+	// adjacent to the section (above or below). The toggle adds coverage —
+	// it never narrows it, so must-have 3 holds (a file without frontmatter
+	// or adjacent tables returns the same range as the heading-only path).
+	if (frontmatterAlwaysRead) {
+		const fmEnd = detectFrontmatterEnd(lines);
+		if (fmEnd !== undefined && sectionStartRow >= fmEnd) {
+			// Heading sits after the frontmatter block — include the block.
+			sectionStartRow = 0;
+		}
+
+		sectionStartRow = expandToTableAbove(lines, sectionStartRow);
+		sectionEndRow = expandToTableBelow(lines, sectionEndRow, lastRow);
 	}
 
 	const expandedStart = sectionStartRow + 1;
@@ -264,6 +352,7 @@ export async function tryExpandRead(
 				requestedStartRow,
 				requestedLimit,
 				totalLines,
+				getMarkdownFrontmatterAlwaysRead(),
 			);
 			if (!result) return undefined;
 			return { ...result, durationMs: Date.now() - startedAt };
