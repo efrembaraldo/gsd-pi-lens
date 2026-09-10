@@ -278,11 +278,20 @@ export const PROJECT_SCOPED_LENS_FLAGS: readonly LensFlagSpec[] =
  * `actionableWarnings` is intentionally absent: it is already a flag section
  * (`actionableWarnings.enabled`, `.autoFix.enabled`, ...) so it is covered by
  * the registry-derived set.
+ *
+ * `readGuard` is declared explicitly even though `readGuard.enabled` lives
+ * in the flag registry: the namespace also carries the
+ * `readGuard.markdown.frontmatterAlwaysRead` non-flag knob (S06/T01), which
+ * the global loader parses by hand alongside the flag. Listing the section
+ * here keeps the unknown-key scan honest about every namespace the loader
+ * recognises, while the registry-derived set still does the heavy lifting for
+ * sections that contain ONLY flags.
  */
 export const GLOBAL_NON_FLAG_CONFIG_SECTIONS: readonly string[] = [
 	"ignore",
 	"dispatch",
 	"widget",
+	"readGuard",
 	"$schema",
 ];
 

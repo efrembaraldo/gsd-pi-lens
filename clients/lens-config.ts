@@ -61,6 +61,29 @@ export interface PiLensToggleConfig {
 	enabled?: boolean;
 }
 
+/**
+ * `readGuard` is a flag section (`readGuard.enabled`) AND a non-flag
+ * namespace (`readGuard.markdown.frontmatterAlwaysRead`, S06/T01). The
+ * registry handles the flag; the global loader parses the non-flag by hand.
+ * The interface is the union of both shapes so a single typed read of the
+ * loader output covers them — keeping the loader's own type narrow while a
+ * consumer (e.g. {@link getGlobalMarkdownFrontmatterAlwaysRead}) sees the
+ * non-flag knob it needs.
+ */
+export interface PiLensReadGuardConfig extends PiLensToggleConfig {
+	markdown?: {
+		/**
+		 * When true (the default), the markdown read-expansion
+		 * (`clients/read-expansion.ts`'s `tryExpandMarkdownSection`) treats
+		 * the YAML frontmatter and any adjacent table rows as part of the
+		 * enclosing section, so an edit inside them does not trigger a
+		 * spurious out-of-range read-guard warning. Set to false to restore
+		 * the pre-S06 behaviour (no frontmatter/table coverage).
+		 */
+		frontmatterAlwaysRead?: boolean;
+	};
+}
+
 export interface PiLensGlobalConfig {
 	/**
 	 * Gitignore-style patterns excluded from pi-lens scans across ALL projects.
@@ -94,7 +117,7 @@ export interface PiLensGlobalConfig {
 	/** Whether the Opengrep auxiliary LSP attaches (`--no-opengrep`). */
 	opengrep?: PiLensToggleConfig;
 	/** Whether the read-before-edit behavior monitor runs (`--no-read-guard`). */
-	readGuard?: PiLensToggleConfig;
+	readGuard?: PiLensReadGuardConfig;
 	format?: {
 		/** Whether auto-formatting is enabled. */
 		enabled?: boolean;
@@ -325,6 +348,41 @@ export function loadPiLensGlobalConfig(
 			}
 		}
 
+		// S06/T01: parse `readGuard.markdown.frontmatterAlwaysRead` alongside
+		// the `readGuard.enabled` flag (handled by `assignFlagConfigSection`
+		// above). Same #533 contract as `widget.visible` / `format.mode`: a
+		// present-but-wrong-type warns and the value falls back to
+		// `undefined`; an absent key stays silent. The runtime getter
+		// (`getMarkdownFrontmatterAlwaysRead`) coerces `undefined` to the
+		// default `true` at the boundary, so a malformed config never
+		// silently narrows coverage.
+		const readGuard = asConfigObject(raw.readGuard);
+		if (readGuard) {
+			const markdown = asConfigObject(readGuard.markdown);
+			if (markdown) {
+				if (
+					typeof markdown.frontmatterAlwaysRead === "boolean" ||
+					!("frontmatterAlwaysRead" in markdown)
+				) {
+					config.readGuard ??= {};
+					const guardSection = config.readGuard as Record<string, unknown>;
+					guardSection.markdown ??= {};
+					(
+						guardSection.markdown as Record<string, unknown>
+					).frontmatterAlwaysRead = markdown.frontmatterAlwaysRead;
+				} else {
+					warnInvalid(
+						"readGuard.markdown.frontmatterAlwaysRead must be a boolean",
+					);
+					config.readGuard ??= {};
+					const guardSection = config.readGuard as Record<string, unknown>;
+					guardSection.markdown ??= {};
+					(guardSection.markdown as Record<string, unknown>)
+						.frontmatterAlwaysRead = undefined;
+				}
+			}
+		}
+
 		const format = asConfigObject(raw.format);
 		if (format) {
 			config.format ??= {};
@@ -414,6 +472,19 @@ export function getGlobalIgnorePatterns(configPath?: string): string[] {
 
 export function getGlobalWidgetDefaultVisible(configPath?: string): boolean {
 	return loadPiLensGlobalConfig(configPath)?.widget?.visible !== false;
+}
+
+/**
+ * Read the boolean at `readGuard.markdown.frontmatterAlwaysRead` out of the
+ * canonical global config. Returns `undefined` when the key is absent, so
+ * the runtime getter can distinguish "not set" from "explicitly false" at
+ * the boundary and apply the default `true` only when nothing decided.
+ */
+export function getGlobalMarkdownFrontmatterAlwaysRead(
+	configPath?: string,
+): boolean | undefined {
+	return loadPiLensGlobalConfig(configPath)?.readGuard?.markdown
+		?.frontmatterAlwaysRead;
 }
 
 /** Per-turn quickfix cap; undefined means "use the built-in default of 5". */

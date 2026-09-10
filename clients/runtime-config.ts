@@ -4,7 +4,10 @@
  */
 
 import { toPositiveFinite } from "./env-utils.js";
-import { loadPiLensGlobalConfig } from "./lens-config.js";
+import {
+	getGlobalMarkdownFrontmatterAlwaysRead,
+	loadPiLensGlobalConfig,
+} from "./lens-config.js";
 
 let _runnerTimeoutFloorCache: number | undefined;
 
@@ -47,6 +50,52 @@ export function getRunnerTimeoutFloorMs(): number {
  */
 export function _resetRunnerTimeoutFloorCacheForTests(): void {
 	_runnerTimeoutFloorCache = undefined;
+}
+
+let _markdownFrontmatterAlwaysReadCache: boolean | undefined;
+
+/**
+ * Whether the markdown read-expansion treats YAML frontmatter and adjacent
+ * table rows as part of the enclosing section, so an edit inside them does
+ * not trip an out-of-range read-guard warning (`S06/T01`). Defaults `true`
+ * — the toggle adds coverage, it does not narrow it. The default lives here,
+ * not in the loader, so a malformed config (`undefined` from
+ * `getGlobalMarkdownFrontmatterAlwaysRead`) still resolves to the safe
+ * backward-compatible value. Reads from
+ * `~/.pi-lens/config.json` → `readGuard.markdown.frontmatterAlwaysRead`;
+ * the env-var override is intentionally absent — same policy as
+ * `getWidgetVisible`/`getFormatMode`, which are config-only.
+ *
+ * Lazy + memoized so importing `runtime-config.ts` does not trigger disk IO.
+ * The config file is read at most once per process, on first markdown
+ * expansion. Re-armed at `session_start` via
+ * {@link _resetMarkdownFrontmatterAlwaysReadCacheForTests} (and the matching
+ * run-level reset in production code paths, when added).
+ *
+ * @example ~/.pi-lens/config.json
+ * ```json
+ * { "readGuard": { "markdown": { "frontmatterAlwaysRead": false } } }
+ * ```
+ */
+export function getMarkdownFrontmatterAlwaysRead(): boolean {
+	if (_markdownFrontmatterAlwaysReadCache !== undefined) {
+		return _markdownFrontmatterAlwaysReadCache;
+	}
+	const configured = getGlobalMarkdownFrontmatterAlwaysRead();
+	// `undefined` means "the key was not present in the config"; coerce at the
+	// boundary so the rest of the system never has to. A non-boolean garbage
+	// value never reaches here — the loader either coerced or fell back to
+	// `undefined` already.
+	_markdownFrontmatterAlwaysReadCache = configured ?? true;
+	return _markdownFrontmatterAlwaysReadCache;
+}
+
+/**
+ * Test-only: clear the memoized boolean so a subsequent call re-reads the
+ * config file. Use after mutating the config in a test.
+ */
+export function _resetMarkdownFrontmatterAlwaysReadCacheForTests(): void {
+	_markdownFrontmatterAlwaysReadCache = undefined;
 }
 
 export const RUNTIME_CONFIG = {
