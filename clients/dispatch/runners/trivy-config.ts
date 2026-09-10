@@ -91,6 +91,42 @@ export function looksLikeCloudFormationTemplate(content: string): boolean {
 	return /Type["']?\s*:\s*["']?(AWS|Custom|Alexa)::/.test(content);
 }
 
+/**
+ * Heuristic: does this file look like a Docker Compose manifest (slice S05)?
+ * A file qualifies when the caller-provided name matches
+ * `docker-compose[.suffix].(yml|yaml)` or `compose[.suffix].(yml|yaml)`
+ * (normalized lowercase) OR when at least one YAML document carries a
+ * top-level `version:` key — Compose v1/v2/v3 always declare `services:`
+ * plus a root `version:`. Checked per-document so a multi-doc file with
+ * at least one Compose doc qualifies.
+ *
+ * Deliberately a permissive signal: the dispatch runner's flag
+ * (`isTrivyComposeEnabled`) is the gating decision, so a Compose-shape file
+ * in an un-opted project is skipped before trivy sees it. False positives
+ * (e.g. a Helm `Chart.yaml`, which also declares a root `version:`) are
+ * bounded by that opt-in — the default is OFF.
+ */
+export function looksLikeDockerCompose(
+	content: string,
+	basename?: string,
+): boolean {
+	if (basename) {
+		const normalized = basename.toLowerCase();
+		if (
+			/^docker-compose.*\.(yml|yaml)$/.test(normalized) ||
+			/^compose.*\.(yml|yaml)$/.test(normalized)
+		) {
+			return true;
+		}
+	}
+	for (const doc of content.split(/^---\s*$/m)) {
+		if (/^version:\s*\S/m.test(doc)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function normalizeSeverity(raw: unknown): TrivySeverity {
 	const s = typeof raw === "string" ? raw.toUpperCase() : "";
 	if (s === "CRITICAL" || s === "HIGH" || s === "MEDIUM" || s === "LOW") {

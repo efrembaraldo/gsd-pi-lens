@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { suppressTrivyConfigDockerOverlap } from "../../../clients/dispatch/dispatcher.js";
 import {
 	looksLikeCloudFormationTemplate,
+	looksLikeDockerCompose,
 	looksLikeKubernetesManifest,
 	parseTrivyConfigOutput,
 } from "../../../clients/dispatch/runners/trivy-config.js";
@@ -350,6 +351,113 @@ describe("looksLikeCloudFormationTemplate", () => {
 				"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
 			),
 		).toBe(false);
+	});
+});
+
+// ── Docker Compose heuristic (slice S05) ─────────────────────────────────────
+
+describe("looksLikeDockerCompose heuristic", () => {
+	it("matches a Compose v1 file with services", () => {
+		expect(
+			looksLikeDockerCompose(
+				"version: '2'\nservices:\n  web:\n    image: nginx\n",
+			),
+		).toBe(true);
+	});
+
+	it("matches a Compose v2 file with volumes", () => {
+		expect(
+			looksLikeDockerCompose(
+				"version: '2.4'\nservices:\n  db:\n    image: postgres\nvolumes:\n  data:\n",
+			),
+		).toBe(true);
+	});
+
+	it("matches a Compose v3 file with a quoted version \"3.8\"", () => {
+		expect(
+			looksLikeDockerCompose(
+				'version: "3.8"\nservices:\n  app:\n    image: myapp\n',
+			),
+		).toBe(true);
+	});
+
+	it("matches when at least one document in a multi-doc file is Compose", () => {
+		const content = [
+			"# config",
+			"foo: bar",
+			"---",
+			"version: '3'",
+			"services:",
+			"  web:",
+			"    image: nginx",
+		].join("\n");
+		expect(looksLikeDockerCompose(content)).toBe(true);
+	});
+
+	it("matches a docker-compose.yml by filename even when content has no version key", () => {
+		expect(looksLikeDockerCompose("# just comments\n", "docker-compose.yml")).toBe(
+			true,
+		);
+	});
+
+	it("matches compose.local.yaml by filename", () => {
+		expect(looksLikeDockerCompose("foo: bar\n", "compose.local.yaml")).toBe(true);
+	});
+
+	it("matches a Compose basename case-insensitively", () => {
+		expect(
+			looksLikeDockerCompose("foo: bar\n", "docker-compose.prod.YML"),
+		).toBe(true);
+	});
+
+	it("does NOT match a Kubernetes manifest (no top-level version:)", () => {
+		expect(
+			looksLikeDockerCompose(
+				"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+			),
+		).toBe(false);
+	});
+
+	it("does NOT match a CloudFormation yaml template", () => {
+		expect(
+			looksLikeDockerCompose(
+				"AWSTemplateFormatVersion: '2010-09-09'\nResources:\n  Bucket:\n    Type: AWS::S3::Bucket\n",
+			),
+		).toBe(false);
+	});
+
+	it("does NOT match a GitHub Actions workflow (no top-level version:)", () => {
+		expect(
+			looksLikeDockerCompose(
+				"name: CI\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+			),
+		).toBe(false);
+	});
+
+	it("does NOT match a Helm values.yaml file", () => {
+		expect(
+			looksLikeDockerCompose(
+				"replicaCount: 1\nimage:\n  repository: nginx\n  tag: stable\n",
+			),
+		).toBe(false);
+	});
+
+	it("does NOT match a generic yaml file with no version: key", () => {
+		expect(
+			looksLikeDockerCompose("name: my-config\ndescription: just a yaml\n"),
+		).toBe(false);
+	});
+
+	it("does NOT match a yaml file whose only `version:` appears indented (block scalar)", () => {
+		expect(
+			looksLikeDockerCompose(
+				"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\ndata:\n  config.yaml: |\n    version: 1.0\n",
+			),
+		).toBe(false);
+	});
+
+	it("does NOT match a generic file with the wrong basename", () => {
+		expect(looksLikeDockerCompose("foo: bar\n", "package.json")).toBe(false);
 	});
 });
 
