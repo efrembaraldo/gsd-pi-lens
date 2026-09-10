@@ -183,6 +183,32 @@ export function isTrivyEnabled(cwd: string): boolean {
 }
 
 /**
+ * Compose-specific opt-in (slice S05): trivy config also scans
+ * `docker-compose.yml` / `compose.yml` files only when the project sets
+ * `trivy.compose.enabled: true` in `.pi-lens.json`. Default OFF, so a vanilla
+ * Compose project doesn't start receiving trivy-config IaC findings unless it
+ * explicitly opts in. Reads strictly `=== true`; the same fail-open semantics
+ * as `isTrivyEnabled` — a missing config, a missing `trivy`, a missing
+ * `compose` namespace, or a truthy-but-not-true value (string, number,
+ * object) all read as OFF.
+ *
+ * Exported for tests and the dispatch runner's gate-before-scan call.
+ */
+export function isTrivyComposeEnabled(cwd: string): boolean {
+	try {
+		const config = loadPiLensProjectConfig(cwd);
+		const compose = (
+			config.raw as
+				| { trivy?: { compose?: { enabled?: unknown } } }
+				| undefined
+		)?.trivy?.compose;
+		return compose?.enabled === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Full session-scan gate: explicit opt-in AND a scannable dependency surface.
  * Both must hold before we auto-install trivy / pull its DB.
  */

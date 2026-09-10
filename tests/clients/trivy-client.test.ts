@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import {
 	hasAnyDependencyManifest,
+	isTrivyComposeEnabled,
 	isTrivyEnabled,
 	parseTrivyLicenses,
 	parseTrivyReport,
@@ -82,6 +83,39 @@ describe("isTrivyEnabled / shouldScanTrivy (#131 opt-in)", () => {
 			writeConfig(v);
 			expect(isTrivyEnabled(tmp)).toBe(false);
 			expect(shouldScanTrivy(tmp)).toBe(false);
+		}
+	});
+});
+
+// ── Compose opt-in (slice S05) ───────────────────────────────────────────────
+
+describe("isTrivyComposeEnabled (S05)", () => {
+	function writeConfig(cfg: unknown) {
+		fs.writeFileSync(
+			path.join(tmp, ".pi-lens.json"),
+			JSON.stringify(cfg),
+		);
+		resetProjectLensConfigCache();
+	}
+
+	it("is OFF by default with no config", () => {
+		expect(isTrivyComposeEnabled(tmp)).toBe(false);
+	});
+
+	it("stays OFF when trivy.enabled=true but trivy.compose is absent", () => {
+		writeConfig({ trivy: { enabled: true } });
+		expect(isTrivyComposeEnabled(tmp)).toBe(false);
+	});
+
+	it("opts in only when trivy.compose.enabled === true", () => {
+		writeConfig({ trivy: { compose: { enabled: true } } });
+		expect(isTrivyComposeEnabled(tmp)).toBe(true);
+	});
+
+	it("treats truthy-but-not-true values as not opted in", () => {
+		for (const compose of [{ enabled: "true" }, { enabled: 1 }, {}]) {
+			writeConfig({ trivy: { compose } });
+			expect(isTrivyComposeEnabled(tmp)).toBe(false);
 		}
 	});
 });
