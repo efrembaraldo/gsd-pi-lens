@@ -68,7 +68,15 @@ export type BusEventName =
 	| "pilens:autofix:start"
 	| "pi-lens/analysis-complete"
 	| "pi-lens/findings"
-	| "pi-lens/turn-findings";
+	| "pi-lens/turn-findings"
+	// R009 / S07/T02: bus-pull RPC request events. The correlated
+	// `pilens:rpc:<token>:response` is NOT a typed event name — its channel
+	// is parameterized by the request's token, so a response always lands on
+	// a per-request channel and is observable through the matched request
+	// receipt rather than through this enum. The two request events above
+	// are the ones the RPC subscriber (clients/rpc-publish.ts) logs.
+	| "pilens:rpc:diagnostics"
+	| "pilens:rpc:files-touched";
 
 export type BusEventOutcome =
 	| "emitted"
