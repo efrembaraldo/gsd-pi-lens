@@ -34,11 +34,13 @@ describe("trivy-config appliesTo", () => {
 const {
 	safeSpawnAsync,
 	isTrivyEnabled,
+	isTrivyComposeEnabled,
 	resolveSeverityFloor,
 	incrementDegradationCount,
 } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	isTrivyEnabled: vi.fn(),
+	isTrivyComposeEnabled: vi.fn(),
 	resolveSeverityFloor: vi.fn(),
 	incrementDegradationCount: vi.fn(),
 }));
@@ -49,6 +51,7 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../../clients/trivy-client.js", () => ({
 	isTrivyEnabled,
+	isTrivyComposeEnabled,
 	resolveSeverityFloor,
 }));
 
@@ -264,6 +267,157 @@ describe("trivy-config run() — CloudFormation content gate", () => {
 
 		expect(safeSpawnAsync).not.toHaveBeenCalled();
 		expect(result.status).toBe("skipped");
+	});
+});
+
+// ── Docker Compose flag gate (slice S05) ──────────────────────────────────────
+
+describe("trivy-config run() — compose flag gate (S05)", () => {
+	let composeCwd: string;
+
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		isTrivyEnabled.mockReset();
+		isTrivyComposeEnabled.mockReset();
+		resolveSeverityFloor.mockReset();
+		isTrivyEnabled.mockReturnValue(true);
+		isTrivyComposeEnabled.mockReturnValue(false);
+		resolveSeverityFloor.mockReturnValue(["HIGH", "CRITICAL"]);
+		composeCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-trivy-config-compose-test-"),
+		);
+	});
+
+	// The headline gate: a real docker-compose.yml file with version: "3.8"
+	// must NOT reach trivy when trivy.compose.enabled is off. The fixture
+	// (tests/fixtures/dispatch/trivy-config-iac/docker-compose.yml) is the
+	// reference Compose shape used in this test.
+	it("skips a docker-compose.yml without spawning trivy when trivy.compose.enabled is off", async () => {
+		const file = path.join(composeCwd, "docker-compose.yml");
+		fs.writeFileSync(
+			file,
+			[
+				'version: "3.8"',
+				"services:",
+				"  web:",
+				"    image: nginx:1.25",
+				"  db:",
+				"    image: postgres:15",
+				"  sidecar:",
+				"    image: alpine:3.18",
+				"    privileged: true",
+				"    volumes:",
+				"      - /var/run/docker.sock:/var/run/docker.sock",
+			].join("\n"),
+		);
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+		expect(result.status).toBe("skipped");
+		expect(result.diagnostics).toEqual([]);
+	});
+
+	// Mutation-proof: dropping the early-return skip (or wiring it to
+	// isTrivyEnabled alone) would let a Compose file through to trivy under
+	// the k8s/CloudFormation gate, even when the compose flag is off.
+	it("does not consult isTrivyComposeEnabled when the file is not a Compose manifest", async () => {
+		const file = path.join(composeCwd, "deploy.yaml");
+		fs.writeFileSync(
+			file,
+			"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+		);
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout: JSON.stringify({ Results: [] }),
+			stderr: "",
+		});
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		expect(result.status).toBe("succeeded");
+	});
+
+	// Opt-in path: with trivy.compose.enabled === true, a Compose file with
+	// a real DS-prefixed finding must reach the agent. Asserts the FULL
+	// argv shape (every flag the runner promises, plus the file at the end)
+	// so a future flag-stripping edit cannot pass this test silently.
+	it("spawns trivy with the full argv shape and produces a finding when trivy.compose.enabled is on", async () => {
+		isTrivyComposeEnabled.mockReturnValue(true);
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout: JSON.stringify({
+				Results: [
+					{
+						Target: "docker-compose.yml",
+						Class: "config",
+						Type: "docker-compose",
+						Misconfigurations: [
+							{
+								ID: "DS002",
+								Title: "Specify a user in the container",
+								Severity: "HIGH",
+								Resolution: "Set `user:` or drop `privileged: true`.",
+								CauseMetadata: { StartLine: 9 },
+							},
+						],
+					},
+				],
+			}),
+			stderr: "",
+		});
+
+		const file = path.join(composeCwd, "docker-compose.yml");
+		fs.writeFileSync(
+			file,
+			[
+				'version: "3.8"',
+				"services:",
+				"  web:",
+				"    image: nginx:1.25",
+				"  db:",
+				"    image: postgres:15",
+				"  sidecar:",
+				"    image: alpine:3.18",
+				"    privileged: true",
+			].join("\n"),
+		);
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		const [cmd, argv, opts] = safeSpawnAsync.mock.calls[0] as [
+			string,
+			string[],
+			{ cwd: string },
+		];
+		expect(cmd).toBe("trivy");
+		expect(argv).toContain("config");
+		expect(argv).toContain("--quiet");
+		expect(argv).toContain("--format");
+		expect(argv).toContain("json");
+		expect(argv).toContain("--severity");
+		expect(argv[argv.length - 1]).toBe(file);
+		expect(opts.cwd).toBe(composeCwd);
+		expect(result.diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(result.diagnostics[0]).toMatchObject({
+			rule: "DS002",
+			line: 9,
+			tool: "trivy-config",
+		});
 	});
 });
 

@@ -42,6 +42,7 @@ import * as path from "node:path";
 import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
+	isTrivyComposeEnabled,
 	isTrivyEnabled,
 	resolveSeverityFloor,
 	type TrivySeverity,
@@ -221,10 +222,25 @@ const trivyConfigRunner: RunnerDefinition = {
 			} catch {
 				return { status: "skipped", diagnostics: [], semantic: "none" };
 			}
+			// Docker Compose ships behind its own explicit opt-in
+			// (`trivy.compose.enabled`, default OFF) — false positives on the
+			// version-key heuristic (e.g. a Helm `Chart.yaml`) are bounded by
+			// that flag, so the runner must NOT pass a Compose file to trivy
+			// without consent. Checked before the kubernetes/CloudFormation
+			// content gate so a Compose file is skipped without ever being
+			// misclassified as a k8s manifest (refs S05).
+			if (
+				ctx.kind === "yaml" &&
+				looksLikeDockerCompose(content, path.basename(absPath).toLowerCase()) &&
+				!isTrivyComposeEnabled(cwd)
+			) {
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
 			const isManifest =
 				ctx.kind === "yaml"
 					? looksLikeKubernetesManifest(content) ||
-						looksLikeCloudFormationTemplate(content)
+						looksLikeCloudFormationTemplate(content) ||
+						looksLikeDockerCompose(content, path.basename(absPath).toLowerCase())
 					: looksLikeCloudFormationTemplate(content);
 			if (!isManifest) {
 				return { status: "skipped", diagnostics: [], semantic: "none" };
