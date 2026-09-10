@@ -49,6 +49,7 @@ import type { FilesTouchedPayload } from "./bus-publish.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import type { ReadGuard } from "./read-guard.js";
+import type { PilensRpcRecentTouchEntry } from "./rpc-publish.js";
 
 const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 const MAX_NAMES_SHOWN = 5;
@@ -88,6 +89,17 @@ interface AccumulatedFile {
 	 * changes again.
 	 */
 	contentDelivered: boolean;
+	/**
+	 * R009 / S07: wall-clock time (ms since epoch) of the most recent touch —
+	 * set on insertion and refreshed on every later re-touch from either the
+	 * in-process bus (`recordTouchedEvent`) or the cross-process feed
+	 * (`recordCrossProcessTouches`). Used by the bus-pull RPC files-touched
+	 * handler (`clients/rpc-publish.ts`) to surface the most recent timestamp
+	 * without re-deriving one from `consumeAgentNudge`'s batch metadata.
+	 * Stamped on every re-touch so a foreign-touch entry inherits the time its
+	 * peer instance observed, not the time the entries were merged here.
+	 */
+	ts: number;
 }
 
 // Module-level accumulator: one process/session, so a plain map keyed via
@@ -173,12 +185,17 @@ function recordTouchedEvent(
 			// this path (the default deferred format at agent_end, a cascade
 			// autofix) — those bytes no longer describe the file.
 			existing.contentDelivered = false;
+			// R009: refresh the most-recent-touched timestamp so the bus-pull
+			// RPC files-touched handler reports this bus-event's time, not the
+			// cross-process entry's ingestion time.
+			existing.ts = Date.now();
 		} else {
 			_touched.set(mapKey, {
 				displayPath: rawPath,
 				reasons: new Set([payload.reason]),
 				origin: "local",
 				contentDelivered: false,
+				ts: Date.now(),
 			});
 		}
 	}
@@ -222,12 +239,19 @@ export function recordCrossProcessTouches(
 			// #1464: a foreign process touching this file invalidates whatever
 			// content this session's write path already delivered for it.
 			existing.contentDelivered = false;
+			// R009: refresh the most-recent-touched timestamp on re-merge so
+			// the bus-pull RPC files-touched handler surfaces the latest touch.
+			existing.ts = Date.now();
 		} else {
 			_touched.set(mapKey, {
 				displayPath: entry.path,
 				reasons: new Set([entry.reason]),
 				origin: "cross-process",
 				contentDelivered: false,
+				// R009: stamp on cross-process ingestion. The author process
+				// recorded the touch earlier; `Date.now()` here is "time this
+				// peer became aware" — close enough for a max(ts) consumer.
+				ts: Date.now(),
 			});
 		}
 	}
@@ -261,6 +285,27 @@ export function noteAuthoritativeContentAttachment(
 ): void {
 	const entry = _touched.get(normalizeMapKey(filePath));
 	if (entry) entry.contentDelivered = attached;
+}
+
+/**
+ * R009 / S07: read-only snapshot of the same `_touched` accumulator
+ * `consumeAgentNudge` drains at injection time. Returns an array of entries
+ * shaped for the bus-pull RPC files-touched handler
+ * (`clients/rpc-publish.ts`, `PilensRpcRecentTouchEntry = { path, ts }`), so
+ * the RPC can surface `paths` + `max(ts)` without re-deriving either field
+ * from the accumulator's internal `displayPath` / `ts` directly. The
+ * returned array is a FRESH copy on every call; mutating it never affects
+ * the accumulator. Consumers must NOT call `consumeAgentNudge` from this
+ * getter — the accumulator stays intact until the next injection, matching
+ * the rule that `consumeAgentNudge` is the ONLY place `_touched.clear()`
+ * ever fires.
+ */
+export function getAccumulatedRecentTouches(): PilensRpcRecentTouchEntry[] {
+	const out: PilensRpcRecentTouchEntry[] = [];
+	for (const entry of _touched.values()) {
+		out.push({ path: entry.displayPath, ts: entry.ts });
+	}
+	return out;
 }
 
 export interface WireAgentNudgeSubscriberArgs {

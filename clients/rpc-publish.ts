@@ -69,11 +69,15 @@ function rpcResponseChannel(token: string): string {
  *  test double does not need to model the full `ExtensionAPI`. Method
  *  parameter names are deliberately unique across the interface to keep
  *  oxlint's `no-dupe-args` happy (it scans interface members as a flat list
- *  in this codebase). */
+ *  in this codebase). `emit` returns `void` to match pi's `pi.events.emit`
+ *  (the underlying EventEmitter returns `boolean`, but pi-lens never
+ *  consumes that return — callers in `clients/bus-publish.ts` and
+ *  `clients/agent-nudge.ts` discard it too — so the wider structural type
+ *  lines up against the host's bus without a cast at the call site). */
 interface BusEventsLike {
 	on(eventName: string, onHandler: (data: unknown) => void): void;
 	off?(eventName: string, offHandler: (data: unknown) => void): void;
-	emit(eventName: string, emitData: unknown): boolean;
+	emit(eventName: string, emitData: unknown): void;
 }
 
 // --- Module state ---

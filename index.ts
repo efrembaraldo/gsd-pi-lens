@@ -116,6 +116,7 @@ import {
 	clearWidgetState,
 	exportWidgetState,
 	getFailedLspServerIds,
+	getFileDiagnosticSummaries,
 	getSessionLanguages,
 	importWidgetState,
 	type PersistedWidgetState,
@@ -169,7 +170,12 @@ import { wrapToolsForCompactLine } from "./clients/tool-render.js";
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
-import { wireDiagnosticsBusEmitterGetter } from "./clients/diagnostics-publish.js";
+import {
+	wireDiagnosticsBusEmitterGetter,
+	type PilensDiagnosticEntry,
+	type PilensDiagnosticsFileEntry,
+} from "./clients/diagnostics-publish.js";
+import { wireRpcBusSubscriber } from "./clients/rpc-publish.js";
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
@@ -179,6 +185,7 @@ import {
 } from "./clients/path-attribution-telemetry.js";
 import {
 	consumeAgentNudge,
+	getAccumulatedRecentTouches,
 	recordCrossProcessTouches,
 	wireAgentNudgeSubscriber,
 } from "./clients/agent-nudge.js";
@@ -833,6 +840,65 @@ function activateExtension(hostPi: ExtensionAPI) {
 	wireAgentNudgeSubscriber({
 		events: pi.events,
 		getReadGuard: () => runtime.readGuard,
+		dbg,
+	});
+	// R009 / S07: project widget-state's per-file diagnostic summaries into the
+	// bus-pull RPC `PilensDiagnosticsFileEntry` shape (the same one
+	// `clients/diagnostics-publish.ts` #502 emits on the push side, so a
+	// requester can diff both deliveries without translating). Skips
+	// `stale`-demoted findings (#1631 dependency-drift, #1641 past-EOF) so a
+	// gate-retired diagnostic never reads as live over the wire, and filters
+	// `severity` to the `PilensDiagnosticEntry` literal union — anything
+	// outside the four canonical values is dropped (better an honest gap than
+	// a wire shape that drifts from the push publisher's contract).
+	const readBusRpcDiagnosticsState = (): PilensDiagnosticsFileEntry[] => {
+		const summaries = getFileDiagnosticSummaries();
+		const out: PilensDiagnosticsFileEntry[] = [];
+		for (const summary of summaries) {
+			const entries: PilensDiagnosticEntry[] = [];
+			for (const d of summary.diagnostics) {
+				if (d.stale) continue;
+				const sev = d.severity;
+				if (
+					sev !== "error" &&
+					sev !== "warning" &&
+					sev !== "info" &&
+					sev !== "hint"
+				) {
+					continue;
+				}
+				const entry: PilensDiagnosticEntry = {
+					severity: sev,
+					message: d.message,
+					tool: d.tool ?? "pi-lens",
+				};
+				if (d.rule !== undefined) entry.ruleId = d.rule;
+				if (d.line !== undefined) entry.line = d.line;
+				if (d.col !== undefined) entry.col = d.col;
+				entries.push(entry);
+			}
+			if (entries.length > 0) {
+				out.push({
+					path: normalizeFilePath(summary.filePath),
+					diagnostics: entries,
+				});
+			}
+		}
+		return out;
+	};
+	// R009 / S07: bus-pull RPC subscriber (sibling to
+	// `wireAgentNudgeSubscriber`, the other read-only bus subscriber; both
+	// are listed in the AGENTS.md "First-class seam census"). Lazily resolves
+	// `widgetState` (via the projection above) and the `_touched` accumulator
+	// (via `getAccumulatedRecentTouches`) on each request, so the wiring
+	// survives the #473 concurrent-secondary guard — session replacement
+	// rewires publishers through `refreshCtxDerivedPlumbing` but the bus
+	// subscribers stay wired once at factory time, and the getters refresh
+	// their view of state on every call rather than snapshotting at wiring.
+	wireRpcBusSubscriber({
+		events: pi.events,
+		getDiagnosticsState: readBusRpcDiagnosticsState,
+		getRecentTouches: () => getAccumulatedRecentTouches(),
 		dbg,
 	});
 	const astGrepClient = new AstGrepClient();
