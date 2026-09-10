@@ -75,7 +75,21 @@ export type BusEventOutcome =
 	| "skipped_unwired"
 	| "skipped_disabled"
 	| "skipped_stale_session"
-	| "emit_failed";
+	| "emit_failed"
+	// R009 / S07/T01: outcomes for the bus-pull RPC surface
+	// (`pilens:rpc:diagnostics`, `pilens:rpc:files-touched`, and the correlated
+	// `pilens:rpc:<token>:response` event). The six new outcomes are
+	// deliberately kept distinct from the three historical ones so the
+	// per-event-name rollup (which still only counts the historical three) can
+	// stay focused on the legacy bus-broadcast surface — RPC traffic has its
+	// own observability budget, recorded per-request rather than per-event,
+	// because one request produces exactly one receipt + one response.
+	| "rpc_request_received"
+	| "rpc_request_invalid_no_token"
+	| "rpc_response_emitted"
+	| "rpc_response_skipped_no_state"
+	| "rpc_response_expired_no_state"
+	| "rpc_response_failed";
 
 export interface BusEventLogEntry {
 	ts: string;

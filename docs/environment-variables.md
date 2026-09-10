@@ -258,6 +258,28 @@ never affects the write path's own success or latency, so this switch exists
 purely to opt out of the broadcast, e.g. if another extension's bus listener
 misbehaves.
 
+## RPC bus query
+
+The bus-pull RPC surface (`pilens:rpc:diagnostics` /
+`pilens:rpc:files-touched`) carries correlated responses on
+`pilens:rpc:<token>:response` over the same `pi.events` bus. Both knobs below
+are env-only on purpose: they govern per-process state, not a published config
+surface. The schema reserves the matching `rpc.*` keys for a later migration.
+
+### `PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE`
+
+Per-response cap on diagnostics a `pilens:rpc:diagnostics` request carries
+back on the bus. **Default:** `200`. A stale LSP cache can return thousands of
+entries on a single pull; without this cap one request could carry tens of KB
+of JSON across the bus and stall a listener's microtask queue.
+
+### `PI_LENS_RPC_RESPONSE_TTL_MS`
+
+Time-to-live (ms) for an RPC request's pending response state before reaping.
+**Default:** `5000`. The bus is fire-and-forget, so a request needs its own
+state map keyed by token; older entries are dropped and the response is
+recorded as `rpc_response_expired_no_state` in `~/.pi-lens/bus-events.log`.
+
 ## Diagnostics and logging
 
 ### `PI_LENS_DEBUG`

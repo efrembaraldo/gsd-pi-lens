@@ -168,6 +168,50 @@ function lspNamespace(): ConfigSchemaNode {
 	};
 }
 
+/**
+ * The `rpc` namespace (S07/T01, R009).
+ *
+ * Reserved here so a user setting `rpc.maxDiagnosticsPerResponse` or
+ * `rpc.responseTtlMs` in `~/.pi-lens/config.json` survives validation with a
+ * typed shape (`integer` / positive) instead of being dropped as an unknown
+ * field. The two children back the bus-pull RPC surface
+ * (`pilens:rpc:diagnostics` / `pilens:rpc:files-touched`) — the values still
+ * resolve through the env-var getters (`clients/runtime-config.ts`) for now,
+ * because the RPC surface is per-process and a config-file knob would carry
+ * a different compatibility obligation (a published `rpc.*` key requires the
+ * `tests/clients/config-schema-pinning.test.ts` harness, not just an env
+ * var). The schema reservation here is the migration target: when S07/T05
+ * flips the resolution order to consult config first, the keys are already
+ * declared and the wiring is one line.
+ *
+ * Both keys are `experimental` because the surrounding RPC surface is
+ * experimental in S07 — promoting them to `stable` belongs to the same
+ * milestone that promotes the events themselves, never to this one.
+ */
+function rpcNamespace(): ConfigSchemaNode {
+	return {
+		type: "object",
+		additionalProperties: true,
+		[STABILITY_TIER_KEY]: "experimental",
+		properties: {
+			maxDiagnosticsPerResponse: {
+				type: "integer",
+				minimum: 1,
+				description:
+					"Per-response cap on diagnostics a `pilens:rpc:diagnostics` request carries back on the bus.",
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			responseTtlMs: {
+				type: "integer",
+				minimum: 1,
+				description:
+					"Time-to-live (ms) for an RPC request's pending response state before reaping.",
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+	};
+}
+
 function buildConfigSchema(): ConfigSchemaNode {
 	const properties: Record<string, ConfigSchemaNode> = {};
 
@@ -208,6 +252,8 @@ function buildConfigSchema(): ConfigSchemaNode {
 	}
 
 	properties[LSP_NAMESPACE_KEY] = lspNamespace();
+
+	properties.rpc = rpcNamespace();
 
 	properties[CONFIG_SCHEMA_ANCHOR_KEY] = {
 		type: "string",

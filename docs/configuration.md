@@ -2,45 +2,49 @@
 
 There are **two** pi-lens config files:
 
-| File | Scope | Notes |
-| --- | --- | --- |
-| `.pi-lens.json` | the project | Committed or not, your call. Nearest one wins **per field** — a package can override one setting without restating the repo root's. |
-| `~/.pi-lens/config.json` | the machine | Your defaults across every project. `PI_LENS_CONFIG_PATH` relocates it. |
+| File                     | Scope       | Notes                                                                                                                               |
+| ------------------------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `.pi-lens.json`          | the project | Committed or not, your call. Nearest one wins **per field** — a package can override one setting without restating the repo root's. |
+| `~/.pi-lens/config.json` | the machine | Your defaults across every project. `PI_LENS_CONFIG_PATH` relocates it.                                                             |
 
 Both files have the same shape, with one exception noted below the example:
 everything LSP-related lives under an `lsp` namespace inside them.
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/apmantza/pi-lens/master/docs/schema/pi-lens-config-v1.json",
-  "ignore": ["dist/**"],
-  "maxProjectFiles": 8000,
-  "rules": { "high-complexity": { "threshold": 25 } },
-  "lsp": {
-    "disabledServers": ["typos"],
-    "warmFiles": ["src/main.rs"],
-    "servers": {
-      "my-server": {
-        "name": "My Custom LSP",
-        "extensions": [".myext"],
-        "command": "my-lsp-server",
-        "args": ["--stdio"]
-      }
-    },
-    "serverOverrides": {
-      "rust": {
-        "initializationOptions": { "check": { "command": "clippy" } }
-      }
-    }
-  }
+	"$schema": "https://raw.githubusercontent.com/apmantza/pi-lens/master/docs/schema/pi-lens-config-v1.json",
+	"ignore": ["dist/**"],
+	"maxProjectFiles": 8000,
+	"rules": { "high-complexity": { "threshold": 25 } },
+	"lsp": {
+		"disabledServers": ["typos"],
+		"warmFiles": ["src/main.rs"],
+		"servers": {
+			"my-server": {
+				"name": "My Custom LSP",
+				"extensions": [".myext"],
+				"command": "my-lsp-server",
+				"args": ["--stdio"],
+			},
+		},
+		"serverOverrides": {
+			"rust": {
+				"initializationOptions": { "check": { "command": "clippy" } },
+			},
+		},
+	},
 }
 ```
 
 **Some settings are global-only.** A handful of switches — `lsp.enabled`
-(`--no-lsp`), `tests.enabled`, `delta.enabled` and the other session-wide
-toggles — are decided once for the machine, not per project, so writing one in a
-`.pi-lens.json` does nothing. It is not ignored quietly: the project loader says
-so, naming the key. `docs/settings.md` lists which flags are which.
+(`--no-lsp`), `tests.enabled`, `delta.enabled`, `readGuard.markdown.frontmatterAlwaysRead`,
+and the other session-wide toggles — are decided once for the machine, not per project,
+so writing one in a `.pi-lens.json` does nothing. It is not ignored quietly: the project
+loader says so, naming the key. `docs/settings.md` lists which flags are which.
+
+A read-guard key currently travels through `~/.pi-lens/config.json` only:
+
+- `readGuard.markdown.frontmatterAlwaysRead` (`boolean`, default `true`): when `true`, edits inside a markdown file's YAML frontmatter or in table rows adjacent to the read section are covered by the read and do not raise out-of-range warnings; when `false`, the expanded range reverts to heading-only. See `docs/features.md` → "Read-Before-Edit Guard" for the behavior it controls.
 
 ## Which file wins
 
@@ -121,16 +125,16 @@ carrying the stable code `PILENS_CFG_0003` (a deprecated file) or
 `PILENS_CFG_0002` (a deprecated key), so you can match or suppress on the code
 rather than on the prose.
 
-| Legacy | Move it to | Code |
-| --- | --- | --- |
-| `.pi-lens/lsp.json` | `.pi-lens.json` → `lsp.*` | `PILENS_CFG_0003` |
-| `pi-lsp.json` | `.pi-lens.json` → `lsp.*` | `PILENS_CFG_0003` |
-| `pi-lens.json` (undotted) | `.pi-lens.json` | `PILENS_CFG_0003` |
-| `~/.pi-lens/lsp.json` | `~/.pi-lens/config.json` → `lsp.*` | `PILENS_CFG_0003` |
-| `servers` at the file root | `lsp.servers` | `PILENS_CFG_0002` |
-| `serverOverrides` at the file root | `lsp.serverOverrides` | `PILENS_CFG_0002` |
-| `disabledServers` at the file root | `lsp.disabledServers` | `PILENS_CFG_0002` |
-| `warmFiles` at the file root | `lsp.warmFiles` | `PILENS_CFG_0002` |
+| Legacy                             | Move it to                         | Code              |
+| ---------------------------------- | ---------------------------------- | ----------------- |
+| `.pi-lens/lsp.json`                | `.pi-lens.json` → `lsp.*`          | `PILENS_CFG_0003` |
+| `pi-lsp.json`                      | `.pi-lens.json` → `lsp.*`          | `PILENS_CFG_0003` |
+| `pi-lens.json` (undotted)          | `.pi-lens.json`                    | `PILENS_CFG_0003` |
+| `~/.pi-lens/lsp.json`              | `~/.pi-lens/config.json` → `lsp.*` | `PILENS_CFG_0003` |
+| `servers` at the file root         | `lsp.servers`                      | `PILENS_CFG_0002` |
+| `serverOverrides` at the file root | `lsp.serverOverrides`              | `PILENS_CFG_0002` |
+| `disabledServers` at the file root | `lsp.disabledServers`              | `PILENS_CFG_0002` |
+| `warmFiles` at the file root       | `lsp.warmFiles`                    | `PILENS_CFG_0002` |
 
 **Deprecated since 4.2.0. Read for the last time before 5.0.0.** The window is
 declared as data in `clients/config-diagnostic-codes.ts`
@@ -189,7 +193,7 @@ You never have to reconstruct the table above by hand. `pilens_effective_config`
 provenance of **every** leaf — the tier, the file, the key, and the trust
 decision that applied — plus, for a file you name, its language, every LSP
 server with the reason it was selected or denied, and the runners that would
-dispatch. That is the answer to "why is this running" and to "why is this *not*
+dispatch. That is the answer to "why is this running" and to "why is this _not_
 running", without reading a log.
 
 Naming a `file` resolves the configuration **at that file's own directory**,

@@ -3,7 +3,7 @@
  * Keep these values in one place so behavior is consistent and easy to tune.
  */
 
-import { toPositiveFinite } from "./env-utils.js";
+import { lazyEnvNumber, toPositiveFinite } from "./env-utils.js";
 import {
 	getGlobalMarkdownFrontmatterAlwaysRead,
 	loadPiLensGlobalConfig,
@@ -96,6 +96,83 @@ export function getMarkdownFrontmatterAlwaysRead(): boolean {
  */
 export function _resetMarkdownFrontmatterAlwaysReadCacheForTests(): void {
 	_markdownFrontmatterAlwaysReadCache = undefined;
+}
+
+// --- RPC bus query knobs (S07/T01, R009) ---
+//
+// Both knobs back the bus-pull RPC surface (`pilens:rpc:diagnostics` and
+// `pilens:rpc:files-touched`) — T02-T05 read these getters to cap a response
+// and to age a request's pending state out. They are env-only on purpose: the
+// RPC surface is per-process, the global config schema does not currently
+// project per-bus-cap knobs, and the legacy `lazyEnvNumber` helper is the
+// house pattern for `import has no I/O side effect` plus an explicit
+// `_resetForTests` hook.
+
+const _rpcMaxDiagnosticsPerResponse = lazyEnvNumber(
+	"PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE",
+	200,
+);
+
+/**
+ * Per-response cap on diagnostics a `pilens:rpc:diagnostics` request carries
+ * back on the bus. **Default:** `200`.
+ *
+ * Bounded because `PilensDiagnosticsPayload` ships every diagnostic the
+ * publisher holds for the requested file (post-#502 staleness contract), and a
+ * stale LSP cache can return thousands of entries on a single pull. Without a
+ * cap, one request could carry tens of KB of JSON across the bus and stall
+ * the listener's microtask queue long enough to drop the next turn's first
+ * event.
+ *
+ * Lazy + memoized via {@link lazyEnvNumber} so importing this module never
+ * has a side effect on process env at load time. Env-only on purpose: there is
+ * no matching `rpc.maxDiagnosticsPerResponse` config key — the schema reserves
+ * the slot for a later migration, but the env surface is enough for the
+ * per-process cap and avoids creating a config-knob obligation before any
+ * consumer needs it.
+ *
+ * @example env var
+ * ```bash
+ * PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE=500 pi
+ * ```
+ */
+export function getRpcMaxDiagnosticsPerResponse(): number {
+	return _rpcMaxDiagnosticsPerResponse.get();
+}
+
+const _rpcResponseTtlMs = lazyEnvNumber("PI_LENS_RPC_RESPONSE_TTL_MS", 5000);
+
+/**
+ * Time-to-live (ms) for an RPC request's pending response state. **Default:**
+ * `5000` ms.
+ *
+ * The bus uses fire-and-forget `pi.events.emit`, so an RPC request needs its
+ * own state map keyed by token. State older than this TTL is reaped and the
+ * response is dropped (recorded as `rpc_response_expired_no_state` in
+ * `clients/bus-events-logger.ts`). The default is 5 s — long enough that a
+ * late listener on a busy host still sees its own response, short enough that
+ * a stuck publisher does not accumulate dead state.
+ *
+ * Lazy + memoized via {@link lazyEnvNumber}, same pattern as
+ * {@link getRpcMaxDiagnosticsPerResponse}. Env-only on purpose, same
+ * justification.
+ *
+ * @example env var
+ * ```bash
+ * PI_LENS_RPC_RESPONSE_TTL_MS=10000 pi
+ * ```
+ */
+export function getRpcResponseTtlMs(): number {
+	return _rpcResponseTtlMs.get();
+}
+
+/**
+ * Test-only: clear both memoized RPC knobs so a subsequent call re-reads the
+ * env vars. Pair with `process.env` save/restore in test setup.
+ */
+export function _resetRpcCacheForTests(): void {
+	_rpcMaxDiagnosticsPerResponse._resetForTests();
+	_rpcResponseTtlMs._resetForTests();
 }
 
 export const RUNTIME_CONFIG = {
