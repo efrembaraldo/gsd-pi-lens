@@ -230,7 +230,7 @@ One event per logical write batch (not per file) — e.g. a single eslint `--fix
 
 **Versioning policy: additive-only.** New optional fields may be added under `v: 1`. A breaking change to an existing field's meaning bumps `v`. Consumers should ignore unknown fields.
 
-**Non-goals:** pi-lens does not (yet) consume anyone's bus events, and does not emit for edits the agent makes itself through its own tool calls — the host already knows about those. This is a broadcast-only surface; see `#478` for the planned `pilens:rpc:*` request/response query API that will reuse the same versioning discipline.
+**Non-goals:** pi-lens does not (yet) consume anyone's bus events, and does not emit for edits the agent makes itself through its own tool calls — the host already knows about those. This is a broadcast-only surface. The request/response counterpart — `pilens:rpc:*` — ships via R009 / S07 and lives in its own section below ("Bus Events — `pilens:rpc:*` request/response query (R009 / S07)"). It reuses the same versioning discipline.
 
 **Kill switch:** `PI_LENS_BUS_PUBLISH=0` disables publishing entirely (see `docs/environment-variables.md`). Publishing is fire-and-forget — a disabled/unavailable/throwing bus never affects the write path's own success or latency.
 
@@ -294,7 +294,83 @@ Late-joiners are a non-problem in-process — extensions activate at `session_st
 
 **Before/after content:** intentionally omitted from v1 (the size/complexity tradeoff the original issue sketch flagged) — a consumer that needs pre-format text for diff rendering is a follow-up, not part of this event.
 
-**Shared schema with #478 (bound, not merged).** The `PilensDiagnosticsPayload` type (`clients/diagnostics-publish.ts`) is defined once and reused verbatim by #478's future `pilens:rpc:diagnostics` pull response — push (this event) and pull (#478) are two deliveries of the same shape over the same lens-engine seam. #478 stays separately gated on #449 registry dogfooding.
+**Shared schema with R009 / S07 (bound, not merged).** The `PilensDiagnosticsPayload` type (`clients/diagnostics-publish.ts`) is defined once and reused verbatim by the `pilens:rpc:diagnostics` pull response — push (this event) and pull (R009) are two deliveries of the same shape over the same lens-engine seam. Adding a new pull channel (`pilens:rpc:knip-findings` and friends) means one `handleXxxRequest` plus one new event constant in `clients/rpc-publish.ts`; no shape fork. The `#449` registry-dogfooding concern stayed a parallel gating issue for the *cross-process* wire-up of `PilensDiagnosticsPayload` and does NOT apply to the in-process RPC pull, which reads only the local widget state.
+
+### Bus Events — `pilens:rpc:*` request/response query (R009 / S07)
+
+The first `pi.events` surface that breaks the broadcast-only doctrine of #482 / #502: pi's `pi.events` is a plain EventEmitter with no native request/response semantics, so this module reserves two request channels and emits a correlated response on a per-token channel for every well-formed request.
+
+**Wire shape (request):**
+
+```
+event:   pilens:rpc:diagnostics | pilens:rpc:files-touched
+payload: {
+  v: 1,
+  source: "pi-lens",
+  token: string,        // 1..128 chars, opaque to pi-lens
+  paths?: string[],     // optional, only consulted when the handler chooses
+}
+```
+
+**Wire shape (response):**
+
+```
+event:   pilens:rpc:<token>:response
+payload: {
+  v: 1,
+  source: "pi-lens",
+  token: string,        // echoed from the request
+  ttlMs: number,        // the rpc.responseTtlMs config value at emit time
+  payload: PilensDiagnosticsPayload | PilensRpcFilesTouchedPayload,
+  expired?: true,       // set ONLY when the TTL elapsed before the response could be built
+}
+```
+
+The response channel is constructed by the internal `rpcResponseChannel(token)` helper (`pilens:rpc:` + token + `:response`) — the only place that string is built. The token in the channel name is the structural loop guard: two concurrent requesters never see each other's reply because their tokens differ, and a same-process consumer that wanted to forward a response back through the bus would have to construct a `pilens:rpc:<other-token>:response` channel — never a `pilens:rpc:diagnostics` channel — so the `origin: "bus"` loop guard from #482 stays the right shape for push surfaces, while the per-token response channel is the right shape for pull.
+
+**Request semantics:**
+
+- `token` is validated (`typeof === "string"` AND `1 ≤ length ≤ 128`); invalid envelopes log `rpc_request_invalid_no_token` to `bus-events.log` and emit nothing.
+- The handler reads the current `widgetState.allDiagnostics` snapshot (not a stale cached one — the same full-replace-per-path discipline as #502 applies) for `pilens:rpc:diagnostics`, and the recent-touches buffer (bounded cross-process aggregate from #492) for `pilens:rpc:files-touched`.
+- Per-file cap: `MAX_DIAGNOSTICS_PER_FILE_EVENT` (12) per file, errors prioritized when capping, identical to the push publisher's #502 cap. A capped file entry sets `truncated: true`.
+- Global cap: `rpc.maxDiagnosticsPerResponse` (default `200`, env override `PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE`) bounds the TOTAL diagnostics across all files in a single response. When the cap fires the response is truncated and the wrapper carries the same `truncated: true` semantics at the file-entry level.
+- TTL: `rpc.responseTtlMs` (default `5000` ms, env override `PI_LENS_RPC_RESPONSE_TTL_MS`) is evaluated at emit time. A response that exceeded the TTL before the handler reached emit is still published (a request must always get SOME answer) but the wrapper carries `expired: true` and an empty `payload`. The window is microseconds in the current synchronous handler; the path exists for the future async case and for tests that force the boundary.
+
+**Files-touched response (separate, minimal envelope):**
+
+```
+{
+  v: 1,
+  source: "pi-lens",
+  token: string,
+  ttlMs: number,
+  payload: {
+    paths: string[],   // absolute, normalized
+    ts: number,        // max(entries.map(e => e.ts)) || Date.now()
+  },
+}
+```
+
+**State-missing branches:** an empty diagnostics snapshot (`getDiagnosticsState()` returns `[]`/null/undefined) emits `{diagnostics: []}` and logs `rpc_response_skipped_no_state` — the requester still gets an answer so its timeout does not fire, but the explicit empty lets the requester distinguish "pi-lens has no findings" from "pi-lens never answered". The same shape applies to an empty recent-touches buffer.
+
+**Errors:** any thrown exception inside the handler is logged as `rpc_response_failed` and swallowed — a single bad request must not bring down the bus for the rest of the session.
+
+**No new IPC / JSON-RPC runtime.** Only subscribers/publishers on the already-wired `pi.events` bus. The MCP server (`mcp/`) and the host's print/RPC modes do not wire `pi.events`, so `wireRpcBusSubscriber` is a structural no-op there — a request sent over MCP times out on the requester side without a response, which is the documented failure mode. The `wireRpcBusSubscriber` call is feature-gated on `typeof events?.on === "function"` so the wiring tolerates the absence of a bus entirely.
+
+**Observability:** every request and every response emits a row to `~/.pi-lens/bus-events.log` with bounded counters (rolled up per session in `latency.log`). The full outcome enum on the RPC surface:
+
+- `rpc_request_received` — a well-formed request was received and is being handled
+- `rpc_request_invalid_no_token` — token validation failed (empty / non-string / >128 chars)
+- `rpc_response_emitted` — a response was published on the per-token channel
+- `rpc_response_skipped_no_state` — state was missing, an explicit empty was emitted
+- `rpc_response_expired_no_state` — TTL elapsed before the response could be built, `expired: true` set
+- `rpc_response_failed` — the handler threw; swallowed
+
+Existing `emitted`/failure counters from #482 continue to cover the push surfaces — the six new outcomes sit alongside without disturbing the rollup.
+
+**Kill switch:** `PI_LENS_BUS_PUBLISH=0` (same family as #482 — no new env var) silences BOTH push and RPC surfaces together. There is no separate RPC-only kill switch; the surfaces die as one. To diagnose a request that never received a response, tail `bus-events.log` and look for `rpc_request_received` without a matching `rpc_response_emitted` (or one of its `skipped`/`expired`/`failed` siblings).
+
+**Adding a new `pilens:rpc:*` channel:** the schema, cap, and TTL machinery are shared and live in `clients/runtime-config.ts` (`getRpcMaxDiagnosticsPerResponse`, `getRpcResponseTtlMs`). Adding a channel means one `BUS_RPC_REQUEST_XXX_EVENT` constant, one `handleXxxRequest` function, and one conformance entry in `tests/config/rpc-bus-conformance.test.ts` — never a fork of the envelope shape, and never a second TTL path. The conformance test sweeps `clients/`, `tools/`, `mcp/`, `scripts/` plus root `index.ts` for any module that subscribes to a request channel or emits on a `pilens:rpc:*` response channel, and pins the response-channel helper shape (`rpcResponseChannel(token)` concatenating `pilens:rpc:` + token + `:response`) so a future refactor that switches to a non-template construction trips the guard.
 
 ### Opportunistic Read Expansion
 
