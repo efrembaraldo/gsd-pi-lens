@@ -4,6 +4,7 @@ import { getGlobalPiLensLogDir } from "./probe-home-state.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
 import { getMaxLogSizeMB } from "./log-cleanup.js";
 import { normalizeLoggedPath } from "./path-utils.js";
+import { getTurnId } from "./turn-context.js";
 
 const LATENCY_LOG_DIR = getGlobalPiLensLogDir();
 const LATENCY_LOG_FILE = path.join(LATENCY_LOG_DIR, "latency.log");
@@ -19,6 +20,7 @@ export interface LatencyEntry {
 	ts?: string;
 	/** Process that wrote the entry; used to isolate current-session telemetry. */
 	pid?: number;
+	turnId?: string;
 	/** ISO timestamp when the runner/phase started — diff with ts = durationMs */
 	startedAt?: string;
 	toolName?: string;
@@ -150,6 +152,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"degradation_ledger",
 	"path_attribution_verified_rollup",
 	"concurrent_session_bind_rollup",
+	"auxiliary_readiness",
 ]);
 
 /**
@@ -173,7 +176,7 @@ export function getLastLoggedPhase():
  */
 export function getRecentLoggedPhases(
 	limit = RECENT_PHASE_CAP,
-): Array<{ phase: string; ts: string }> {
+): Array<{ phase: string; ts: string; metadata?: Record<string, unknown> }> {
 	return recentPhases.slice(0, Math.min(limit, RECENT_PHASE_CAP));
 }
 
@@ -217,9 +220,6 @@ interface ClosedBracket {
 	closedAt: string;
 }
 
-/** Bound on the closed-bracket ring below — same size discipline as `recentPhases`. */
-export const CLOSED_BRACKET_CAP = RECENT_PHASE_CAP;
-
 /**
  * Phases currently executing, keyed by their own start token (#1723 review
  * round: this replaces an earlier single-slot design that broke two ways.
@@ -244,7 +244,7 @@ export const CLOSED_BRACKET_CAP = RECENT_PHASE_CAP;
 const liveBrackets = new Map<PhaseToken, true>();
 
 /**
- * Recently CLOSED brackets, newest first, bounded to `CLOSED_BRACKET_CAP`
+ * Recently CLOSED brackets, newest first, bounded to `RECENT_PHASE_CAP`
  * (#1723 review round, F3 — the decisive finding). `phaseFinished` runs
  * inside a `finally`, which resumes as a MICROTASK, while the host schedules
  * `turn_end` as a MACROTASK — and microtasks always fully drain before the
@@ -276,7 +276,7 @@ export function phaseStarted(phase: string): PhaseToken {
 
 /**
  * Close a bracket: removes it from `liveBrackets` (one `Map.delete`, O(1))
- * and records it on the closed-bracket ring, bounded to `CLOSED_BRACKET_CAP`
+ * and records it on the closed-bracket ring, bounded to `RECENT_PHASE_CAP`
  * with the oldest entry dropped first — see the `closedBrackets` doc comment
  * above for why a closed history is load-bearing, not just nice-to-have
  * (#1723 review F3). `Map.delete` reports whether it actually removed
@@ -311,7 +311,7 @@ export function phaseFinished(token: PhaseToken): void {
 			closedAt: new Date().toISOString(),
 		},
 		...closedBrackets,
-	].slice(0, CLOSED_BRACKET_CAP);
+	].slice(0, RECENT_PHASE_CAP);
 }
 
 /**
@@ -343,7 +343,7 @@ export interface PhaseWindowAttribution {
  * A candidate bracket is ignored outright if its OWN lifetime (`elapsedMs`)
  * is under this fraction of the window's length (#1723 review round 3, N4).
  * Overlap alone is not enough: the bounded closed-bracket ring can churn a
- * real culprit out (busy siblings filling `CLOSED_BRACKET_CAP`), leaving only
+ * real culprit out (busy siblings filling `RECENT_PHASE_CAP`), leaving only
  * a 1ms bracket that happens to have SOME positive overlap with an 18-second
  * window — reporting it would be a CONFIDENT WRONG ANSWER, worse than no
  * answer. 5%: a genuine cause's own duration should be a meaningful fraction
@@ -588,7 +588,7 @@ export function getPhaseForWindow(
 /**
  * Test-only: the closed-bracket ring's actual storage length, mirroring
  * `_recentPhasesStorageLengthForTest` above — pins that `phaseFinished`'s
- * `.slice(0, CLOSED_BRACKET_CAP)` guard is intact independent of any
+ * `.slice(0, RECENT_PHASE_CAP)` guard is intact independent of any
  * read-side behavior (#1723 review: "ring unbounded" mutation).
  */
 export function _closedBracketsStorageLengthForTest(): number {
@@ -721,6 +721,27 @@ export function claimPhaseOncePerSession(
 }
 
 /**
+ * Release ONE scope's claim for `phase` — the narrow sibling of
+ * {@link releaseOncePerSessionPhase}, which releases every scope of a phase.
+ *
+ * #2518 review F1. A claim is a promise that this session's record for the
+ * (phase, scope) pair has already been written, which holds only while the
+ * state that record described is still there. When that state is DROPPED —
+ * the session-root registry evicting a root, taking its resolved LSP config
+ * with it — the next load for that scope is a genuine SECOND resolution, and
+ * its row is the only thing that says what the reloaded config was. So the
+ * claim is released with the state it described; a claim outliving its state
+ * silences the record for the rest of the session, which is catalog shape 17
+ * pointed at a positive-observability record.
+ *
+ * Bounded by the caller: releases are as frequent as the evictions that cause
+ * them, and those are counted (`lsp-session-root-evicted`).
+ */
+export function releasePhaseClaim(phase: string, scope: string): void {
+	oncePerSessionPhases.delete(claimKey(phase, scope));
+}
+
+/**
  * Release every scope's claim for ONE phase, without touching the others
  * (#2526 review round 2, S1).
  *
@@ -776,10 +797,10 @@ export function logLatency(entry: LatencyEntry): void {
 		entry.phase &&
 		!LAST_PHASE_EXCLUDED.has(entry.phase)
 	) {
-		recentPhases = [{ phase: entry.phase, ts }, ...recentPhases].slice(
-			0,
-			RECENT_PHASE_CAP,
-		);
+		recentPhases = [
+			{ phase: entry.phase, ts, metadata: entry.metadata },
+			...recentPhases,
+		].slice(0, RECENT_PHASE_CAP);
 	}
 	if (isTestMode()) {
 		return;
@@ -795,6 +816,7 @@ export function logLatency(entry: LatencyEntry): void {
 		...entry,
 		ts,
 		pid: process.pid,
+		turnId: entry.turnId ?? getTurnId(),
 		filePath: normalizeLoggedPath(entry.filePath),
 	});
 }

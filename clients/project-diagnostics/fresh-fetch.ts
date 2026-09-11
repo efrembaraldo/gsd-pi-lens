@@ -88,7 +88,7 @@ import type { CacheManager } from "../cache-manager.js";
 import type { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { applyDispositionsMultiFile } from "../diagnostic-dispositions.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
-import { isAtOrAboveHomeDir } from "../path-utils.js";
+import { isAtOrAboveHomeDir, realpathOrResolve } from "../path-utils.js";
 import { GitleaksClient } from "../gitleaks-client.js";
 import { GovulncheckClient } from "../govulncheck-client.js";
 import {
@@ -114,6 +114,22 @@ export interface FreshProjectDiagnosticsResult {
 	diagnostics: ProjectDiagnostic[];
 	/** Extractor ids that actually contributed findings this run. */
 	runners: string[];
+	/**
+	 * Extractor ids whose result is the parsed output of a scan THIS call ran
+	 * over the analysis root — the opt-in `AnalysedRootSignal` each client
+	 * sets at its own parse site (#2154). `lens_diagnostics mode=full` retires
+	 * retained findings only for these ids, so a runner that reported
+	 * `success: true` without running (skipped, crashed before writing its
+	 * report, served from a memo) is deliberately absent.
+	 */
+	analyzed: string[];
+	/**
+	 * File-level authority established by this fetch. A complete entry covers
+	 * every file below `root`; a file-set entry covers only its listed files.
+	 * The legacy `analyzed` list remains the conservative fallback for callers
+	 * that have no coverage entry yet (#2887).
+	 */
+	authoritativeCoverage?: ProjectRunnerCoverage[];
 	/** Extractor ids skipped this run (not applicable / tool unavailable, OR
 	 *  aborted before settling — see `abortedIds`). */
 	cold: string[];
@@ -177,6 +193,12 @@ export interface FreshProjectDiagnosticsResult {
 	dispositionSuppressedByLane?: Record<string, number>;
 }
 
+export interface ProjectRunnerCoverage {
+	runnerId: string;
+	root: string;
+	files: ReadonlySet<string>;
+}
+
 /** The heavyweight analyzers surfaced in `lens_diagnostics mode=full` — this is
  *  now the single source of truth for that list (#585 removed the parallel
  *  cache-only `EXTRACTORS` registry that used to shadow it). `warmTriggerFor`
@@ -219,7 +241,7 @@ export async function fetchFreshProjectDiagnostics(
 	signal?: AbortSignal,
 	options: { homeDir?: string; runtime?: RuntimeCoordinator } = {},
 ): Promise<FreshProjectDiagnosticsResult> {
-	const analysisRoot = path.resolve(cwd);
+	const analysisRoot = realpathOrResolve(cwd);
 	// #747: refuse to spawn any heavyweight analyzer when the analysis root is
 	// at — or above — the home directory (the #250/#253 escape class). Every
 	// analyzer here treats `analysisRoot` as a whole tree to walk; from $HOME
@@ -235,6 +257,8 @@ export async function fetchFreshProjectDiagnostics(
 		return {
 			diagnostics: [],
 			runners: [],
+			analyzed: [],
+			authoritativeCoverage: [],
 			cold: [...ANALYZER_IDS],
 			coldReasons: Object.fromEntries(
 				ANALYZER_IDS.map((id) => [id, unsafeRootReason]),
@@ -246,6 +270,8 @@ export async function fetchFreshProjectDiagnostics(
 	}
 	const diagnostics: ProjectDiagnostic[] = [];
 	const runners: string[] = [];
+	const analyzed: string[] = [];
+	const authoritativeCoverage: ProjectRunnerCoverage[] = [];
 	const cold: string[] = [];
 	// #1623: the specific reason each `cold` id was skipped, captured at the
 	// gate that decided it — see FreshProjectDiagnosticsResult.coldReasons.
@@ -278,11 +304,39 @@ export async function fetchFreshProjectDiagnostics(
 		coldReasons[id] = reason;
 	}
 
+	/**
+	 * `analysedRoot` is the client's own opt-in `AnalysedRootSignal` (#2154),
+	 * never a property of reaching this function: `success: true` is also what
+	 * a skipped, crashed-before-reporting or memoised run returns, and only the
+	 * client knows which of those it is. Findings are recorded either way — an
+	 * id that did not analyse the root simply carries no authority to retire a
+	 * retained finding.
+	 */
 	function record(
 		id: string,
 		adapted: ProjectDiagnostic[],
 		elapsedMs: number,
+		analysedRoot: boolean,
+		analysis?: { analyzedFiles?: string[] },
 	): void {
+		if (analysedRoot) {
+			pushUnique(analyzed, id);
+			if (
+				analysis?.analyzedFiles !== undefined &&
+				analysis.analyzedFiles.length > 0
+			) {
+				const root = realpathOrResolve(analysisRoot);
+				authoritativeCoverage.push({
+					runnerId: id,
+					root,
+					files: new Set(
+						analysis.analyzedFiles.map((file) => {
+							return realpathOrResolve(file);
+						}),
+					),
+				});
+			}
+		}
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
 		const kept = applyDispositionsMultiFile(
 			adapted,
@@ -303,10 +357,15 @@ export async function fetchFreshProjectDiagnostics(
 
 	function recordFailed(
 		id: string,
-		result: { summary?: string } | object,
+		result:
+			| { summary?: string; reason?: FailedProjectAnalyzer["reason"] }
+			| object,
 	): void {
 		failed.push({
 			id,
+			...("reason" in result && result.reason !== undefined
+				? { reason: result.reason }
+				: {}),
 			summary:
 				"summary" in result && typeof result.summary === "string"
 					? result.summary
@@ -331,6 +390,13 @@ export async function fetchFreshProjectDiagnostics(
 				recordFailed("knip", result);
 				return;
 			}
+			// knip reports `success: true` for a run that never happened (no
+			// project root, a memo hit, an unparseable exit-0). Those belong in
+			// the honest `cold` channel, not in "fetched fresh this call".
+			if (result.analyzed !== true) {
+				markCold("knip", result.summary ?? "knip did not analyse this root");
+				return;
+			}
 			cacheManager.writeCache("knip", result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -338,6 +404,8 @@ export async function fetchFreshProjectDiagnostics(
 				"knip",
 				knipIssuesToProjectDiagnostics(analysisRoot, result.issues ?? []),
 				Date.now() - startMs,
+				true,
+				result,
 			);
 		}),
 
@@ -369,6 +437,13 @@ export async function fetchFreshProjectDiagnostics(
 				recordFailed("jscpd", result);
 				return;
 			}
+			if (result.analyzed !== true) {
+				markCold(
+					"jscpd",
+					"jscpd did not analyse this root (no source files, or the scan produced no report)",
+				);
+				return;
+			}
 			cacheManager.writeCache(scannerKey, result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -376,6 +451,8 @@ export async function fetchFreshProjectDiagnostics(
 				"jscpd",
 				jscpdResultToProjectDiagnostics(analysisRoot, result),
 				Date.now() - startMs,
+				true,
+				result,
 			);
 		}),
 
@@ -400,6 +477,8 @@ export async function fetchFreshProjectDiagnostics(
 				"madge",
 				circularDepsToProjectDiagnostics(analysisRoot, result.circular ?? []),
 				Date.now() - startMs,
+				result.analyzed === true,
+				result,
 			);
 		}),
 
@@ -442,6 +521,8 @@ export async function fetchFreshProjectDiagnostics(
 				"gitleaks",
 				gitleaksResultToProjectDiagnostics(analysisRoot, result),
 				Date.now() - startMs,
+				result.analyzed === true,
+				result,
 			);
 		}),
 
@@ -485,6 +566,8 @@ export async function fetchFreshProjectDiagnostics(
 				"govulncheck",
 				govulncheckResultToProjectDiagnostics(analysisRoot, result),
 				Date.now() - startMs,
+				result.analyzed === true,
+				result,
 			);
 		}),
 
@@ -526,6 +609,8 @@ export async function fetchFreshProjectDiagnostics(
 				"opengrep",
 				opengrepResultToProjectDiagnostics(analysisRoot, result),
 				Date.now() - startMs,
+				result.analyzed === true,
+				result,
 			);
 		}),
 
@@ -561,6 +646,8 @@ export async function fetchFreshProjectDiagnostics(
 				"trivy",
 				trivyResultToProjectDiagnostics(analysisRoot, result),
 				Date.now() - startMs,
+				result.analyzed === true,
+				result,
 			);
 		}),
 
@@ -587,13 +674,21 @@ export async function fetchFreshProjectDiagnostics(
 						recordFailed("dead-code", result);
 						return;
 					}
-					cacheManager.writeCache(cacheKey, result, analysisRoot, {
-						scanDurationMs: Date.now() - startMs,
-					});
+					if (result.analyzed === true) {
+						cacheManager.writeCache(cacheKey, result, analysisRoot, {
+							scanDurationMs: Date.now() - startMs,
+						});
+					}
+					const adapted = deadCodeResultToProjectDiagnostics(
+						analysisRoot,
+						result,
+					);
 					record(
 						"dead-code",
-						deadCodeResultToProjectDiagnostics(analysisRoot, result),
+						adapted,
 						Date.now() - startMs,
+						result.analyzed === true,
+						result,
 					);
 				}),
 			);
@@ -655,6 +750,9 @@ export async function fetchFreshProjectDiagnostics(
 					options.runtime,
 				),
 				Date.now() - startMs,
+				// Never authoritative: this lane reads the cache turn_end wrote,
+				// it never runs a suite over the root this call (#2154).
+				false,
 			);
 		}),
 	];
@@ -687,6 +785,8 @@ export async function fetchFreshProjectDiagnostics(
 		return {
 			diagnostics,
 			runners,
+			analyzed,
+			authoritativeCoverage,
 			cold,
 			coldReasons,
 			failed,
@@ -702,6 +802,8 @@ export async function fetchFreshProjectDiagnostics(
 	return {
 		diagnostics,
 		runners,
+		analyzed,
+		authoritativeCoverage,
 		cold,
 		coldReasons,
 		failed,

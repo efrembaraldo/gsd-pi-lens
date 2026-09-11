@@ -36,6 +36,15 @@ everything LSP-related lives under an `lsp` namespace inside them.
 }
 ```
 
+Each model-facing tool accepts `tools.<name>.enabled` in the config file. Valid
+names include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
+`lsp_navigation`, `lens_diagnostics`,
+`lens_diagnostic_mark`, `symbol_search`, `module_report`, `project_report`,
+`read_symbol`, `read_enclosing`, `effective_config`, `analyze`, `health`,
+`latency`, `project_scan`, and `rebuild`. The activation loader and MCP
+lifecycle tools `session_start`, `turn_end`, and `session_end` remain enabled
+because their host protocols require them.
+
 **Some settings are global-only.** A handful of switches — `lsp.enabled`
 (`--no-lsp`), `tests.enabled`, `delta.enabled` and the other session-wide
 toggles — are decided once for the machine, not per project, so writing one in a
@@ -132,7 +141,7 @@ rather than on the prose.
 | `disabledServers` at the file root | `lsp.disabledServers` | `PILENS_CFG_0002` |
 | `warmFiles` at the file root | `lsp.warmFiles` | `PILENS_CFG_0002` |
 
-**Deprecated since 4.2.0. Read for the last time before 5.0.0.** The window is
+**Deprecated since 4.1.4. Read for the last time before 5.0.0.** The window is
 declared as data in `clients/config-diagnostic-codes.ts`
 (`DEPRECATED_CONFIG_SURFACES`) and enforced by test, so the schedule above and
 the code cannot drift apart. `docs/public-api-stability.md` describes the policy

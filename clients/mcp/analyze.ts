@@ -250,7 +250,7 @@ export function summarizeWarningTiers(warnings: readonly Diagnostic[]): {
 	return { warnings: warnings.length - advisories, advisories };
 }
 
-export interface McpAnalyzeDiagnostic {
+interface McpAnalyzeDiagnostic {
 	line?: number;
 	column?: number;
 	severity: Diagnostic["severity"];
@@ -264,7 +264,7 @@ export interface McpAnalyzeDiagnostic {
 }
 
 /** Per-runner timing, mirroring the latency.log `runners[]` schema. */
-export interface McpRunnerLatency {
+interface McpRunnerLatency {
 	runnerId: string;
 	durationMs: number;
 	status: string;
@@ -569,6 +569,9 @@ export async function analyzeFile(
 	);
 	const lsp = lspRunner
 		? {
+				// `deferred` means the runner entered the LSP path but its auxiliary
+				// coverage is delivered later, so it still counts as ran here. The
+				// status remains available to surfaces that need the coverage detail.
 				ran:
 					lspRunner.status !== "skipped" &&
 					lspRunner.status !== "when_skipped" &&

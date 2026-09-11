@@ -46,6 +46,7 @@ import {
 	assertInstallAllowed,
 	getProjectTrustGeneration,
 } from "./project-trust.js";
+import { escapeRegExp } from "./string-utils.js";
 import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
 import { notifyUserDegradation } from "./user-notify.js";
 
@@ -59,6 +60,14 @@ import {
 	type TreeCacheStats,
 } from "./tree-sitter-cache.js";
 import { TreeSitterNavigator } from "./tree-sitter-navigator.js";
+import {
+	isProvenSqlAlchemySessionReceiver,
+	isSafePsycopgIdentifierComposition,
+	isSqlAlchemyEntityQueryArgument,
+	isSqlAlchemyStatementArgument,
+	PYTHON_SQLALCHEMY_RECEIVER_NAMES,
+	PYTHON_SQLALCHEMY_STATEMENT_BUILDERS,
+} from "./python-provenance.js";
 import {
 	type TreeSitterQuery,
 	TreeSitterQueryLoader,
@@ -80,6 +89,27 @@ const QUERY_BATCH_MAX_LOAD_FAILURES = 3;
 // must not stall the batched query walk; the filter fails open when this cap
 // is reached so unrelated diagnostics and the current match are preserved.
 const NO_NESTED_ANCHOR_VISIT_CAP = 10_000;
+// The execute-style Python DB-API/ORM methods this rule treats as SQL sinks.
+// Hoisted so the post-filter does not rebuild the set per match.
+const PYTHON_SQL_SINK_METHODS: ReadonlySet<string> = new Set([
+	"execute",
+	"executemany",
+	"query",
+	"raw",
+]);
+
+const TYPESCRIPT_SQL_KNOWN_PACKAGES: ReadonlySet<string> = new Set([
+	"pg",
+	"mysql2",
+	"better-sqlite3",
+	"knex",
+	"@prisma/client",
+]);
+
+const TYPESCRIPT_SQL_IMPORTS = new WeakMap<
+	TreeSitterNode,
+	ReadonlySet<string>
+>();
 
 // --- Type Declarations (local, no import needed) ---
 
@@ -120,12 +150,6 @@ export interface StructuralMatch {
 	/** Tree-sitter node type of the first capture (e.g. "call_expression") */
 	nodeType?: string;
 	captures: Record<string, string>;
-}
-
-export interface SearchPattern {
-	pattern: string;
-	language: string;
-	metavars: string[];
 }
 
 export interface TreeSitterParserCounters {
@@ -193,7 +217,7 @@ function grammarFileStamp(filePath: string): string | undefined {
 	}
 }
 
-export function isTreeSitterWasmAbortError(error: unknown): boolean {
+function isTreeSitterWasmAbortError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return message.includes("Aborted") || message.includes("abort()");
 }
@@ -1811,7 +1835,8 @@ export class TreeSitterClient {
 			contentOverride,
 			(tree) => {
 				try {
-					for (const match of batch.query.matches(tree.rootNode)) {
+					const rootNode = tree.rootNode;
+					for (const match of batch.query.matches(rootNode)) {
 						const owner = batch.ownerOfPattern[match.patternIndex];
 						if (owner === undefined) continue;
 						const bucket = perQuery.get(owner) ?? [];
@@ -1830,7 +1855,7 @@ export class TreeSitterClient {
 								entry.postFilter,
 								entry.postFilterParams,
 								captures,
-								tree.rootNode,
+								rootNode,
 							)
 						) {
 							continue;
@@ -2291,14 +2316,16 @@ export class TreeSitterClient {
 		return false;
 	}
 
+	/**
+	 * SQLAlchemy sessions are conventionally bound to one of a handful of
+	 * receiver names. Structural provenance (`python-provenance.ts`) proves the
+	 * annotated case; this name check keeps the far more common unannotated
+	 * `session.execute(stmt)` quiet, as it has been since the exemption was
+	 * added. Removing it regresses every codebase that never annotates.
+	 */
 	private isLikelySqlAlchemyReceiver(text: string): boolean {
 		const tail = text.split(".").pop() ?? text;
-		return new Set([
-			"session",
-			"db_session",
-			"async_session",
-			"sync_session",
-		]).has(tail.toLowerCase());
+		return PYTHON_SQLALCHEMY_RECEIVER_NAMES.has(tail.toLowerCase());
 	}
 
 	/**
@@ -2901,13 +2928,18 @@ export class TreeSitterClient {
 		return object.text;
 	}
 
+	/**
+	 * `session.execute(select(...))` and friends pass a statement OBJECT, not a
+	 * SQL string: parameterized by construction, and far too noisy as blockers.
+	 */
 	private isSafeSqlAlchemyExpressionCall(node: TreeSitterNode): boolean {
 		if (node.type !== "call") return false;
 		const callee = node.children?.[0]?.text ?? "";
 		const expression = node.text;
-		return ["select", "insert", "update", "delete"].some(
-			(name) => callee === name || expression.startsWith(`${name}(`),
-		);
+		for (const name of PYTHON_SQLALCHEMY_STATEMENT_BUILDERS) {
+			if (callee === name || expression.startsWith(`${name}(`)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -2972,16 +3004,6 @@ export class TreeSitterClient {
 				break; // first __slots__ wins
 			}
 			return slots;
-		}
-
-		/**
-		 * Escape a string for safe interpolation into a `RegExp` source —
-		 * needed anywhere an identifier's raw text is combined with regex
-		 * metacharacters like `\b` word boundaries (see
-		 * "not_closed_or_try_with_resources" below; #1089 P2).
-		 */
-		function escapeRegExp(s: string): string {
-			return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		}
 
 		switch (postFilter) {
@@ -3913,6 +3935,123 @@ export class TreeSitterClient {
 					captures.MOD?.text === "child_process" &&
 					/^(exec|execSync)$/.test(captures.FN?.text ?? "")
 				);
+			case "ts_sql_injection_sink": {
+				const template = captures.TEMPLATE?.text ?? "";
+				// Inspect only the template's raw prefix. Leading SQL comments are
+				// ignored; comments and unrelated strings elsewhere cannot satisfy it.
+				const rawPrefix = template
+					.replace(/^`/, "")
+					.replace(/`$/, "")
+					.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, "");
+				if (
+					/^(?:SELECT[\s\S]*(?:\bFROM\b|\$\{)|INSERT\s+INTO\b|UPDATE\s+[\s\S]*\bSET\b|DELETE\s+FROM\b|CREATE\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|DROP\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|ALTER\s+(?:OR\s+REPLACE\s+|TEMP(?:ORARY)?\s+|UNIQUE\s+|MATERIALIZED\s+)*(?:TABLE|INDEX|VIEW|SCHEMA|DATABASE|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE|TYPE|EXTENSION)\b|GRANT\b|REVOKE\b|WITH[\s\S]*\bSELECT\b|MERGE\s+INTO\b|TRUNCATE\s+TABLE\b|REPLACE\s+INTO\b)/i.test(
+						rawPrefix,
+					)
+				)
+					return true;
+
+				if (!rootNode || !captures.OBJ) return false;
+				let imported = TYPESCRIPT_SQL_IMPORTS.get(rootNode);
+				if (!imported) {
+					const names = new Set<string>();
+					const stack = [rootNode];
+					while (stack.length > 0) {
+						const node = stack.pop();
+						if (!node) continue;
+						if (node.type === "import_statement") {
+							const source = node.childForFieldName?.("source")?.text ?? "";
+							const packageName = source.replace(/^['"]|['"]$/g, "");
+							const isKnown = [...TYPESCRIPT_SQL_KNOWN_PACKAGES].some(
+								(pkg) =>
+									packageName === pkg || packageName.startsWith(`${pkg}/`),
+							);
+							if (isKnown) {
+								const importStack = [node];
+								while (importStack.length > 0) {
+									const importNode = importStack.pop();
+									if (!importNode) continue;
+									if (
+										importNode.type === "identifier" ||
+										importNode.type === "import_specifier"
+									) {
+										names.add(importNode.text);
+									}
+									importStack.push(...importNode.children);
+								}
+							}
+						}
+						stack.push(...node.children);
+					}
+					const declarations = new Map<string, TreeSitterNode>();
+					const declarationStack = [rootNode];
+					while (declarationStack.length > 0) {
+						const node = declarationStack.pop();
+						if (!node) continue;
+						if (node.type === "variable_declarator") {
+							const name = node.childForFieldName?.("name")?.text;
+							const value = node.childForFieldName?.("value");
+							if (name && value) declarations.set(name, value);
+						}
+						declarationStack.push(...node.children);
+					}
+					const resolvesKnownValue = (
+						node: TreeSitterNode,
+						seen = new Set<string>(),
+					): boolean => {
+						if (node.type === "identifier") {
+							if (names.has(node.text)) return true;
+							if (seen.has(node.text)) return false;
+							const value = declarations.get(node.text);
+							if (!value) return false;
+							seen.add(node.text);
+							return resolvesKnownValue(value, seen);
+						}
+						if (node.type === "await_expression") {
+							const value = node.children.find((child) => child.isNamed);
+							return value ? resolvesKnownValue(value, seen) : false;
+						}
+						if (node.type === "new_expression") {
+							const ctor = node.childForFieldName?.("constructor");
+							return ctor ? resolvesKnownValue(ctor, seen) : false;
+						}
+						if (node.type === "call_expression") {
+							const fn = node.childForFieldName?.("function");
+							return fn ? resolvesKnownValue(fn, seen) : false;
+						}
+						return false;
+					};
+					let changed = true;
+					while (changed) {
+						changed = false;
+						for (const [name, value] of declarations) {
+							if (!names.has(name) && resolvesKnownValue(value)) {
+								names.add(name);
+								changed = true;
+							}
+						}
+					}
+					imported = names;
+					TYPESCRIPT_SQL_IMPORTS.set(rootNode, imported);
+				}
+
+				const resolvesToKnownClient = (node: TreeSitterNode): boolean => {
+					if (node.type === "identifier") return imported.has(node.text);
+					if (node.type === "await_expression") {
+						const value = node.children.find((child) => child.isNamed);
+						return value ? resolvesToKnownClient(value) : false;
+					}
+					if (node.type === "new_expression") {
+						const ctor = node.childForFieldName?.("constructor");
+						return ctor ? resolvesToKnownClient(ctor) : false;
+					}
+					if (node.type === "call_expression") {
+						const fn = node.childForFieldName?.("function");
+						return fn ? resolvesToKnownClient(fn) : false;
+					}
+					return false;
+				};
+				return resolvesToKnownClient(captures.OBJ);
+			}
 			case "ts_ssrf_sink": {
 				const fn = captures.FN?.text ?? "";
 				const obj = captures.OBJ?.text ?? "";
@@ -4097,23 +4236,48 @@ export class TreeSitterClient {
 				);
 			case "py_sql_injection_sink": {
 				const fn = captures.FN?.text ?? "";
-				if (!new Set(["execute", "executemany", "query", "raw"]).has(fn)) {
-					return false;
-				}
+				if (!PYTHON_SQL_SINK_METHODS.has(fn)) return false;
 
 				const sqlNode = captures.SQL;
-				const receiver = captures.OBJ?.text ?? "";
+				const receiver = captures.OBJ;
 
-				// SQLAlchemy ORM sessions execute expression objects, not raw SQL
-				// strings. `session.execute(stmt)` and `session.execute(select(...))`
-				// are parameterized by construction and were too noisy as blockers.
-				if (fn === "execute" && this.isLikelySqlAlchemyReceiver(receiver)) {
+				// Pre-existing exemptions — kept verbatim so no current user
+				// regresses (#2577 review): an unannotated session receiver, and a
+				// statement-builder call in argument position.
+				if (
+					fn === "execute" &&
+					this.isLikelySqlAlchemyReceiver(receiver?.text ?? "")
+				) {
 					return false;
 				}
 				if (sqlNode && this.isSafeSqlAlchemyExpressionCall(sqlNode)) {
 					return false;
 				}
 
+				// #2576: a receiver PROVEN to be a sqlalchemy Session/AsyncSession.
+				// `Session.query` takes entity classes and `Session.execute` a
+				// statement object (a builder call, or a name bound to one —
+				// `stmt = select(User)`, which the check above cannot see). Neither
+				// suppression may swallow composed SQL text (#2577 review F1/F2).
+				if (isProvenSqlAlchemySessionReceiver(receiver, rootNode)) {
+					if (
+						fn === "query" &&
+						isSqlAlchemyEntityQueryArgument(sqlNode, rootNode)
+					) {
+						return false;
+					}
+					if (
+						fn === "execute" &&
+						isSqlAlchemyStatementArgument(sqlNode, rootNode)
+					) {
+						return false;
+					}
+				}
+
+				// #2576: psycopg `sql.SQL("...").format(sql.Identifier(...))`.
+				if (isSafePsycopgIdentifierComposition(sqlNode, rootNode)) {
+					return false;
+				}
 				return true;
 			}
 			case "go_sql_injection_sink":
@@ -4447,7 +4611,8 @@ export class TreeSitterClient {
 			contentOverride,
 			(tree) => {
 				try {
-					const queryMatches = query.matches(tree.rootNode);
+					const rootNode = tree.rootNode;
+					const queryMatches = query.matches(rootNode);
 
 					for (const match of queryMatches) {
 						const captures: Record<string, TreeSitterNode> = {};
@@ -4471,7 +4636,7 @@ export class TreeSitterClient {
 								postFilter,
 								postFilterParams,
 								captures,
-								tree.rootNode,
+								rootNode,
 							)
 						) {
 							continue;
@@ -4571,63 +4736,3 @@ export class TreeSitterClient {
 }
 
 // --- Simplified Pattern Search (regex fallback) ---
-
-/**
- * Fallback structural search using regex when tree-sitter unavailable
- * Less accurate but works without WASM dependencies
- */
-export function regexStructuralSearch(
-	pattern: string,
-	files: string[],
-	options: { maxResults?: number } = {},
-): StructuralMatch[] {
-	const matches: StructuralMatch[] = [];
-	const maxResults = options.maxResults ?? 50;
-
-	// Extract pattern structure for regex
-	// "console.log($MSG)" -> /console\.log\(([^)]+)\)/
-	const regexPattern = pattern
-		.replace(/\\/g, "\\\\")
-		.replace(/\./g, "\\.")
-		.replace(/\$\$\$[A-Z_][A-Z0-9_]*/g, "(.*?)") // variadic - non-greedy
-		.replace(/\$[A-Z_][A-Z0-9_]*/g, "([^,)]+)"); // single - capture group
-
-	try {
-		const regex = new RegExp(regexPattern, "g");
-
-		for (const file of files) {
-			if (matches.length >= maxResults) break;
-
-			try {
-				const content = fs.readFileSync(file, "utf-8");
-				const lines = content.split("\n");
-
-				for (let i = 0; i < lines.length; i++) {
-					regex.lastIndex = 0;
-					const match = regex.exec(lines[i]);
-					if (match) {
-						const captures: Record<string, string> = {};
-						// Extract captures
-						for (let j = 1; j < match.length; j++) {
-							captures[`$${j}`] = match[j];
-						}
-
-						matches.push({
-							file,
-							line: i + 1,
-							column: match.index + 1,
-							matchedText: match[0],
-							captures,
-						});
-
-						if (matches.length >= maxResults) break;
-					}
-				}
-			} catch {}
-		}
-	} catch {
-		// Invalid regex
-	}
-
-	return matches;
-}

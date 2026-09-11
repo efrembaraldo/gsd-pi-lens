@@ -42,7 +42,10 @@ import {
 	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
-import type { GitleaksResult } from "./gitleaks-client.js";
+import {
+	classifyAndFilterFindings,
+	type GitleaksResult,
+} from "./gitleaks-client.js";
 import type { GovulncheckResult } from "./govulncheck-client.js";
 import type { TrivyResult } from "./trivy-client.js";
 import {
@@ -90,6 +93,7 @@ import type { TurnStateOwner } from "./cache-manager.js";
 import { formatRunDurationMs } from "./run-duration.js";
 import {
 	isExcludedTestTarget,
+	isRunnerErrorResult,
 	RUNNERS,
 	type TestResult,
 	type TestRunnerClient,
@@ -138,6 +142,8 @@ import {
 } from "./demoted-finding-render.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
 import { getActiveSessionId } from "./session-lifecycle.js";
+import { bounded } from "./deadline-utils.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
 
 import {
 	drainRenderedDependencyDriftFilePaths,
@@ -244,7 +250,7 @@ export const TEST_RUNNER_MAX_PERSISTED_TARGETS = 64;
  * (AGENTS.md cross-form-path screen).
  */
 function deferralEntryKey(entry: DeferredTestTarget): string {
-	return `${entry.sessionId ?? ""} ${normalizeMapKey(path.resolve(entry.testFile))}`;
+	return `${entry.sessionId ?? ""}\u0000${normalizeMapKey(path.resolve(entry.testFile))}`;
 }
 
 function mergeDeferredTargets(
@@ -447,6 +453,8 @@ interface TurnEndDeps {
 	}) => void;
 	/** Stable session identity from the event ctx that fired this turn_end. */
 	sessionId?: string;
+	/** Abort signal from the event ctx that fired this turn_end. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -707,6 +715,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		resetLSPService,
 		resetFormatService,
 	} = deps;
+	const turnIndexAtDispatch = runtime.turnIndex;
+	const clearOwnedTurnState = (): void => {
+		if (runtime.turnIndex !== turnIndexAtDispatch) {
+			dbg(
+				`turn_end: retaining newer turn state (dispatch=${turnIndexAtDispatch}, current=${runtime.turnIndex})`,
+			);
+			return;
+		}
+		cacheManager.clearTurnState(cwd, currentOwner);
+	};
 
 	// #449 slice 1: piggyback the instance-registry heartbeat on this existing
 	// per-turn touchpoint rather than adding a new timer/interval. Cheap (reads
@@ -769,7 +787,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		(turnState.files || turnState.owner || turnState.sessionId)
 	) {
 		dbg("turn_end: evicting stale turn-state owner");
-		cacheManager.clearTurnState(cwd, currentOwner);
+		clearOwnedTurnState();
 		turnState = cacheManager.readTurnState(cwd);
 	}
 
@@ -898,7 +916,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	if (cacheManager.isMaxCyclesExceeded(cwd)) {
 		dbg("turn_end: max cycles exceeded, clearing state and forcing through");
-		cacheManager.clearTurnState(cwd, currentOwner);
+		clearOwnedTurnState();
 		runtime.fixedThisTurn.clear();
 		resetFormatService();
 		return;
@@ -1864,6 +1882,34 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 	)?.data;
 	const trivySecretsData = trivyCacheEntry?.data;
+	// Gitleaks deliberately scans gitignored local files and nested repositories
+	// so an explicit security audit can still inspect them. The adapter is the
+	// source of truth for whether a finding belongs in a blocking delivery lane;
+	// filter here before freshness handling so demoted findings cannot leak into
+	// either the blocker or stale-secret turn context.
+	const boundedClassification = await bounded(
+		classifyAndFilterFindings(gitleaksData?.findings ?? [], cwd),
+		{
+			ms: HOOK_WALL_BUDGET_MS.turn_end,
+			signal: deps.signal,
+			hook: "turn_end",
+			label: "classifyAndFilterFindings",
+		},
+	);
+	const classifiedGitleaksFindings =
+		boundedClassification ?? gitleaksData?.findings ?? [];
+	if (boundedClassification === undefined) {
+		recordDegradationOnce({
+			kind: "gitleaks_classification_timeout",
+			subject: cwd,
+			reason:
+				"gitleaks classification exceeded the turn_end budget; retained raw findings to fail open",
+		});
+	}
+	const blockingGitleaksFindings = classifiedGitleaksFindings.filter(
+		(finding) =>
+			gitleaksFindingToProjectDiagnostic(cwd, finding).semantic === "blocking",
+	);
 	// #1461 slice 1 (#1460): the gitleaks cache is TTL-only, so a finding for a
 	// file deleted after the scan is still served as a 🔴 blocker for the rest
 	// of the 30-minute window — the live case, and 119 of 126 findings in
@@ -1878,7 +1924,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// would let any edit — malicious or accidental — mute a real secret.
 	const gitleaksGate = gateFindingsByPathFreshness({
 		store: "gitleaks",
-		findings: gitleaksData?.findings ?? [],
+		findings: blockingGitleaksFindings,
 		cwd,
 		scannedAt: gitleaksData?.scannedAt,
 		citedPath: (finding) => finding.file,
@@ -2777,22 +2823,35 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// `elapsed` is: the pair read as a nested ternary, which
 						// this line only got flagged for because #1479 touched it.
 						const verdict = failed > 0 ? "FAIL" : "PASS";
-						const summary =
-							error && passed === 0 && failed === 0
-								? `error: ${error}`
-								: `${verdict} ${passed}p/${failed}f (${elapsed})`;
+						// #2532 review S1: folded onto `isRunnerErrorResult` instead of
+						// re-deriving `error && passed === 0 && failed === 0` here — that
+						// local spelling missed a runner error reported alongside partial
+						// passes (pytest `Interrupted` after some tests already passed),
+						// which read as a clean "PASS Np/0f" line with the error silently
+						// dropped. A partial run says so explicitly rather than reading
+						// as a clean pass.
+						const summary = isRunnerErrorResult(r.value)
+							? passed > 0
+								? `error: ${error} (${passed} passed before)`
+								: `error: ${error}`
+							: `${verdict} ${passed}p/${failed}f (${elapsed})`;
 						dbg(
 							`turn_end: ${stale ? "[stale] " : ""}test ${runner} ${shortFile} → ${summary}`,
 						);
 						// #1524: also fires on `error` alone, not just `failed > 0`.
-						// A runner-error result (the suite never started — spawn/
-						// config failure) has `failed === 0` by construction, so
-						// gating on `failed > 0` alone dropped it silently: the
-						// agent got no context at all, and the empty `failures`
-						// array below sent this result down the "all tests
-						// passed" branch, clearing any prior real test-failure
-						// git-guard blocker. `formatResult` already renders the
-						// error-only case as "Could not run tests: ...".
+						// A runner error (the suite never started, or was
+						// interrupted before finishing — spawn/config/timeout
+						// failure) can arrive with `failed === 0` even when tests
+						// DID pass before it (#2532 review S2 — not "by
+						// construction": `parsePytestOutput` sets `error` from the
+						// exit code independently of the parsed counts, so
+						// `isRunnerErrorResult` is `failed === 0 && !!error`, not an
+						// invariant elsewhere). Gating on `failed > 0` alone dropped
+						// it silently: the agent got no context at all, and the
+						// empty `failures` array below sent this result down the
+						// "all tests passed" branch, clearing any prior real
+						// test-failure git-guard blocker. `formatResult` already
+						// renders the error-only case as "Could not run tests: ...".
 						if (failed > 0 || error) {
 							// #2028: "Test file not found" is an expected skip
 							// (conventional test path without an actual file),
@@ -2886,15 +2945,57 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 									cleanFiles,
 								);
 							}
-							mergeGitGuardTestFailure(
-								cacheManager,
-								cwd,
-								runtime,
-								content,
-								resultValues
-									.filter((value) => value.failed > 0)
-									.map((value) => value.file),
-							);
+							// #2532: `runnerErrorOnly` (computed above for the turn-end
+							// delivery framing) is true exactly when nothing in this
+							// batch is a genuine failing test — every entry is a
+							// runner error the agent did not introduce. Without this
+							// gate, an all-runner-error batch still called
+							// `mergeGitGuardTestFailure` with an EMPTY failed-files
+							// list, which unconditionally sets `hasBlockers: true`:
+							// the identical event the turn-end message reports as
+							// advisory read as "COMMIT BLOCKED" under --lens-guard.
+							if (!runnerErrorOnly) {
+								mergeGitGuardTestFailure(
+									cacheManager,
+									cwd,
+									runtime,
+									content,
+									resultValues
+										.filter((value) => value.failed > 0)
+										.map((value) => value.file),
+								);
+							} else {
+								// #2532 review T2: the skip above is otherwise pull-only —
+								// nothing records that a batch with real content
+								// (`failures.length > 0`) was deliberately kept OFF the
+								// `--lens-guard` blocker because every entry was a runner
+								// error. Same phase/ledger as the rejected-promise event
+								// above, so both `--lens-guard` demotions land in one
+								// queryable place. Reached only inside the enclosing
+								// `getFlag("lens-guard") && firedSessionId === …` check —
+								// no point recording a demotion the flag can't act on.
+								emitBounded(
+									"test_runner_delivery",
+									`${cwd}:generation:${testRunGeneration}:runner-error-only`,
+									{
+										filePath: cwd,
+										durationMs: 0,
+										metadata: {
+											outcome: "runner-error-only-not-blocking",
+											sessionId: firedSessionId,
+											generation: testRunGeneration,
+											targetCount: targets.length,
+											droppedDetailCount: 0,
+										},
+									},
+									{
+										ledgerKind: "test-runner-delivery",
+										reason:
+											"runner-error-only batch kept off the --lens-guard blocker",
+										capPerTurn: { limit: 8, turnIndex: firedAtTurn },
+									},
+								);
+							}
 						}
 						dbg(
 							`turn_end: ${failures.length} test failure(s) cached for pull diagnostics and post-agent delivery${stale ? " (stale — turn advanced while tests ran)" : ""}`,
@@ -3452,6 +3553,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	let lateAuxCoverageGapDropCount = 0;
 	const lateAuxStuckPairs: Array<{ filePath: string; serverId: string }> = [];
 	if (drainedPairs.length > 0) {
+		const lateObserverDeadline = Date.now() + HOOK_WALL_BUDGET_MS.turn_end;
 		const byFile = new Map<string, typeof drainedPairs>();
 		for (const pair of drainedPairs) {
 			const list = byFile.get(pair.filePath);
@@ -3571,6 +3673,26 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						}
 						continue;
 					}
+					// A demoted auxiliary still answers through this late path. Feed the
+					// publication-minus-mark interval into the re-promotion streak. This is
+					// delivery latency observed by the drain, not the scanner's total scan
+					// latency. Cache priming is
+					// below the freshness gate so a changed file cannot resurrect stale data.
+					if (typeof service.observeLateAuxiliaryAnswer === "function") {
+						await bounded(
+							service.observeLateAuxiliaryAnswer(
+								lateAuxPath,
+								pair.serverId,
+								cachedEntry.publishedAt - pair.markedAtMs,
+							),
+							{
+								ms: Math.max(1, lateObserverDeadline - Date.now()),
+								signal: deps.signal /* late observer */,
+								hook: "turn_end",
+								label: "observeLateAuxiliaryAnswer",
+							},
+						);
+					}
 					if (rawDiags.length === 0) {
 						lateAuxCleanConfirmed += 1;
 						continue;
@@ -3622,6 +3744,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						}
 						continue;
 					}
+					// #2810 round 4: this drain does NOT write the hash-bound
+					// last-known record. The prime it used to call could only fire when
+					// a record already existed at the pair's hash — which requires a
+					// FULLY covered touch of those exact bytes, the one case where the
+					// scanner's findings are already in the record — so it was a no-op
+					// in the demoted steady state it was added for, and a #570/#1470
+					// hazard everywhere else (an auxiliary-only array replacing the
+					// merged one). Late findings reach the agent as the gated advisory
+					// below; the turn-end hash-guarded fast path stays cold for a file
+					// whose touch was partial, which is exactly what #1470 requires.
 					const lines = gate.live.map(
 						(f) =>
 							`  ${displayLateAuxPath}:${f.line}:${f.column} [${f.rule}] ${f.message}`,
@@ -3759,7 +3891,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					});
 				}
 			}
-			cacheManager.clearTurnState(cwd, currentOwner);
+			clearOwnedTurnState();
 			runtime.fixedThisTurn.clear();
 			resetFormatService();
 			return;
@@ -3863,7 +3995,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 	if (blockerParts.length === 0) {
-		cacheManager.clearTurnState(cwd, currentOwner);
+		clearOwnedTurnState();
 		// `staleSecretParts` counts here too (#1622 review M2): clearing the
 		// findings record while a stale secret is still unverified would drop the
 		// only surviving trace of it.

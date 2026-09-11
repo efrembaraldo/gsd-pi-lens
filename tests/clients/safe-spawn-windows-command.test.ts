@@ -77,6 +77,7 @@ describe("safeSpawnAsync command-line injection regression (#17)", () => {
 // only exists on win32 (resolveWindowsCommand's PATH+PATHEXT walk, the pinned
 // cmd.exe wrapper). This machine (Windows 11) runs them for real.
 // ============================================================================
+// lane: windows-vitest
 describe.runIf(process.platform === "win32")(
 	"Windows command resolution + direct spawn (#817)",
 	() => {
@@ -270,6 +271,7 @@ describe.runIf(process.platform === "win32")(
 // async version. Mirrors the async describe block above, one representative
 // case per behavior (full matrix already covered on the async path).
 // ============================================================================
+// lane: windows-vitest
 describe.runIf(process.platform === "win32")(
 	"Windows command resolution — deprecated sync safeSpawn (#817)",
 	() => {
@@ -360,3 +362,4 @@ describe.runIf(process.platform === "win32")(
 		});
 	},
 );
+// flake-shape: real-process-spawn — real Windows command-line parsing decides argument boundaries no in-process parser can validate

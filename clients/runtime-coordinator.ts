@@ -23,6 +23,11 @@ import type { RuleScanResult } from "./rules-scanner.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
 import { deriveProviderFromModelId } from "./model-provider.js";
+import { beginTurnContext, setTurnContextSession } from "./turn-context.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
+
+/** Keep deferred cascade admission bounded without dropping late findings. */
+export const MAX_PENDING_CASCADE_RUNS = 32;
 
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
@@ -101,6 +106,8 @@ export interface DeferredMutationRecord {
 	 * the same run.
 	 */
 	queuedTurnIndex: number;
+	/** The immutable sink identity of the turn that queued this record. */
+	queuedTurnId: string;
 	/**
 	 * The STABLE pi session id (`ctx.sessionManager.getSessionId()`) active
 	 * when this file was (most recently) queued/re-touched, or `undefined`
@@ -519,6 +526,7 @@ export class RuntimeCoordinator {
 		// by resetForSession().
 		this._turnStartProjectSeq = this._projectSeq;
 		this._turnIndex += 1;
+		beginTurnContext(this._telemetrySessionId);
 		this._writeIndex = 0;
 		this._reportedThisTurn.clear();
 		this._writtenThisTurn.clear();
@@ -643,6 +651,7 @@ export class RuntimeCoordinator {
 	}): void {
 		if (identity.sessionId && identity.sessionId.trim()) {
 			this._telemetrySessionId = identity.sessionId.trim();
+			setTurnContextSession(this._telemetrySessionId);
 		}
 		const model = identity.model?.trim();
 		const provider = identity.provider?.trim();
@@ -857,7 +866,24 @@ export class RuntimeCoordinator {
 	}
 
 	appendCascadePromise(p: Promise<CascadeRun>): void {
-		this._pendingCascadeRuns.push(p);
+		if (this._pendingCascadeRuns.length < MAX_PENDING_CASCADE_RUNS) {
+			this._pendingCascadeRuns.push(p);
+			return;
+		}
+		// Preserve delivery for overflow rather than growing the per-edit array.
+		// The settled run enters the same accumulator off-hook and is therefore
+		// visible to the next turn-end drain.
+		recordDegradationOnce({
+			kind: "cascade-pending-cap",
+			subject: "runtime-coordinator",
+			reason: `deferred cascade admission capped at ${MAX_PENDING_CASCADE_RUNS}`,
+		});
+		void p
+			.then((run) => this.appendCascadeRun(run))
+			.catch(() => {
+				// Pipeline promises are normally non-rejecting; preserve the existing
+				// failure sink if a caller violates that contract.
+			});
 	}
 
 	/**
@@ -1397,6 +1423,7 @@ export class RuntimeCoordinator {
 			existing.toolNames.add(toolName);
 			existing.kinds.add(kind);
 			existing.queuedTurnIndex = this._turnIndex;
+			existing.queuedTurnId = `${this._telemetrySessionId}:${this._turnIndex}`;
 			existing.ownerSessionId = ownerSessionId;
 			existing.originCwd = resolvedOriginCwd;
 			return addedKind;
@@ -1410,6 +1437,7 @@ export class RuntimeCoordinator {
 			toolNames: new Set([toolName]),
 			kinds: new Set([kind]),
 			queuedTurnIndex: this._turnIndex,
+			queuedTurnId: `${this._telemetrySessionId}:${this._turnIndex}`,
 			ownerSessionId,
 			originCwd: resolvedOriginCwd,
 		});

@@ -141,6 +141,13 @@
 
 const MS_PER_MINUTE = 60_000;
 
+/** Mark retained findings whose replacement result could not be reconciled. */
+export function markUnreconciledFindings<T extends { stale?: boolean }>(
+	findings: readonly T[],
+): T[] {
+	return findings.map((finding) => ({ ...finding, stale: true }));
+}
+
 /**
  * Render a short, honest age suffix for a store that cannot be freshness-
  * gated per-path (see module doc). `undefined`/unparseable `scannedAt`
@@ -171,9 +178,6 @@ export function formatCacheAgeLabel(
 		? `scanned ${ageHours}h ago`
 		: `scanned ${ageHours}h ${remMinutes}m ago`;
 }
-
-/** How a delivery surface satisfies #1634's "gated or labeled" contract. */
-export type DeliveryMode = "gated" | "labeled";
 
 interface DeliverySurfaceBase {
 	/** Human-readable one-line description of what the surface renders. */
@@ -225,13 +229,13 @@ interface DeliverySurfaceBase {
 	evidenceMin?: number;
 }
 
-export interface GatedDeliverySurface extends DeliverySurfaceBase {
+interface GatedDeliverySurface extends DeliverySurfaceBase {
 	mode: "gated";
 	/** Named gate(s) this surface routes through before rendering. */
 	gates: string[];
 }
 
-export interface LabeledDeliverySurface extends DeliverySurfaceBase {
+interface LabeledDeliverySurface extends DeliverySurfaceBase {
 	mode: "labeled";
 	/** Why this surface cannot take the full gate stack. */
 	reason: string;

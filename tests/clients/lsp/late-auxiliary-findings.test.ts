@@ -19,11 +19,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
 
 const readCachedDiagnosticsForServers = vi.hoisted(() => vi.fn());
+const observeLateAuxiliaryAnswer = vi.hoisted(() => vi.fn());
 vi.mock("../../../clients/lsp/index.js", () => ({
-	// Only `getLSPService` crosses this seam in handleTurnEnd's import graph.
-	getLSPService: () => ({ readCachedDiagnosticsForServers }),
+	// Only `getLSPService` crosses this seam in handleTurnEnd's import graph;
+	// the double still carries the full surface so a method this path grows
+	// later cannot throw into a swallow-all catch (#2582).
+	getLSPService: () =>
+		makeLspServiceDouble({
+			readCachedDiagnosticsForServers,
+			observeLateAuxiliaryAnswer,
+		}),
 }));
 
 const logLatency = vi.hoisted(() => vi.fn());
@@ -51,7 +59,7 @@ import {
 	drainPendingAuxiliaryCoverage,
 	markPendingAuxiliaryCoverage,
 	MAX_LATE_AUX_REARMS,
-	pendingAuxiliaryCoverageSizeForTests,
+	pendingAuxiliaryCoverageSize,
 	readLateAuxRearmTtlMs,
 	resetPendingAuxiliaryCoverage,
 } from "../../../clients/lsp/pending-aux-coverage.js";
@@ -149,6 +157,8 @@ function lateAuxRecord(): any | undefined {
 
 beforeEach(() => {
 	readCachedDiagnosticsForServers.mockReset();
+	observeLateAuxiliaryAnswer.mockReset();
+	observeLateAuxiliaryAnswer.mockResolvedValue(undefined);
 	logLatency.mockClear();
 	resetPendingAuxiliaryCoverage();
 	resetBoundedTelemetry();
@@ -163,6 +173,45 @@ afterEach(() => {
 });
 
 describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
+	it("PROBE-REPROMOTE-DRAIN: handleTurnEnd observes five fast late publications", async () => {
+		const env = setupTestEnvironment("pi-lens-late-aux-repromote-") as any;
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "late-aux-repromote" });
+			const cacheManager = new CacheManager(false);
+			const file = path.join(env.tmpDir, "src", "repromote.ts");
+			// The observer is a mock here: this test pins that the drain CALLS it
+			// with the publish-minus-mark elapsed time; re-promotion itself is pinned
+			// against the real service in service-aux-grace.test.ts.
+			observeLateAuxiliaryAnswer.mockImplementation(async () => {});
+			readCachedDiagnosticsForServers.mockImplementation(
+				async () =>
+					new Map([
+						[
+							"opengrep",
+							{ diags: [diag(1, "late typo")], publishedAt: Date.now() },
+						],
+					]),
+			);
+
+			const deliveredPerTurn: number[] = [];
+			for (let turn = 0; turn < 5; turn += 1) {
+				runtime.beginTurn();
+				registerEdit(env, "late-aux-repromote", cacheManager, file);
+				markPendingAuxiliaryCoverage(file, ["opengrep"], Date.now() - 100);
+				await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
+				deliveredPerTurn.push(lateAuxRecord()?.metadata?.delivered ?? 0);
+			}
+
+			expect(deliveredPerTurn).toEqual([1, 1, 1, 1, 1]);
+			expect(observeLateAuxiliaryAnswer).toHaveBeenCalledTimes(5);
+			// Re-promotion itself is pinned one seam lower (service-aux-grace.test.ts);
+			// this test pins the drain's observe call and its publish-minus-mark metric.
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("delivers findings an auxiliary published after its grace window expired", async () => {
 		const env = setupTestEnvironment("pi-lens-late-aux-deliver-") as any;
 		try {
@@ -429,7 +478,7 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 
 			// One transient throw counts the failure AND keeps the pair
 			// pending — the coverage must not vanish uncounted.
-			expect(pendingAuxiliaryCoverageSizeForTests()).toBe(1);
+			expect(pendingAuxiliaryCoverageSize()).toBe(1);
 			expect(lateAuxRecord()?.metadata).toMatchObject({
 				probeFailed: 1,
 				rearmed: 1,
@@ -448,7 +497,7 @@ describe("turn-end late-auxiliary findings (#2001/#2002)", () => {
 				);
 				await handleTurnEnd(makeDeps(runtime, cacheManager, env.tmpDir));
 			}
-			expect(pendingAuxiliaryCoverageSizeForTests()).toBe(0);
+			expect(pendingAuxiliaryCoverageSize()).toBe(0);
 			const records = logLatency.mock.calls
 				.map((call) => call[0])
 				.filter((entry: any) => entry?.phase === "late_auxiliary_findings");

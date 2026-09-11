@@ -72,7 +72,11 @@ import type { RuffClient } from "./ruff-client.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import type { WordIndex } from "./word-index.js";
 import { getAmbientAbortSignal, safeSpawnAsync } from "./safe-spawn.js";
+import { probeToolAsync } from "./tool-probe.js";
 import { bounded } from "./deadline-utils.js";
+import { HOOK_WALL_BUDGET_MS } from "./hook-budgets.js";
+import type { LedgerHookKey } from "./hook-budgets.js";
+import { enabledAuxiliaryLspServerIds } from "./dispatch/auxiliary-lsp.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { dropFindingsForMissingPaths } from "./advisory-provenance.js";
 import {
@@ -244,6 +248,8 @@ function exceedsLspSyncLimits(
 // --- Types ---
 
 export interface PipelineContext {
+	/** Live tool_result signal for aggregate formatter and dispatch bounds. */
+	signal?: AbortSignal;
 	filePath: string;
 	/** Language/tool root used for runner execution and config resolution. */
 	cwd: string;
@@ -417,12 +423,7 @@ function createPhaseTracker(toolName: string, filePath: string): PhaseTracker {
 
 // --- ESLint autofix helpers ---
 
-export {
-	hasEslintConfig,
-	hasRubocopConfig,
-	hasSqlfluffConfig,
-	hasStylelintConfig,
-};
+export { hasEslintConfig, hasSqlfluffConfig, hasStylelintConfig };
 
 /**
  * eslint autofix availability, per cwd + PATH. The verdict is owned by the
@@ -650,7 +651,7 @@ async function tryDetektFix(filePath: string, cwd: string): Promise<number> {
 	);
 }
 
-export async function tryMarkdownlintFix(
+async function tryMarkdownlintFix(
 	filePath: string,
 	cwd: string,
 ): Promise<number> {
@@ -683,7 +684,7 @@ async function tryOxlintFix(filePath: string, cwd: string): Promise<number> {
 }
 
 async function tryRustClippyFix(filePath: string): Promise<string[]> {
-	const check = await safeSpawnAsync("cargo", ["--version"], { timeout: 5000 });
+	const check = await probeToolAsync("cargo", ["--version"], { timeout: 5000 });
 	if (check.error || check.status !== 0) return [];
 
 	const cargoDir = findNearestContaining(path.dirname(path.resolve(filePath)), [
@@ -702,7 +703,7 @@ async function tryRustClippyFix(filePath: string): Promise<string[]> {
 }
 
 async function tryDartFix(filePath: string): Promise<string[]> {
-	const check = await safeSpawnAsync("dart", ["--version"], { timeout: 5000 });
+	const check = await probeToolAsync("dart", ["--version"], { timeout: 5000 });
 	if (check.error || check.status !== 0) return [];
 
 	const pubspecDir = findNearestContaining(
@@ -1077,6 +1078,7 @@ export async function resyncLspFile(
 			const budgetMs = lspSyncBudgetMs();
 			const abort = getAmbientAbortSignal();
 			if (abort?.aborted) return;
+
 			const startedAt = Date.now();
 			const touch = lspService
 				.touchFile(filePath, fileContent, {
@@ -1090,6 +1092,34 @@ export async function resyncLspFile(
 					dbg(`LSP resync after autofix error: ${err}`);
 					return "done" as const;
 				});
+
+			// #2540: Kick off auxiliary server acquisition concurrently and unawaited
+			// with the ambient turn signal so auxiliary warmup overlaps with the primary
+			// server during resync. Leaves the single-occupancy deferred slot (#2509)
+			// free for actionable-warnings while Escape mid-turn abandons the wait.
+			//
+			// #2582 F3 — the #1766 F3 invariant re-opened for a different method.
+			// #2540 placed this kick-off BEFORE the primary touch, inside
+			// resyncLspFile's swallow-all catch, so anything that threw out of
+			// auxiliary acquisition abandoned the PRIMARY sync before it started:
+			// no touchFile, and no lsp_sync_abandoned record for the stall.
+			// Auxiliary warmup is a best-effort OVERLAP, never a precondition:
+			// the primary touch is already in flight above, and the async IIFE
+			// turns a synchronous throw out of the call into a rejection so
+			// `.catch` covers both failure directions. Order and containment are
+			// the invariant; do not hoist this back above the touch.
+			const auxServerIds = enabledAuxiliaryLspServerIds(getFlag);
+			if (auxServerIds.length > 0) {
+				void (async () =>
+					lspService.getAuxiliaryClientsForFile(
+						filePath,
+						new Set(auxServerIds),
+						undefined,
+						LSP_SPAWN_BUDGET_MS,
+						abort,
+						"tool_result_edit",
+					))().catch(() => {});
+			}
 			// #2523 slice 2: this was `combineAbortSignals(abort,
 			// AbortSignal.timeout(budgetMs))` fed into a hand-rolled
 			// `Promise.race` — a private fifth copy of "deadline AND signal".
@@ -1119,13 +1149,19 @@ export async function resyncLspFile(
 				// old wording blamed as "slow/wedged" did not exist yet. Distinguish
 				// the two via a fresh, synchronous inFlight lookup so the record keeps
 				// the discriminating identity (which server, which lifecycle state).
-				// Guarded: a test double or future service shape lacking the method
-				// must degrade to the old "timeout"/slow-wedged wording, not throw
-				// into the catch below and suppress this record entirely (#1766 F3).
+				// #2592: the `typeof lspService.isSpawnInFlight === "function"`
+				// hedge that used to wrap this call is GONE. It existed for one
+				// reason — 19 hand-rolled `getLSPService` doubles that lacked the
+				// method, whose TypeError would have landed in the catch below and
+				// suppressed this record entirely (#1766 F3) — and that population
+				// is now zero: every double is seeded from
+				// `makeLspServiceDouble`, `tests/support/lsp-double-baseline.json`
+				// is `{}`, and `tests/config/lsp-service-double-sweep.test.ts` reds
+				// on a fresh hand-rolled one. The real `LSPService` has always had
+				// the method (clients/lsp/index.ts), so the fallback was a test
+				// shape leaking into production — AGENTS.md shape 7.
 				const spawnInFlight =
-					!abort?.aborted &&
-					typeof lspService.isSpawnInFlight === "function" &&
-					lspService.isSpawnInFlight(filePath);
+					!abort?.aborted && lspService.isSpawnInFlight(filePath);
 				const reason = abort?.aborted
 					? "aborted"
 					: spawnInFlight
@@ -1209,6 +1245,9 @@ export async function runFormatPhase(
 	filePath: string,
 	getFormatService: () => FormatService,
 	dbg: PipelineContext["dbg"],
+	signal?: AbortSignal,
+	budgetMs = HOOK_WALL_BUDGET_MS.tool_result_edit,
+	hook: LedgerHookKey = "tool_result_edit",
 ): Promise<FormatPhaseResult> {
 	let formatChanged = false;
 	let formattersUsed: string[] = [];
@@ -1219,7 +1258,11 @@ export async function runFormatPhase(
 	const formatService = getFormatService();
 	try {
 		formatService.recordRead(filePath);
-		const result = await formatService.formatFile(filePath);
+		const result = await formatService.formatFile(filePath, {
+			signal,
+			budgetMs,
+			hook,
+		});
 		// An unavailable tool is NOT a formatter that ran (#2413): keep it out of
 		// `formattersUsed` (which drives change bookkeeping / turn summaries) and
 		// out of `formatFailures` (which requeues). Record it once, distinctly.
@@ -1368,7 +1411,12 @@ export async function runPipeline(
 	const formatDeferred =
 		!autoformatDisabled && !immediateFormat && !!fileContent;
 	if (!autoformatDisabled && immediateFormat && fileContent) {
-		const formatResult = await runFormatPhase(filePath, getFormatService, dbg);
+		const formatResult = await runFormatPhase(
+			filePath,
+			getFormatService,
+			dbg,
+			ctx.signal,
+		);
 		formatChanged = formatResult.formatChanged;
 		formattersUsed = formatResult.formattersUsed;
 		formatFailures = formatResult.formatFailures;

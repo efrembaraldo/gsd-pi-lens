@@ -45,7 +45,7 @@ import { freshnessFromMtime } from "./freshness.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { truncatedByOutputCap } from "./spawn-output-cap.js";
 
-export interface FileStatEntry {
+interface FileStatEntry {
 	mtimeMs: number;
 	size: number;
 	/**
@@ -59,7 +59,7 @@ export interface FileStatEntry {
 }
 
 /** Stop hashing once this many cumulative bytes were read (per capture). */
-export const OPAQUE_HASH_BUDGET_BYTES = 8 * 1024 * 1024;
+const OPAQUE_HASH_BUDGET_BYTES = 8 * 1024 * 1024;
 
 export type FileStatsSnapshot = Map<string, FileStatEntry>;
 
@@ -67,7 +67,7 @@ export type FileStatsSnapshot = Map<string, FileStatEntry>;
 export const OPAQUE_SCAN_MAX_FILES = 2000;
 
 /** How far before recorded start an earlier write may still be attributed. */
-export const OPAQUE_MTIME_TOLERANCE_MS = 150;
+const OPAQUE_MTIME_TOLERANCE_MS = 150;
 
 // `--untracked-files=all` lists untracked files individually instead of
 // collapsing them per directory (it does NOT add ignored paths — that needs
@@ -78,7 +78,7 @@ export const OPAQUE_MTIME_TOLERANCE_MS = 150;
 // reachable at all (#2100).
 const MAX_GIT_STATUS_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-export type OpaqueUnknownReason =
+type OpaqueUnknownReason =
 	| "walk-failed"
 	| "file-cap-exceeded"
 	| "entry-budget-exceeded"
@@ -103,6 +103,8 @@ export interface PendingOpaqueBaseline {
 
 export interface CaptureOptions {
 	budgetMs?: number;
+	/** Internal test seam for making an absent-evidence verdict reachable. */
+	forcedUnknownReason?: OpaqueUnknownReason;
 	/**
 	 * Read file contents and record sha1 hashes alongside mtime/size. Used on
 	 * the stat-diff path so the post-side diff can detect same-tick same-size
@@ -202,6 +204,9 @@ export async function captureFileStats(
 	root: string,
 	options: CaptureOptions = {},
 ): Promise<CaptureOutcome> {
+	if (options.forcedUnknownReason !== undefined) {
+		return { unknownReason: options.forcedUnknownReason, scannedCount: 0 };
+	}
 	const budgetMs = options.budgetMs ?? 50;
 	try {
 		const walk = await collectSourceFilesWithBudgetAsync(root, {
@@ -231,19 +236,41 @@ export function diffFileStats(
 	before: FileStatsSnapshot,
 	after: FileStatsSnapshot,
 ): string[] {
+	const contentChanged = new Set(diffFileContent(before, after));
 	const changed: string[] = [];
 	for (const [key, stat] of after) {
 		const prev = before.get(key);
 		// Content confirm: same mtime tick + same size but different bytes.
-		const contentConfirm =
-			prev?.hash !== undefined &&
-			stat.hash !== undefined &&
-			prev.hash !== stat.hash;
+		const contentConfirm = contentChanged.has(key);
 		if (
 			!prev ||
 			prev.mtimeMs !== stat.mtimeMs ||
 			prev.size !== stat.size ||
 			contentConfirm
+		) {
+			changed.push(key);
+		}
+	}
+	return changed;
+}
+
+/**
+ * Return paths confirmed different by hashes, plus files absent before and
+ * present after. A missing baseline entry is evidence of creation; a missing
+ * hash on an existing entry remains unknown.
+ */
+export function diffFileContent(
+	before: FileStatsSnapshot,
+	after: FileStatsSnapshot,
+): string[] {
+	const changed: string[] = [];
+	for (const [key, stat] of after) {
+		const previous = before.get(key);
+		if (
+			previous === undefined ||
+			(previous.hash !== undefined &&
+				stat.hash !== undefined &&
+				previous.hash !== stat.hash)
 		) {
 			changed.push(key);
 		}
@@ -319,11 +346,6 @@ export async function isGitWorktree(root: string): Promise<boolean> {
 		!result.error && result.status === 0 && result.stdout?.trim() === "true";
 	gitRepoMemo.set(key, isRepo === true);
 	return isRepo === true;
-}
-
-export function _resetGitWorktreeMemoForTests(): void {
-	gitRepoMemo.clear();
-	gitToplevelMemo.clear();
 }
 
 const gitToplevelMemo = new Map<string, string | undefined>();

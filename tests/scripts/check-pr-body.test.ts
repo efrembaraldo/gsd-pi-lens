@@ -1,17 +1,60 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it, afterEach, vi } from "vitest";
+// flake-shape: real-process-spawn — the exact local CLI and shallow checkout are the subject; an in-process call cannot prove either command boundary.
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
+import {
+	gitExecFileSync,
+	gitExecSync,
+} from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	detectEscapedNewlineBody,
 	detectFlattenedBody,
 	lintPullRequestEvent,
+	lintLocalPrBody,
+	localDiff,
 	lintPrBody,
 	repairEscapedNewlineBody,
 	repairFlattenedBody,
 	resolveLivePrBody,
 	resolveTouchesTests,
 } from "../../scripts/check-pr-body.mjs";
+import { blankCommentsAndStrings } from "../../scripts/check-pr-body.mjs";
 
 const body = `Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
+const repositoryRoot = process.cwd();
+type MergedRuntimeRecord = { name: string; kind: string; diff: string };
+const mergedRuntimeRecords = JSON.parse(
+	readFileSync(
+		join(
+			repositoryRoot,
+			"tests",
+			"fixtures",
+			"ci-pr-bodies",
+			"merged-runtime-records.json",
+		),
+		"utf8",
+	),
+) as MergedRuntimeRecord[];
+// Regenerated from `gh pr diff 2860`, `gh pr diff 2823`, and `gh pr diff 2846`;
+// the snippets retain the real runtime paths and record literals from those diffs.
+
+function fetchForEvent(bodyText: string, files: unknown) {
+	return vi.fn().mockImplementation(async (url: string | URL | Request) => {
+		if (String(url).includes("/files")) {
+			if (files instanceof Error) throw files;
+			return new Response(JSON.stringify(files), { status: 200 });
+		}
+		return new Response(JSON.stringify({ body: bodyText }), { status: 200 });
+	});
+}
 const flattenedBody =
 	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep The async-persist lifecycle race is fully covered. ## Observability The test observes existing project snapshot records.";
 const multiRoundFlattenedBody =
@@ -21,6 +64,14 @@ const motivatingFlattenedBodies = [
 	"## Summary Fixes #2104 by making the stale-open-issues detector prove exhaustion for the open-issue population. If the safety bound is reached while a full page remains, the detector throws instead of interpreting a partial population. ## Tests - tests/scripts/stale-open-issues.test.ts adds a page-aware regression. - F1 mutation red after dropping the exhaustive flag. - Green targeted run: 20 tests passed. ### Test assessment - stale-open-issues.test.ts uniquely pins exhaustive pagination and truncation disclosure. ## Blast radius The scheduled stale-open-issues detector and its pagination helper. ## Class sweep Bounded API reads classify truncation before interpreting results. ## Observability Successful comments include the scanned population; a bound hit fails the workflow.",
 	flattenedBody,
 ].map((candidate) => candidate.replaceAll("\\n", " "));
+
+function createOriginMasterFixture() {
+	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	gitExecSync(
+		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head`,
+	);
+	return directory;
+}
 
 describe("flattened PR body repair", () => {
 	it("detects the clearly flattened real-world shape and repairs it", () => {
@@ -275,7 +326,18 @@ describe("escaped-newline PR body repair", () => {
 });
 
 describe("flattened body CI entrypoint", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
 	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
 
 	function stubApi() {
 		vi.stubEnv("GITHUB_TOKEN", "t");
@@ -405,6 +467,376 @@ describe("flattened body CI entrypoint", () => {
 });
 
 describe("PR body lint (#1844)", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("requires a diff record literal for runtime changes", () => {
+		const runtimeDiff = [
+			"diff --git a/clients/example.ts b/clients/example.ts",
+			"@@ -1,0 +2,3 @@",
+			'+recordDegradationOnce({ kind: "runtime-example" });',
+		].join("\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"A runtime record is present.",
+			),
+			process.cwd(),
+			() => runtimeDiff,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("runtime-example");
+	});
+
+	it.each(mergedRuntimeRecords)(
+		"accepts the added-line record from merged runtime body %s",
+		({ name, kind, diff }) => {
+			expect(diff).toContain(kind);
+			const result = lintPrBody(
+				body.replace(
+					"The advisory check run is the record.",
+					`The bounded record is ${kind}.`,
+				),
+				{ diff },
+			);
+			expect(result, name).toEqual({ valid: true, errors: [] });
+		},
+	);
+
+	it("accepts an existing record named with its source location", () => {
+		const source = join(process.cwd(), "clients", "existing-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "tool-cwd-resolution" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(true);
+	});
+
+	it("rejects an existing-record claim pointing to a test file", () => {
+		const source = join(process.cwd(), "tests", "existing-record.test.ts");
+		mkdirSync(join(process.cwd(), "tests"), { recursive: true });
+		writeFileSync(source, 'recordDegradationOnce({ kind: "test-record" });\n');
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `test-record` at `tests/existing-record.test.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result).toEqual({
+			valid: false,
+			errors: [
+				'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+			],
+		});
+	});
+
+	it.each([
+		[
+			"tests file",
+			"runner-unavailable",
+			"clients/../tests/support/session-state-registry.ts:429",
+		],
+		["scripts probe", "script-probe", "clients/../scripts/probe-record.mjs:1"],
+	])(
+		"rejects a traversal existing-record citation to a %s",
+		(_name, kind, file) => {
+			// The probe lives under a throwaway root, never the live repository
+			// (#2865 v5 N1: a probe written into scripts/ reds lint-js on a hard kill).
+			const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-traversal-"));
+			mkdirSync(join(root, "scripts"));
+			const probe = join(root, "scripts", "probe-record.mjs");
+			writeFileSync(
+				probe,
+				'recordDegradationOnce({ kind: "script-probe" });\n',
+			);
+			try {
+				const result = lintLocalPrBody(
+					body.replace(
+						"The advisory check run is the record.",
+						`covered by existing record \`${kind}\` at \`${file}\``,
+					),
+					root,
+					() =>
+						"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+				);
+				expect(result).toEqual({
+					valid: false,
+					errors: [
+						'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+						`PR body citation ${file} does not exist in the HEAD tree.`,
+					],
+				});
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("rejects a stale existing-record citation without throwing", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `missing-record` at `clients/does-not-exist.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result).toEqual({
+			valid: false,
+			errors: [
+				'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+				"PR body citation clients/does-not-exist.ts:1 does not exist in the HEAD tree.",
+			],
+		});
+	});
+
+	it("does not accept a record literal from a touched runtime file without an explicit claim", () => {
+		const source = join(process.cwd(), "clients", "touched-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "touched-record" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"The touched-record is the record.",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/touched-record.ts b/clients/touched-record.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it.each([
+		["wrong literal", "missing-record", "1"],
+		["line too far", "tool-cwd-resolution", "100"],
+	])("rejects an invalid explicit record claim (%s)", (_case, kind, line) => {
+		const source = join(process.cwd(), "clients", "located-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "tool-cwd-resolution" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				`covered by existing record \`${kind}\` at \`clients/located-record.ts:${line}\``,
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects the right line when it contains the wrong record kind", () => {
+		const source = join(process.cwd(), "clients", "wrong-kind-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "different-record" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/wrong-kind-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects a comment at the cited line when the real record is elsewhere", () => {
+		const source = join(process.cwd(), "clients", "comment-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			[
+				'// recordDegradationOnce({ kind: "comment-record" });',
+				...Array.from({ length: 498 }, () => "export const filler = 1;"),
+				'recordDegradationOnce({ kind: "comment-record" });',
+			].join("\n") + "\n",
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `comment-record` at `clients/comment-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects an existing-record claim when the named file has no matching literal", () => {
+		const source = join(process.cwd(), "clients", "missing-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(source, "export const value = 1;\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/missing-record.ts:42`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("rejects a no-failure claim when the runtime diff adds a catch", () => {
+		const runtimeDiff = [
+			"diff --git a/clients/example.ts b/clients/example.ts",
+			"@@ -1,0 +2,3 @@",
+			"+try { run(); } catch (error) { report(error); }",
+		].join("\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() => runtimeDiff,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("failure path");
+	});
+
+	it("does not apply the runtime rule to a docs-only diff", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"Documentation explains the change.",
+			),
+			process.cwd(),
+			() => "diff --git a/docs/example.md b/docs/example.md\n+docs",
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it.each([
+		["test file", "tools/example.test.ts"],
+		["__tests__ file", "tools/__tests__/example.ts"],
+		["declaration file", "tools/example.d.ts"],
+		["declaration module", "tools/example.d.mts"],
+	])("ignores runtime markers in a %s", (_name, file) => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() =>
+				`diff --git a/${file} b/${file}\n+try { run(); } catch (error) { report(error); }`,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it.each([
+		["comment", '// recordDegradationOnce({ kind: "comment-record" });'],
+		[
+			"template literal",
+			'const text = `recordDegradationOnce({ kind: "template-record" });`;',
+		],
+	])("rejects an apparent record call in a %s", (_name, line) => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"The apparent discriminator is named: comment-record template-record.",
+			),
+			process.cwd(),
+			() => `diff --git a/clients/example.ts b/clients/example.ts\n+${line}`,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("rejects a missing diff in CI from a real shallow clone", async () => {
+		const repository = process.cwd();
+		const shallow = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-shallow-"));
+		const previousCwd = process.cwd();
+		const previousActions = process.env.GITHUB_ACTIONS;
+		try {
+			vi.stubEnv("GITHUB_TOKEN", "test-token");
+			vi.stubEnv("GITHUB_API_URL", "https://api.example");
+			vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+			gitExecFileSync(
+				["clone", "--depth", "1", `file://${repository}`, shallow],
+				{
+					stdio: "ignore",
+				},
+			);
+			process.chdir(shallow);
+			process.env.GITHUB_ACTIONS = "true";
+			await expect(
+				lintPullRequestEvent(fetchForEvent(body, []), {
+					pull_request: { number: 2807, body },
+				}),
+			).rejects.toThrow(/^diff unavailable:/);
+		} finally {
+			process.chdir(previousCwd);
+			if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+			else process.env.GITHUB_ACTIONS = previousActions;
+			vi.unstubAllEnvs();
+			rmSync(shallow, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts the exact preflight --lint-local command and the title form", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-cli-"));
+		const bodyPath = join(directory, "PR_BODY.md");
+		const titlePath = join(directory, "COMMIT_MSG.txt");
+		const checker = resolve(repositoryRoot, "scripts/check-pr-body.mjs");
+		try {
+			writeFileSync(
+				bodyPath,
+				`${body}\n\n### Test assessment\nThe targeted test covers the local CLI.`,
+			);
+			writeFileSync(
+				titlePath,
+				"ci(test): verify local body lint (refs #2807)\n",
+			);
+			for (const args of [
+				[checker, "--lint-local", bodyPath],
+				[checker, "--body", bodyPath, "--title", titlePath],
+			]) {
+				execFileSync(process.execPath, args, { cwd: fixtureCwd });
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts the required sections", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});
@@ -449,7 +881,10 @@ describe("PR body lint (#1844)", () => {
 	});
 
 	it("rejects the unfilled template", () => {
-		const template = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
+		const template = readFileSync(
+			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
+			"utf8",
+		);
 		expect(lintPrBody(template)).toMatchObject({ valid: false });
 	});
 
@@ -717,6 +1152,624 @@ ${placeholder}`,
 	});
 });
 
+describe("head-tree citations and test references", () => {
+	const headFiles = new Map([
+		[
+			"clients/citation.ts",
+			'export const value = "head source";\nexport const second = true;\n',
+		],
+		[
+			"tests/citation.test.ts",
+			'it("contains every label this repo\'s rules require to exist", () => {});\n',
+		],
+	]);
+	const options = { headFiles };
+
+	it("emits decoded string spans with quote kinds", () => {
+		const result = blankCommentsAndStrings(
+			`const single = 'a\\'b'; const double = "a\\\\b"; const template = \`value\`;`,
+		);
+		expect(result.strings.map(({ quote, text }) => ({ quote, text }))).toEqual([
+			{ quote: "'", text: "a'b" },
+			{ quote: '"', text: "a\\b" },
+			{ quote: "`", text: "value" },
+		]);
+	});
+
+	it("rejects a citation to a missing or out-of-range head file", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/missing.ts:1\`\n\nAlso: \`clients/citation.ts:4\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("clients/missing.ts:1");
+		expect(result.errors.join(" ")).toContain(
+			"PR body citation clients/citation.ts:4 is outside the HEAD tree.",
+		);
+	});
+
+	it("requires an adjacent quote to match source text within twenty lines", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`text\nwrong source\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("does not match HEAD source");
+	});
+
+	it("accepts a plain citation without a quote", () => {
+		expect(
+			lintPrBody(`${body}\nEvidence: \`clients/citation.ts:1\``, options),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("accepts a citation in a table cell without a quote", () => {
+		expect(
+			lintPrBody(`${body}\n| Evidence | \`clients/citation.ts:1\` |`, options),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("accepts range citations by their first line", () => {
+		expect(
+			lintPrBody(`${body}\nEvidence: \`clients/citation.ts:1-2\``, options),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("accepts approximate-line citations by their hinted line", () => {
+		expect(
+			lintPrBody(`${body}\nEvidence: \`clients/citation.ts:~1\``, options),
+		).toEqual({ valid: true, errors: [] });
+	});
+
+	it("pins the ±20 citation quote window", () => {
+		const source = Array.from({ length: 40 }, (_, index) =>
+			index === 20
+				? "boundary source line"
+				: index === 21
+					? "outside source line"
+					: `line ${index + 1}`,
+		).join("\n");
+		const localOptions = {
+			headFiles: new Map([["clients/window.ts", source]]),
+		};
+		const accepted = lintPrBody(
+			`${body}\nEvidence: \`clients/window.ts:1\`\n\`\`\`ts\nboundary source line\n\`\`\``,
+			localOptions,
+		);
+		expect(accepted).toEqual({ valid: true, errors: [] });
+		const rejected = lintPrBody(
+			`${body}\nEvidence: \`clients/window.ts:1\`\n\`\`\`text\noutside source line\n\`\`\``,
+			localOptions,
+		);
+		expect(rejected.errors.join(" ")).toContain("within ±20 lines");
+	});
+
+	it("pins both sides of the ±20 window and resolves range hints from the first line", () => {
+		const source = Array.from({ length: 60 }, (_, index) =>
+			index === 0 ? "first source line" : `line ${index + 1}`,
+		).join("\n");
+		const localOptions = {
+			headFiles: new Map([["clients/window-both-sides.ts", source]]),
+		};
+		const accepted = lintPrBody(
+			`${body}\nEvidence: \`clients/window-both-sides.ts:21-60\`\n\`\`\`ts\nfirst source line\n\`\`\``,
+			localOptions,
+		);
+		expect(accepted).toEqual({ valid: true, errors: [] });
+		const approximate = lintPrBody(
+			`${body}\nEvidence: \`clients/window-both-sides.ts:~21\`\n\`\`\`ts\nfirst source line\n\`\`\``,
+			localOptions,
+		);
+		expect(approximate).toEqual({ valid: true, errors: [] });
+		const rejected = lintPrBody(
+			`${body}\nEvidence: \`clients/window-both-sides.ts:22\`\n\`\`\`text\nfirst source line\n\`\`\``,
+			localOptions,
+		);
+		expect(rejected.errors.join(" ")).toContain("within ±20 lines");
+	});
+
+	it("checks every repeated citation quote", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`ts\nexport const value = "head source";\n\`\`\`\nAgain: \`clients/citation.ts:1\`\n\`\`\`ts\ntotally fabricated\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("does not match HEAD source");
+	});
+
+	it("recognizes only real transcript quote shapes", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`text\n$ npm test\nTests 1 passed (1)\n\`\`\``,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("does not treat incidental pass or fail words as transcripts", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`text\nthis source failed a review\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("does not match HEAD source");
+	});
+
+	it("does not treat an origin/master string in source as a transcript", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`text\nconst branch = "origin/master";\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("does not match HEAD source");
+	});
+
+	it("checks a transcript-looking quote unless its fence is tagged as output", () => {
+		const result = lintPrBody(
+			`${body}\nEvidence: \`clients/citation.ts:1\`\n\`\`\`ts\n$ npm test\nnot source\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("does not match HEAD source");
+	});
+
+	it("does not read preflight commands as test references", () => {
+		const result = lintPrBody(
+			`${body}\n| Gate | Command |\n| --- | --- |\n| typecheck | \`npx tsc --noEmit\` |\n| preflight | \`npm run preflight\` |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("rejects fabricated it titles and table identifiers", () => {
+		const result = lintPrBody(
+			`${body}\nThe check uses it("fabricated test title").\n\n| Case | Evidence |\n| --- | --- |\n| A | \`fabricated table test identifier\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated test title");
+		expect(result.errors.join(" ")).toContain(
+			"fabricated table test identifier",
+		);
+	});
+
+	it("requires origin/master transcripts for master-red claims", () => {
+		const result = lintPrBody(
+			`${body}\nThis is pre-existing and red on master.`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("origin/master transcript");
+	});
+
+	it("accepts real test references and an origin/master transcript", () => {
+		const result = lintPrBody(
+			`${body}\nThe real title is it("contains every label this repo's rules require to exist").\n\n| Case | Evidence |\n| --- | --- |\n| A | \`contains every label this repo's rules require to exist\` |\n\nThis is pre-existing.\n\`\`\`text\n$ git log origin/master\n\`\`\``,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("requires the transcript in the next markdown block", () => {
+		const result = lintPrBody(
+			`${body}\nThis is pre-existing.\n\nUnrelated paragraph.\n\n\`\`\`text\nrun on origin/master\n\`\`\``,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("origin/master transcript");
+	});
+
+	it("accepts a reviewer-attributed pre-existing statement", () => {
+		const result = lintPrBody(
+			`${body}\nThe reviewer wrote that the failure is pre-existing on the base branch.`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("keeps dots inside code spans inside the sentence and table block", () => {
+		const result = lintPrBody(
+			`${body}\n| Convention | The pre-existing file is \`Fixture.Test.php\`. |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("ignores citations in fences and accepts the canonical it title in a table", () => {
+		const result = lintPrBody(
+			`${body}\n\`\`\`text\n\`clients/missing.ts:1\`\n\`\`\`\n\n| Case | Test |\n| --- | --- |\n| A | \`it("contains every label this repo's rules require to exist")\` |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("normalizes canonical it titles in table cells", () => {
+		const result = lintPrBody(
+			`${body}\n| Case | Test |\n| --- | --- |\n| A | \`it("fabricated table title")\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated table title");
+	});
+
+	it("checks canonical it titles with trailing table-cell content", () => {
+		const result = lintPrBody(
+			`${body}\n| Case | Test |\n| --- | --- |\n| A | \`it("fabricated trailing title")\` (regression) |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated trailing title");
+	});
+
+	it("checks canonical it titles in prose", () => {
+		const result = lintPrBody(
+			`${body}\nThe test is it("fabricated prose title").`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated prose title");
+	});
+
+	it("checks bare test titles in table cells", () => {
+		const result = lintPrBody(
+			`${body}\n| Case | Test |\n| --- | --- |\n| A | \`fabricated bare title\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated bare title");
+	});
+
+	it("accepts a test path in a test column", () => {
+		const result = lintPrBody(
+			`${body}\n| Kind | Test id |\n| --- | --- |\n| path | \`tests/scripts/check-pr-body.test.ts\` |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("ignores non-test table cells", () => {
+		const result = lintPrBody(
+			`${body}\n| Command | Artifact |\n| --- | --- |\n| tool | \`python3 -m pip\` |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("ignores table header cells", () => {
+		const result = lintPrBody(
+			`${body}\n| \`fabricated header title\` | Test |\n| --- | --- |\n| Case | \`fabricated header value\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated header value");
+		expect(result.errors.join(" ")).not.toContain("fabricated header title");
+	});
+
+	it("rejects a command-shaped test cell without a real title", () => {
+		const result = lintPrBody(
+			`${body}\n| Test |\n| --- |\n| \`python3 -m pip\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("python3 -m pip");
+	});
+
+	it("rejects a fabricated bare test title", () => {
+		const result = lintPrBody(
+			`${body}\n| Test |\n| --- |\n| \`fabricated bare title\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("fabricated bare title");
+	});
+
+	it("ignores SHA cells in test columns", () => {
+		const result = lintPrBody(
+			`${body}\n| Test id |\n| --- |\n| \`deadbeef1234567890\` |`,
+			options,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it.each([["each template title"]])(
+		"harvests each declaration titles",
+		(_title) => {
+			const result = lintPrBody(
+				`${body}\n| Test |\n| --- |\n| \`harvests each declaration titles\` |`,
+				options,
+			);
+			expect(result).toEqual({ valid: true, errors: [] });
+		},
+	);
+
+	it("rejects a fabricated short table identifier", () => {
+		const result = lintPrBody(
+			`${body}\n| Case | Test |\n| --- | --- |\n| A | \`B01\` |`,
+			options,
+		);
+		expect(result.errors.join(" ")).toContain("B01");
+	});
+
+	it("harvests titles after regex literals without confusing division", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-lexer-"));
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "lexer.test.ts"),
+				[
+					'const pattern = /[:*?"<>|]/;',
+					'it("title after regex literal", () => {});',
+					"const returned = (() => { return /quoted/; })();",
+					'it("title after regex in a call", () => {});',
+					"const typed = typeof /typed/;",
+					'it("title after typeof regex", () => {});',
+					"const quotient = numerator / denominator;",
+					'it("title after division", () => {});',
+					'it.each([{ value: fn(1) }])(\"array each title\", () => {});',
+				].join("\n"),
+			);
+			const git = (args: string[]) =>
+				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
+			expect(
+				lintPrBody(
+					`${body}\n| Test |\n| --- |\n| \`title after regex literal\` |\n| \`title after regex in a call\` |\n| \`title after typeof regex\` |\n| \`title after division\` |\n| \`array each title\` |`,
+					{ cwd: fixtureCwd, git },
+				),
+			).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	// Prevent regex literals after expression-start tokens from laundering titles into the census.
+	it("rejects titles found inside a regex after an arrow while keeping declarations", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-lexer-arrow-"));
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "lexer.test.ts"),
+				'const factory = () => /it("fabricated from regex")/;\nit("genuine declaration", () => {});\n',
+			);
+			const git = (args: string[]) =>
+				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
+			const result = lintPrBody(
+				`${body}\nThe tests are it("fabricated from regex") and it("genuine declaration").`,
+				{ cwd: fixtureCwd, git },
+			);
+			expect(result.valid).toBe(false);
+			expect(result.errors).toContain(
+				"PR body test reference is missing under tests/: fabricated from regex",
+			);
+			expect(result.errors).not.toContain(
+				"PR body test reference is missing under tests/: genuine declaration",
+			);
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	// Prevent a mutable working-tree corpus from accepting titles removed after a warm lint.
+	it("rebuilds the test corpus after a working-tree file changes", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-corpus-edit-"));
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			const file = join(fixtureCwd, "tests", "mutable.test.ts");
+			writeFileSync(file, 'it("removed title", () => {});\n');
+			const git = (args: string[]) =>
+				args[0] === "ls-files" ? "tests/mutable.test.ts\n" : "";
+			expect(
+				lintPrBody(`${body}\nThe test is it("removed title").`, {
+					cwd: fixtureCwd,
+					git,
+				}),
+			).toEqual({ valid: true, errors: [] });
+			writeFileSync(file, 'it("replacement title", () => {});\n');
+			const result = lintPrBody(`${body}\nThe test is it("removed title").`, {
+				cwd: fixtureCwd,
+				git,
+			});
+			expect(result.valid).toBe(false);
+			expect(result.errors).toContain(
+				"PR body test reference is missing under tests/: removed title",
+			);
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("reuses the HEAD-tree corpus at one immutable revision", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-corpus-head-"));
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "immutable.test.ts"),
+				'it("immutable HEAD title", () => {});\n',
+			);
+			const calls: string[][] = [];
+			const git = (args: string[]) => {
+				calls.push(args);
+				if (args[0] === "rev-parse") return "immutable-revision\n";
+				return args[0] === "ls-files" ? "tests/immutable.test.ts\n" : "";
+			};
+			const candidate = `${body}\nThe test is it("immutable HEAD title").`;
+			expect(lintPrBody(candidate, { cwd: fixtureCwd, git })).toEqual({
+				valid: true,
+				errors: [],
+			});
+			expect(lintPrBody(candidate, { cwd: fixtureCwd, git })).toEqual({
+				valid: true,
+				errors: [],
+			});
+			expect(calls.filter(([command]) => command === "ls-files")).toHaveLength(
+				1,
+			);
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("evicts the oldest HEAD-tree corpus beyond its bound", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-corpus-bound-"));
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "bounded.test.ts"),
+				'it("bounded HEAD title", () => {});\n',
+			);
+			let revision = "revision-0";
+			const listings: string[][] = [];
+			const git = (args: string[]) => {
+				if (args[0] === "rev-parse") return `${revision}\n`;
+				if (args[0] === "ls-files") listings.push(args);
+				return args[0] === "ls-files" ? "tests/bounded.test.ts\n" : "";
+			};
+			for (let index = 0; index < 9; index += 1) {
+				revision = `revision-${index}`;
+				expect(
+					lintPrBody(`${body}\nit("bounded HEAD title")`, {
+						cwd: fixtureCwd,
+						git,
+					}),
+				).toEqual({ valid: true, errors: [] });
+			}
+			revision = "revision-0";
+			expect(
+				lintPrBody(`${body}\nit("bounded HEAD title")`, {
+					cwd: fixtureCwd,
+					git,
+				}),
+			).toEqual({
+				valid: true,
+				errors: [],
+			});
+			expect(listings).toHaveLength(10);
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("harvests a title containing sixty backslashes", () => {
+		const fixtureCwd = mkdtempSync(join(tmpdir(), "pi-lens-lexer-"));
+		const title = `${"\\".repeat(60)} title`;
+		try {
+			mkdirSync(join(fixtureCwd, "tests"), { recursive: true });
+			writeFileSync(
+				join(fixtureCwd, "tests", "lexer.test.ts"),
+				`it(\"${title.replaceAll("\\", "\\\\")}\", () => {});\n`,
+			);
+			const git = (args: string[]) =>
+				args[0] === "ls-files" ? "tests/lexer.test.ts\n" : "";
+			const result = lintPrBody(
+				`${body}\n| Test |\n| --- |\n| \`${title}\` |`,
+				{ cwd: fixtureCwd, git },
+			);
+			expect(result).toEqual({ valid: true, errors: [] });
+		} finally {
+			rmSync(fixtureCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("includes every declaration title found by the test census", () => {
+		const runGit = gitExecFileSync;
+		const grep = runGit(
+			["grep", "-nE", "\\b(it|test|describe)(\\.each)?\\s*\\(", "--", "tests/"],
+			{ encoding: "utf8", maxBuffer: 20 * 1024 * 1024 } as never,
+		);
+		const titles = new Set<string>();
+		for (const line of String(grep).split("\n")) {
+			const match =
+				/^\s*(?:it|test|describe)(?:\.each)?\s*\(\s*(["'`])((?:\\\\.|[^\\\\])*?)\1/.exec(
+					line,
+				);
+			if (match?.[2]?.trim()) titles.add(match[2].trim());
+		}
+		const missing = [...titles]
+			.filter((title) => !/[`|\r\n]/.test(title))
+			.filter((title) => {
+				const quote = title.includes('"') ? "'" : '"';
+				const escaped = title.replaceAll(quote, `\\${quote}`);
+				return lintPrBody(
+					`${body}\nit(${quote}${escaped}${quote})`,
+				).errors.some((error) => error.includes(title));
+			});
+		expect(missing).toEqual([]);
+	});
+
+	it.each([
+		[
+			"#2877 round 3 reconstructed retracted section",
+			"issue-2877-round-3.md",
+			"P01",
+		],
+	])(
+		"keeps the historical red-first fixture red: %s",
+		(_name, file, expected) => {
+			const fixture = readFileSync(
+				join(repositoryRoot, "tests", "fixtures", "ci-pr-bodies", file),
+				"utf8",
+			);
+			const result = lintPrBody(fixture);
+			expect(result.valid).toBe(false);
+			expect(result.errors.join(" ")).toContain(expected);
+		},
+	);
+});
+
+describe("local lint parity", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("acquires a non-empty origin/master...HEAD diff in a full checkout", () => {
+		const diff = localDiff();
+		expect(diff).toContain("diff --git a/");
+	});
+
+	it("includes untracked test files in local test references", () => {
+		mkdirSync(join(fixtureCwd, "tests", "scripts"), { recursive: true });
+		writeFileSync(
+			join(fixtureCwd, "tests", "scripts", "new.test.ts"),
+			'it("untracked working tree title", () => {});\n',
+		);
+		const result = lintPrBody(
+			`${body}\n| Test |\n| --- |\n| \`untracked working tree title\` |`,
+			{ cwd: fixtureCwd, workingTree: true },
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it("rejects a runtime-shaped body that names no record", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() =>
+				'diff --git a/clients/example.ts b/clients/example.ts\n+throw new Error("boom");',
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("requires Test assessment when the local diff touches tests/", () => {
+		const result = lintLocalPrBody(
+			body,
+			process.cwd(),
+			() => "tests/scripts/example.test.ts\n",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("Test assessment");
+	});
+	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
+		const ranges: string[][] = [];
+		const result = lintLocalPrBody(body, process.cwd(), (args) => {
+			ranges.push(args);
+			if (args.includes("origin/master...HEAD"))
+				throw new Error("missing upstream");
+			return "tests/scripts/example.test.ts\n";
+		});
+		expect(result.valid).toBe(false);
+		expect(ranges).toEqual([
+			["diff", "--unified=0", "--no-color", "origin/master...HEAD"],
+			["diff", "--name-only", "origin/master...HEAD"],
+			["diff", "--name-only", "HEAD~1"],
+		]);
+	});
+});
+
 describe("resolveTouchesTests", () => {
 	const payloadPr = { number: 7, body: "fallback" };
 
@@ -846,7 +1899,19 @@ describe("the event entrypoint consumes the tri-state (#2124 F2)", () => {
 ### Test assessment
 foo.test.ts uniquely pins the retry ladder.`;
 
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+
 	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
 
 	function stubApi() {
 		vi.stubEnv("GITHUB_TOKEN", "t");

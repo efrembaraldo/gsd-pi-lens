@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DispatchLatencyReport } from "../../../clients/dispatch/dispatcher.js";
+import { makeLspServiceDouble } from "../../support/lsp-service-double.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 vi.mock("../../../clients/dispatch/dispatcher.js", async (importOriginal) => {
@@ -39,10 +40,11 @@ vi.mock("../../../clients/dispatch/fact-runner.js", async (importOriginal) => {
 const mockTouchFile = vi.hoisted(() => vi.fn(async () => undefined));
 const mockSupportsLSP = vi.hoisted(() => vi.fn((_file: string) => false));
 vi.mock("../../../clients/lsp/index.js", () => ({
-	getLSPService: () => ({
-		supportsLSP: mockSupportsLSP,
-		touchFile: mockTouchFile,
-	}),
+	getLSPService: () =>
+		makeLspServiceDouble({
+			supportsLSP: mockSupportsLSP,
+			touchFile: mockTouchFile,
+		}),
 }));
 
 // #536: buildOrUpdateGraph is mocked so this suite asserts the GATING logic
@@ -168,6 +170,30 @@ describe("analyzeFile", () => {
 			fixSuggestion: "Remove the import",
 		});
 		expect(typeof result.durationMs).toBe("number");
+	});
+
+	it("counts a deferred LSP runner as ran while preserving its status", async () => {
+		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
+		vi.mocked(getLatencyReports)
+			.mockReturnValueOnce([])
+			.mockReturnValueOnce([
+				{
+					filePath: tsFile,
+					fileKind: "jsts",
+					runners: [
+						{
+							runnerId: "lsp",
+							status: "deferred",
+							diagnosticCount: 0,
+							durationMs: 10,
+						},
+					],
+				},
+			] as never);
+
+		const result = await analyzeFile(tsFile, tmpDir);
+
+		expect(result.lsp).toMatchObject({ ran: true, status: "deferred" });
 	});
 
 	it("attaches the latency report appended during this dispatch", async () => {
