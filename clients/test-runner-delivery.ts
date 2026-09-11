@@ -23,6 +23,7 @@ import type { Theme } from "@gsd/pi-coding-agent";
 // purpose: the file's casts already narrow before any property access.
 import type { CacheManager } from "./cache-manager.js";
 import { emitBounded } from "./bounded-telemetry.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { peekTestFindings } from "./runtime-context.js";
 import { fitLines } from "./tui-fit.js";
@@ -314,7 +315,14 @@ export function registerTestRunnerEntryRenderer(pi: unknown): boolean {
 			) => void;
 		}
 	).registerEntryRenderer;
-	if (typeof register !== "function") return false;
+	if (typeof register !== "function") {
+		recordDegradationOnce({
+			kind: "test-runner-delivery",
+			subject: TEST_RUNNER_ENTRY_TYPE,
+			reason: "registerEntryRenderer unavailable (host gsd)",
+		});
+		return false;
+	}
 	try {
 		register.call(pi, TEST_RUNNER_ENTRY_TYPE, renderTestRunnerEntry);
 		return true;

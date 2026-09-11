@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	_resetTestRunnerDeliveryForTests,
 	deliverTestRunnerFindings,
 	deliverStagedTestRunnerFindings,
@@ -15,7 +19,10 @@ import { createPiMock } from "../support/pi-mock.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 describe("automatic test-runner delivery (#2366)", () => {
-	afterEach(() => _resetTestRunnerDeliveryForTests());
+	afterEach(() => {
+		_resetTestRunnerDeliveryForTests();
+		resetDegradationLedger();
+	});
 
 	function setup() {
 		const env = setupTestEnvironment("pi-lens-test-delivery-");
@@ -394,5 +401,19 @@ describe("automatic test-runner delivery (#2366)", () => {
 		const pi = createPiMock();
 		expect(registerTestRunnerEntryRenderer(pi.asExtensionAPI())).toBe(true);
 		expect(pi.entryRenderers.has("pilens:test-runner-findings")).toBe(true);
+	});
+
+	it("records a degradation ledger entry when registerEntryRenderer is unavailable on the host", () => {
+		const pi = createPiMock();
+		delete (pi as unknown as Record<string, unknown>).registerEntryRenderer;
+		expect(registerTestRunnerEntryRenderer(pi.asExtensionAPI())).toBe(false);
+		const groups = getDegradationSummary();
+		const target = groups.find((g) => g.kind === "test-runner-delivery");
+		expect(target).toBeDefined();
+		expect(target!.count).toBe(1);
+		expect(target!.latestReasons.at(-1)).toEqual({
+			subject: "pilens:test-runner-findings",
+			reason: "registerEntryRenderer unavailable (host gsd)",
+		});
 	});
 });
