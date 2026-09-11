@@ -12,6 +12,8 @@ Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging f
 
 - **Deliver test-runner failures after the agent settles (refs #2366)** — failed test results remain in the pull-diagnostics and commit-guard cache, then appear once through a provenance-validated non-context custom entry after the agent is idle. Automatic delivery no longer injects a synthetic user message into the next model context.
 
+- **Document pre-release gate (closes R011/S09)** — added `docs/release-gate.md` with the maintainer-run manual checklist (15 tool registrations, nine bus events, read-guard markdown coverage, controlled-degradation reporting) and `scripts/pre-release-checklist.mjs` as the reproducible pre-flight. The human gate stays NOT automated, in line with R011 and S09.
+
 ### Changed
 
 ### Deprecated

@@ -370,6 +370,8 @@ These are named, well-scoped sweeps a maintainer can ask for by name; each is di
 
 Each routine's output is a PR (or a tracked issue for discovery routines), reviewed under the same two-tier adversarial-review + red-first discipline as any change. Deletions are irreversible-adjacent — treat them with the confirm-before-destructive-action rule.
 
+**Pre-release checklist** (documentation pointer, NOT an invokable routine). A maintainer about to cut a release tag combines one reproducible pre-flight with one manual run-through, kept separate by design. Run `node scripts/pre-release-checklist.mjs` to execute the six automated checks and print a pass-or-fail summary; failures block the tag without a maintainer override. Then open `docs/release-gate.md` for the human checklist covering 15 tool registrations, nine bus events, read-guard markdown coverage, and controlled-degradation reporting. The human gate is intentionally NOT automated and is never run inside CI.
+
 ## Standing invariants
 
 Deferred collect-later runners are a three-state delivery contract: edit-time
