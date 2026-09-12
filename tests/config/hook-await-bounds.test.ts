@@ -1098,6 +1098,28 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"IS the 5000ms budget's contents.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-session.ts#059be7b9~4892fe42": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"error-debt-baseline task: `npm test` spawn with leaf " +
+			"timeout 60_000 but no aggregate wall-clock signal at " +
+			"the runTask level. The opt-in flag (`errorDebtBaseline." +
+			"enabled`, default off) and `ignoreAmbientSignal: true` " +
+			"keep the spawn uncancellable on Esc — bound by installer " +
+			"convention, not by hook signal.",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#60c9318b~225faacd": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"error-debt-baseline task: `npm run build` spawn with leaf " +
+			"timeout 60_000 but no aggregate wall-clock signal at " +
+			"the runTask level. Same opt-in and `ignoreAmbientSignal` " +
+			"convention as the `npm test` arm above.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-session.ts#07098027~a42f4a7e": {
 		family: "hook-await",
 		site: "session_start",
