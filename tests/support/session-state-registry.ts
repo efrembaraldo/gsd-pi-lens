@@ -1319,6 +1319,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"lens-events.ts": "lens event publisher registration",
 	"disposition-publish.ts": "disposition publisher registration",
 	"format-events-publish.ts": "format event publisher registration",
+	"rpc-publish.ts":
+		"RPC request/response state, bounded via _resetRpcPublishForTests() at module scope",
 	"diagnostics-publish.ts":
 		"diagnostics publisher registration and dirty-path dedupe",
 	"bus-events-logger.ts": "bus event rollup counters, an observability tally",
@@ -1466,6 +1468,7 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"disposition-publish.ts": 0,
 	"extension-log.ts": 2,
 	"format-events-publish.ts": 0,
+	"rpc-publish.ts": 1,
 	// #2442 review F2: the container regex now recognises BoundedFifoMap /
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	// #2455 fix round 4: the container regex now also allows an `export`

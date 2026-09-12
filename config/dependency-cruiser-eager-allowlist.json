@@ -62,6 +62,7 @@
   // index.ts:56 is type-only, but dependency-cruiser parses it as an edge.
   "./clients/read-guard.js",
   "./clients/recent-touches.js",
+  "./clients/rpc-publish.js",
   "./clients/runtime-agent-end.js",
   "./clients/runtime-context.js",
   "./clients/runtime-coordinator.js",

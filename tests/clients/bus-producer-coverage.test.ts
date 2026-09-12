@@ -88,6 +88,7 @@ describe("bus producer guarded-seam coverage", () => {
 			"disposition-publish.ts",
 			"format-events-publish.ts",
 			"lens-events.ts",
+			"rpc-publish.ts",
 		]);
 
 		for (const file of producers) {

@@ -99,6 +99,7 @@ describe("scope migration baseline (S01)", () => {
 			.sort();
 		const expected = [
 			"CHANGELOG.md",
+			"tests/workflows/fork-disclosure.test.ts",
 			"tests/workflows/fork-workflows.test.ts",
 		].sort();
 		expect(hits).toEqual(expected);

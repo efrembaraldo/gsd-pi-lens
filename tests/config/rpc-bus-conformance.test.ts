@@ -62,12 +62,20 @@ function read(file: string): string {
 
 /**
  * Publisher detection — a file emits on the per-token response channel.
- * Two recognized patterns (strings are KEPT so template-literal
+ * Three recognized patterns (strings are KEPT so template-literal
  * interpolations stay visible to the regex):
  *
- *   1. `events.emit(rpcResponseChannel(token), wrapper)` — the canonical call
- *      inside `clients/rpc-publish.ts`.
- *   2. `events.emit(`pilens:rpc:${token}:response`, ...)` — any literal or
+ *   1. `events.emit(rpcResponseChannel(token), wrapper)` — the legacy call
+ *      shape, still accepted so a future consumer of the channel that
+ *      bypasses the live-emitter resolver stays discoverable.
+ *   2. `resolution.emit(rpcResponseChannel(token), wrapper)` — the canonical
+ *      shape inside `clients/rpc-publish.ts` since S07/T02: the response
+ *      goes through `resolveLiveBusEmitter(...)` and emits via
+ *      `resolution.emit(...)`, where `resolution` is the value the resolver
+ *      already returned (probed for a stale ctx). The
+ *      `bus-producer-coverage.test.ts` "no bare .emit(" detector restricts
+ *      producer call sites to this exact caller.
+ *   3. `events.emit(`pilens:rpc:${token}:response`, ...)` — any literal or
  *      template literal matching `pilens:rpc:` + any token content +
  *      `:response`.
  *
@@ -81,7 +89,9 @@ function busPublisherFiles(
 	return files.filter((file) => {
 		const source = stripSource(sources.get(file) ?? "", { strings: "keep" });
 		const helperEmit =
-			/\bevents?\s*\.emit\s*\(\s*rpcResponseChannel\s*\(/.test(source);
+			/\b(?:events?|resolution)\s*\.emit\s*\(\s*rpcResponseChannel\s*\(/.test(
+				source,
+			);
 		const literalEmit = new RegExp(
 			`\\bevents?\\s*\\.emit\\s*\\(\\s*["'\`]${RESPONSE_PREFIX}[^"'\`]*${RESPONSE_SUFFIX}["'\`]`,
 		).test(source);

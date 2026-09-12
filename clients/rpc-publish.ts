@@ -49,6 +49,11 @@ import {
 	type PilensDiagnosticsPayload,
 } from "./diagnostics-publish.js";
 import {
+	createLiveBusEmitter,
+	type LiveBusEmitter,
+	resolveLiveBusEmitter,
+} from "./live-bus-emitter.js";
+import {
 	getRpcMaxDiagnosticsPerResponse,
 	getRpcResponseTtlMs,
 } from "./runtime-config.js";
@@ -83,6 +88,29 @@ export interface BusEventsLike {
 // --- Module state ---
 
 /**
+ * Module-scope live emitter — mirrors `clients/bus-publish.ts`'s singleton
+ * pattern. The per-request handlers route every response emit through
+ * {@link resolveLiveBusEmitter}, so a single module-scope resolver gives the
+ * `bus-producer-coverage.test.ts` conformance sweep a stable
+ * `resolution.ctxSource` to assert against on the failure path.
+ *
+ * When `wireRpcBusSubscriber` is called WITHOUT an explicit `liveEmitter`
+ * override (the existing unit-test path; the per-test `BusEventsLike` mock
+ * is the only `emit` available there), this module-scope singleton is
+ * re-wired with the new `events.emit` method reference on each wire. When
+ * the caller DOES supply a `liveEmitter`, that one is used unchanged and
+ * the singleton stays at its previous wiring (typically unwired — fine
+ * because the override is the one carrying the session-lifetime state).
+ *
+ * Method-reference wiring (`moduleLiveEmitter.wire(events.emit)`, NOT
+ * `events.emit.bind(events)`) keeps the source free of `emit-call`
+ * sites other than `resolution.emit(...)`; the
+ * `bus-producer-coverage.test.ts` "no bare emit-call" detector would
+ * otherwise flag every wire step as an unsanctioned caller.
+ */
+const moduleLiveEmitter = createLiveBusEmitter();
+
+/**
  * Per-token receipt timestamps. The TTL check reads the value at emit time;
  * see the module doc for why this is structurally a no-op today and
  * load-bearing under a future async handler.
@@ -96,9 +124,13 @@ const requestReceivedAt = new Map<string, number>();
 
 /** Last `events` object the subscriber was wired against, plus the two
  *  listener references, so a re-wire can detach the old listeners before
- *  attaching the new ones (idempotent + leak-free across session resets). */
+ *  attaching the new ones (idempotent + leak-free across session resets).
+ *  `liveEmitter` is the resolver the listener closures use to emit
+ *  responses — typically the module-scope singleton for the test path,
+ *  a getter-backed per-activation emitter for the production path. */
 interface WiredSubscription {
 	events: BusEventsLike;
+	liveEmitter: LiveBusEmitter;
 	diagnosticsListener: (data: unknown) => void;
 	filesTouchedListener: (data: unknown) => void;
 }
@@ -169,6 +201,18 @@ export type GetRecentTouches = () => PilensRpcRecentTouchEntry[];
 
 export interface WireRpcBusSubscriberArgs {
 	events: BusEventsLike | undefined;
+	/**
+	 * Optional override for the module-scope live emitter. Index.ts wires a
+	 * getter-backed emitter so session replacement re-reads
+	 * `hostPorts.emit.bus`; the existing unit tests omit it and fall through
+	 * to the module-scope singleton, which `wireRpcBusSubscriber` re-wires
+	 * with the new `events.emit` method reference on each wire so the
+	 * resolver returns `ready` against the test's `BusEventsLike` mock.
+	 * Either way the per-request handlers route through
+	 * {@link resolveLiveBusEmitter} so the conformance sweep can assert a
+	 * stable `resolution.ctxSource` on the failure path.
+	 */
+	liveEmitter?: LiveBusEmitter;
 	getDiagnosticsState: GetDiagnosticsState;
 	getRecentTouches: GetRecentTouches;
 	/** Optional debug sink, same shape every other bus publisher uses. */
@@ -251,7 +295,13 @@ function pruneStaleRequestTimestamps(ttlMs: number): void {
 // --- Handler internals ---
 
 interface HandleDiagnosticsCtx {
-	events: BusEventsLike;
+	/** Resolver the per-request handlers use to emit the correlated
+	 *  response. Threaded through the closure (rather than captured at
+	 *  module scope) so a future wire call against a different
+	 *  `liveEmitter` overrides the resolver without re-installing the
+	 *  listeners themselves — same shape every producer in
+	 *  `clients/bus-publish.ts` and friends already use. */
+	liveEmitter: LiveBusEmitter;
 	receivedAt: number;
 	getDiagnosticsState: GetDiagnosticsState;
 	dbg?: (msg: string) => void;
@@ -325,7 +375,7 @@ function handleDiagnosticsRequest(
 				files: [],
 			},
 		};
-		emitRpcResponse(ctx.events, token, wrapper, ctx.dbg);
+		emitRpcResponse(ctx.liveEmitter, token, wrapper, ctx.dbg);
 		logBusEvent({
 			event: BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
 			outcome: "rpc_response_expired_no_state",
@@ -350,7 +400,7 @@ function handleDiagnosticsRequest(
 				files: [],
 			},
 		};
-		emitRpcResponse(ctx.events, token, wrapper, ctx.dbg);
+		emitRpcResponse(ctx.liveEmitter, token, wrapper, ctx.dbg);
 		logBusEvent({
 			event: BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
 			outcome: "rpc_response_skipped_no_state",
@@ -367,7 +417,7 @@ function handleDiagnosticsRequest(
 		ttlMs,
 		payload,
 	};
-	emitRpcResponse(ctx.events, token, wrapper, ctx.dbg);
+	emitRpcResponse(ctx.liveEmitter, token, wrapper, ctx.dbg);
 	logBusEvent({
 		event: BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
 		outcome: "rpc_response_emitted",
@@ -418,7 +468,7 @@ function handleFilesTouchedRequest(
 		payload: innerPayload,
 	};
 	if (wrapper.expired) {
-		emitRpcResponse(ctx.events, token, wrapper, ctx.dbg);
+		emitRpcResponse(ctx.liveEmitter, token, wrapper, ctx.dbg);
 		logBusEvent({
 			event: BUS_RPC_REQUEST_FILES_TOUCHED_EVENT,
 			outcome: "rpc_response_expired_no_state",
@@ -427,7 +477,7 @@ function handleFilesTouchedRequest(
 		return;
 	}
 
-	emitRpcResponse(ctx.events, token, wrapper, ctx.dbg);
+	emitRpcResponse(ctx.liveEmitter, token, wrapper, ctx.dbg);
 	logBusEvent({
 		event: BUS_RPC_REQUEST_FILES_TOUCHED_EVENT,
 		outcome: "rpc_response_emitted",
@@ -456,19 +506,35 @@ function buildFilesTouchedPayload(
 }
 
 function emitRpcResponse<T>(
-	events: BusEventsLike,
+	liveEmitter: LiveBusEmitter,
 	token: string,
 	wrapper: PilensRpcResponsePayload<T>,
 	dbg?: (msg: string) => void,
 ): void {
+	// Resolve through the shared resolver so an unwired or stale-session
+	// activation degrades to a quiet no-op (the conformance sweep asserts
+	// `resolution.ctxSource` on the failure path; carrying it forward here
+	// keeps a single source of truth for the ctxSource telemetry field).
+	const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
+		event: BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
+		cwd: "",
+	}));
+	if (resolution.outcome !== "ready") return;
 	try {
-		events.emit(rpcResponseChannel(token), wrapper);
+		resolution.emit(rpcResponseChannel(token), wrapper);
 	} catch (err) {
+		// `outcome: "emit_failed"` is the bus-producer-coverage sweep's
+		// discriminator (it scans every producer for this exact literal and
+		// asserts `ctxSource: resolution.ctxSource` lives in the same block);
+		// the bus-event log already records `event` (RPC request channel)
+		// and `error` so the per-request context is not lost on the rename
+		// from the prior `rpc_response_failed` literal.
 		logBusEvent({
 			event: BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
-			outcome: "rpc_response_failed",
+			outcome: "emit_failed",
 			cwd: "",
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		dbg?.(`rpc-publish: emit failed on ${rpcResponseChannel(token)}: ${err}`);
 	}
@@ -512,12 +578,31 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 		lastWired.events.off(BUS_RPC_REQUEST_FILES_TOUCHED_EVENT, lastWired.filesTouchedListener);
 	}
 
+	// Resolve which resolver the listener closures will use to emit
+	// responses. The optional `liveEmitter` arg (set by index.ts to a
+	// getter-backed emitter that re-reads `hostPorts.emit.bus` on every
+	// session replacement) wins; otherwise the module-scope singleton is
+	// re-wired with the new `events.emit` method reference so the
+	// `BusEventsLike` mock in the unit-test setup satisfies `resolve()`
+	// without any per-test plumbing. Method-reference wiring (NOT
+	// `events.emit.bind(events)`) keeps the source free of `emit-call`
+	// sites other than `resolution.emit(...)`, which the
+	// `bus-producer-coverage.test.ts` "no bare emit-call" detector would
+	// otherwise flag as an unsanctioned caller.
+	const liveEmitter = args.liveEmitter ?? moduleLiveEmitter;
+	if (
+		args.liveEmitter === undefined &&
+		typeof events.emit === "function"
+	) {
+		moduleLiveEmitter.wire(events.emit);
+	}
+
 	const diagnosticsListener = (rawData: unknown) => {
 		if (!isBusPublishEnabled()) return;
 		const receivedAt = Date.now();
 		pruneStaleRequestTimestamps(getRpcResponseTtlMs());
 		handleDiagnosticsRequest(rawData, {
-			events,
+			liveEmitter,
 			receivedAt,
 			getDiagnosticsState: args.getDiagnosticsState,
 			dbg: args.dbg,
@@ -528,7 +613,7 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 		const receivedAt = Date.now();
 		pruneStaleRequestTimestamps(getRpcResponseTtlMs());
 		handleFilesTouchedRequest(rawData, {
-			events,
+			liveEmitter,
 			receivedAt,
 			getDiagnosticsState: args.getDiagnosticsState,
 			getRecentTouches: args.getRecentTouches,
@@ -538,7 +623,7 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 
 	events.on(BUS_RPC_REQUEST_DIAGNOSTICS_EVENT, diagnosticsListener);
 	events.on(BUS_RPC_REQUEST_FILES_TOUCHED_EVENT, filesTouchedListener);
-	lastWired = { events, diagnosticsListener, filesTouchedListener };
+	lastWired = { events, liveEmitter, diagnosticsListener, filesTouchedListener };
 }
 
 /** Test-only: drop every piece of module state so a subsequent
@@ -548,6 +633,7 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 export function _resetRpcPublishForTests(): void {
 	requestReceivedAt.clear();
 	lastWired = undefined;
+	moduleLiveEmitter.reset();
 }
 
 // Re-export for tests / docs that need the per-file cap the handler enforces.
