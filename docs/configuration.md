@@ -46,6 +46,12 @@ A read-guard key currently travels through `~/.pi-lens/config.json` only:
 
 - `readGuard.markdown.frontmatterAlwaysRead` (`boolean`, default `true`): when `true`, edits inside a markdown file's YAML frontmatter or in table rows adjacent to the read section are covered by the read and do not raise out-of-range warnings; when `false`, the expanded range reverts to heading-only. See `docs/features.md` → "Read-Before-Edit Guard" for the behavior it controls.
 
+Other session-wide keys travel through `~/.pi-lens/config.json` only:
+
+- `errorDebtBaseline.enabled` (`boolean`, default `false`): opt-in baseline for the `--error-debt-baseline` flag, which populates `runtime.errorDebtBaseline` with the outcome of `npm test` and `npm run build` at `session_start`. Off by default because both commands are expensive on real projects. Equivalent CLI toggle: `--error-debt-baseline`.
+- `rpc.maxDiagnosticsPerResponse` (`integer`, minimum `1`, `experimental`): per-response cap on diagnostics a `pilens:rpc:diagnostics` request carries back on the bus. The schema reserves this key for the eventual config-first migration; today the live source remains the `PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE` env var. See `docs/environment-variables.md` → "RPC bus query".
+- `rpc.responseTtlMs` (`integer`, minimum `1`, `experimental`): TTL (ms) for an RPC request's pending response state before reaping. Same reservation as above; live source is `PI_LENS_RPC_RESPONSE_TTL_MS`. See `docs/environment-variables.md` → "RPC bus query".
+
 ## Which file wins
 
 One order, lowest precedence first. A later tier replaces an earlier tier's

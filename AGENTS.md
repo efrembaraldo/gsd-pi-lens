@@ -70,6 +70,18 @@ collided appending to this file's tail in one night):
   citation record drives retention decisions for this file.
 - Durable text cites mechanisms by symbol name and section heading, not
   `file:line`; line numbers belong only in point-in-time evidence.
+- **Scope-migration whitelist (M001/RIM-01).** The `scope-migration` guard
+  (`tests/workflows/scope-migration.test.ts`) ships with an explicit
+  whitelist of files allowed to mention the legacy scope identifier. The
+  whitelist was extended past the initial S01 baseline
+  (`{CHANGELOG.md, tests/workflows/fork-workflows.test.ts}`) to include
+  `tests/workflows/fork-disclosure.test.ts`, the parallel absence-assertion
+  test. The guard itself remains excluded from its own match set through
+  the `SELF_RELATIVE` exemption, exactly like `fork-workflows.test.ts`.
+  When extending the whitelist again, keep the same shape: one
+  slash-separated path per entry, all sorted, and a comment naming the
+  file's role (a history note such as a `CHANGELOG.md` body, or an
+  absence-assertion test).
 
 ## Issue and PR design contract
 
