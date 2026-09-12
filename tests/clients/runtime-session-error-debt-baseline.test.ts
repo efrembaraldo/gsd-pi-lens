@@ -1,3 +1,5 @@
+// flake-shape: raw-timer-wait — explicit microtask-yield before asserting safeSpawnAsyncMock was never called; deferred work must have a real turn to fire
+
 /**
  * T03 of M001/S04 — pins that the production `handleSessionStart` path
  * populates `runtime.errorDebtBaseline` only when the opt-in flag

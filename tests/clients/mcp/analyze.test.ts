@@ -1,3 +1,5 @@
+// flake-shape: raw-timer-wait — real warm-up timeout of a mocked LSP touchFile; a fake timer would not faithfully reproduce the async wait the production code uses
+
 /**
  * analyzeFile facade: runs the dispatch pipeline and maps the DispatchResult +
  * latency report into the JSON contract the MCP server returns.

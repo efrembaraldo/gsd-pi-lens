@@ -323,6 +323,14 @@ const wallClockBudgetInclude = [
 	// window. Keep child-process CPU sampling and this wall-clock lower bound in
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
+	// #S03/T02: warm-up timeout outcome needs real wall-clock budget vs. the
+	// mocked touchFile's async setTimeout; phased here so budget windows are quiet
+	// (flake-shape admission).
+	"tests/clients/mcp/analyze.test.ts",
+	// #S04/T03: error-debt-baseline "flag off" case uses one raw microtask-yield
+	// setTimeout(0) before asserting no deferred work fired; deferred work must
+	// have a real turn to run (flake-shape admission).
+	"tests/clients/runtime-session-error-debt-baseline.test.ts",
 ];
 // #2512 round 2: runtime-turn-session.test.ts's "retires a deleted failed
 // target through the real client and records real telemetry" spawns a REAL
