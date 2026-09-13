@@ -274,7 +274,3 @@ vendor/*
 !vendor/grammars/
 vendor/grammars/*
 !vendor/grammars/tree-sitter-cue.wasm
-
-# ── GSD baseline (auto-generated) ──
-.vscode/
-vendor/
