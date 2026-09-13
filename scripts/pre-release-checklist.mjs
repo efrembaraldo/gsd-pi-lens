@@ -55,6 +55,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
 // --- Paths ---
 
@@ -438,6 +439,62 @@ const CHECKS = {
 	"flag-registrations": checkFlagRegistrations,
 	"bus-channels": checkBusChannels,
 };
+
+// --- Self-healing pre-flight: .gitignore shadow warning (#2250) ---
+//
+// The GSD upstream extension's ensureGitignore() (`~/.gsd/agent/extensions/gsd/
+// gitignore.js`) historically re-appended blanket `.vscode/` and `vendor/`
+// rules to this project's `.gitignore`, shadowing the carve-out form and
+// breaking ignore-respecting tooling for tracked files like
+// `.vscode/settings.json` and `vendor/grammars/tree-sitter-cue.wasm`. The
+// root-cause fix is `manage_gitignore: false` in `.gsd/PREFERENCES.md`; this
+// pre-flight is the safety net — if anything ever re-introduces blanket
+// rules (a stale PREFERENCES, a future upstream regression, a manual edit),
+// it warns here BEFORE the test step runs so the maintainer catches it on
+// the same release run, not three days later when an agent silently misses
+// a tracked file. Warn-only by design — the user decides whether to fix
+// (preferred) or ignore.
+//
+// Routes through `gitExecFileSync` (scripts/lib/git-fixture-env.mjs) — every
+// direct `git` spawn in `scripts/**/*.mjs` is routed through that helper by
+// the governance test (tests/config/git-fixture-governance.test.ts); the
+// helper also scrubs `GIT_DIR` / `GIT_WORK_TREE` / `GIT_CONFIG_*` so the
+// warning can never accidentally drive the developer's real repo from a
+// contaminated environment.
+function warnGitignoreShadow() {
+	let tracked;
+	try {
+		tracked = gitExecFileSync(["ls-files", "-z"], {
+			cwd: repoRoot,
+			encoding: "utf8",
+		});
+	} catch {
+		return; // git unavailable — nothing to warn about
+	}
+	if (!tracked) return;
+
+	let stdout = "";
+	try {
+		stdout = gitExecFileSync(
+			["check-ignore", "--no-index", "--stdin", "-z"],
+			{ cwd: repoRoot, encoding: "utf8", input: tracked },
+		);
+	} catch (err) {
+		// git check-ignore exits 1 when NONE of the stdin paths are ignored —
+		// that's the clean case (no shadow). Any other exit still indicates
+		// a real error; treat as "nothing to warn about".
+		const e = /** @type {{ status?: number }} */ (err);
+		if (e.status === 1) return;
+		return;
+	}
+	const shadowed = stdout.split("\0").filter(Boolean);
+	if (shadowed.length === 0) return;
+	process.stderr.write(
+		`[pre-release-checklist] WARNING: .gitignore shadowing detected — ${shadowed.length} tracked file(s) ignored: ${shadowed.join(", ")}. Rimuovere le righe blanket \`.vscode/\` e \`vendor/\` dal fondo del .gitignore prima del merge.\n`,
+	);
+}
+
+warnGitignoreShadow();
 
 // --- Run ---
 
