@@ -262,19 +262,5 @@ vendor/grammars/*
 tmp/
 
 # ── GSD baseline (auto-generated) ──
-# #2250: .vscode/ and vendor/ ignore everything EXCEPT the two files
-# already git-tracked inside them -- a blanket dir-level rule prunes the
-# whole directory before any later negation is even considered, so the
-# `dir/*` + per-level negation form below is required, not `dir/` +
-# `!dir/file` (see git-scm.com/docs/gitignore, "It is not possible to
-# re-include a file if a parent directory of that file is excluded").
-.vscode/*
-!.vscode/settings.json
-vendor/*
-!vendor/grammars/
-vendor/grammars/*
-!vendor/grammars/tree-sitter-cue.wasm
-
-# ── GSD baseline (auto-generated) ──
 .vscode/
 vendor/

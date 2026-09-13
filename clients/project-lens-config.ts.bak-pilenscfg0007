@@ -590,16 +590,6 @@ function discoverPiLensProjectConfig(startDir: string): DiscoveryCacheEntry {
 				continue;
 			}
 			if (outcome.status !== "ok") continue;
-			// #2426 follow-up: when this legacy-named file IS the document that
-			// `info` resolves to, its deprecation records are already produced by
-			// the resolution path's own `deprecationRecords([document])` call, in
-			// the SAME bound as its validation records
-			// (`resolveOnePiLensConfigDocument`). Adding it here too finalizes an
-			// independent bound over the identical document, which can truncate to
-			// a different count and defeat the warn-once latch's exact-reason
-			// dedup -- two suppression notices for one file
-			// (config-notice-bounds.test.ts F2).
-			if (info?.path === file) continue;
 			legacyDocuments.push({
 				tier: "project",
 				file,
