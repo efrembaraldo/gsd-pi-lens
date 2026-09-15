@@ -1,0 +1,8 @@
+{
+	"id": "efrembaraldo-gsd-pi-lens",
+	"name": "@efrembaraldo/gsd-pi-lens",
+	"version": "0.0.1",
+	"description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
+	"tier": "community",
+	"requires": { "platform": "node" }
+}
