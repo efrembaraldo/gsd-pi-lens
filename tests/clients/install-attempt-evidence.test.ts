@@ -143,6 +143,71 @@ describe("the installer records what its attempt did (#1500)", () => {
 		});
 	});
 
+	// #2638 review: a caller that needs to tell "the installer genuinely
+	// failed" (E404, EBADENGINE, network error) from "declined"/"skipped"
+	// needs the ACTUAL npm error text, not the generic "install failed"
+	// fallback `finishInstallAttempt` uses when nothing set
+	// `installFailureReasons` — the tool-smoke lane's classification
+	// (`scripts/smoke-tools.mjs`'s `classifyInstallOutcome`) reads exactly
+	// this (via `getInstallAttempt(...).reason`) to decide RED vs the
+	// toolchain-absent ⚠ skip.
+	it("a genuine npm install failure records the real registry error, not a generic fallback", async () => {
+		safeSpawnAsync.mockResolvedValue(npmFailed);
+		const { ensureTool, getInstallFailureReason, getInstallAttempt } =
+			await installer();
+
+		expect(await ensureTool("fish-lsp")).toBeUndefined();
+		const reason = getInstallFailureReason("fish-lsp");
+		expect(reason).toContain("404 Not Found");
+		expect(reason).toContain("fish-lsp");
+		expect(getInstallAttempt("fish-lsp")?.reason).toBe(reason);
+	});
+
+	// #2661 review F4: `installPipTool`'s own catch swallowed its error
+	// byte-identically to `installNpmTool`'s pre-fix bug — every pip-strategy
+	// tool (cmake-language-server, jedi-language-server, …) that genuinely
+	// failed to install recorded the same generic fallback, indistinguishable
+	// from a policy decline to any caller reading `getInstallAttempt`.
+	it("a genuine pip install failure records the real pip error, not a generic fallback", async () => {
+		safeSpawnAsync.mockImplementation(async (command: string) =>
+			command === "pip3"
+				? {
+						stdout: "",
+						stderr:
+							"ERROR: Could not find a version that satisfies the requirement cmake-language-server\nsecond diagnostic line",
+						status: 1,
+					}
+				: { stdout: "", stderr: "", status: 1, error: new Error("ENOENT") },
+		);
+		const { ensureTool, getInstallFailureReason, getInstallAttempt } =
+			await installer();
+
+		expect(await ensureTool("cmake-language-server")).toBeUndefined();
+		const attempt = getInstallAttempt("cmake-language-server");
+		expect(attempt?.outcome).toBe("failed");
+		const reason = getInstallFailureReason("cmake-language-server") ?? "";
+		expect(reason).toContain("cmake-language-server");
+		expect(reason).toContain("pip3 install --user");
+		expect(reason).not.toBe("install failed");
+		expect(attempt?.reason).toBe(reason);
+		expect(reason).toContain("ENOENT");
+		expect(reason).not.toContain("\n");
+		expect(reason.length).toBeLessThan(1000);
+	});
+
+	it("preserves a PEP 668 pip refusal for downstream classification", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			stdout: "",
+			stderr: "error: externally-managed-environment",
+			status: 1,
+		});
+		const { ensureTool, getInstallAttempt } = await installer();
+		expect(await ensureTool("cmake-language-server")).toBeUndefined();
+		expect(getInstallAttempt("cmake-language-server")?.reason).toContain(
+			"externally-managed-environment",
+		);
+	});
+
 	it("a successful install records succeeded", async () => {
 		safeSpawnAsync.mockImplementation(async () => {
 			// The install "downloads" the package: plant what npm would leave.

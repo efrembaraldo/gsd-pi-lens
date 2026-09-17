@@ -660,6 +660,81 @@ describe("test-runner-client", () => {
 		});
 	});
 
+	// #2532 review round 1, S1: `formatResult`'s OWN runner-error branch used
+	// to require `passed === 0` on top of `failed === 0 && error`, a third
+	// spelling of the #2532 classification that missed a run interrupted
+	// AFTER some tests had already passed cleanly — the exact shape a real
+	// pytest `Interrupted` run produces (exit code 2, a normal summary line).
+	// Before the fix that batch read as "[Tests] ✓ 3/3 passed", silently
+	// dropping the interruption; `lens_diagnostics mode=full` and the
+	// turn-end delivery message already reported the SAME `TestResult` as an
+	// error via `isRunnerErrorResult`, so this was the third disagreeing
+	// surface the round 1 class sweep missed.
+	describe("formatResult folds onto isRunnerErrorResult, not a local spelling (#2532 review S1)", () => {
+		it("reports a partial run when pytest is interrupted after some tests already passed", () => {
+			const client = new TestRunnerClient(false);
+			const result = (client as any).parsePytestOutput(
+				"===== 3 passed in 1.23s =====",
+				"",
+				2,
+				"/tmp/test_foo.py",
+				"/tmp",
+				"pytest",
+			);
+
+			// Pin the real parser's shape first: `error` alongside a non-zero
+			// `passed`, which the old `passed === 0` check could never see.
+			expect(result).toMatchObject({
+				passed: 3,
+				failed: 0,
+				error: "Pytest interrupted",
+			});
+			expect(client.formatResult(result)).toBe(
+				"[Tests] ⚠ Could not complete tests: Pytest interrupted (3 passed before)",
+			);
+		});
+
+		it("still reports the plain runner-error message when nothing passed first", () => {
+			const client = new TestRunnerClient(false);
+			const result = (client as any).parsePytestOutput(
+				"",
+				"",
+				2,
+				"/tmp/test_foo.py",
+				"/tmp",
+				"pytest",
+			);
+
+			expect(result).toMatchObject({ passed: 0, failed: 0 });
+			expect(client.formatResult(result)).toBe(
+				"[Tests] ⚠ Could not run tests: Pytest interrupted",
+			);
+		});
+
+		it("keeps a counted failure blocking even when the runner also reports an error", () => {
+			// pytest exit 2 after `2 failed, 1 passed` already printed: a
+			// counted failure must stay a failure, never re-read as a runner
+			// error just because `error` is also set (round 1 S2's inversion
+			// risk, pinned here on the surface it actually renders through).
+			const client = new TestRunnerClient(false);
+			const result = (client as any).parsePytestOutput(
+				"===== 2 failed, 1 passed in 1.23s =====",
+				"",
+				2,
+				"/tmp/test_foo.py",
+				"/tmp",
+				"pytest",
+			);
+
+			expect(result).toMatchObject({
+				passed: 1,
+				failed: 2,
+				error: "Pytest interrupted",
+			});
+			expect(client.formatResult(result)).toContain("✗ 2/3 failed");
+		});
+	});
+
 	// #1524: a REAL failing run must never be downgraded to "could not run
 	// tests" just because its runner has no count parser in
 	// `parseGenericRunnerDuration`/the count-matching block above. go (the
@@ -890,6 +965,54 @@ describe("test-runner-client", () => {
 			expect(result.error).toBe("Runner go exited with 1");
 			expect(result.failed).toBe(0);
 			expect(result.failures).toEqual([]);
+		});
+
+		// #2870: the two cases above passed only because their fixtures happen
+		// to contain the substring "error" ("compile error", "error: no
+		// packages to test"), which was the ONLY thing that reached the
+		// runner-error branch. Neither of go's own infrastructure verdicts
+		// prints that word reliably, and without it the same line rendered as
+		// `✗ 1/1 failed ✗ go failure` with "Fix failing tests before
+		// proceeding" — a blocking failure the agent could not tell from a
+		// real one, on every edit in the affected package (measured, #2870).
+		// These two straddle that boundary: the identical verdict lines with
+		// the word "error" removed.
+		it("reports a go setup failure with no 'error' text as a runner error", () => {
+			const result = parse("FAIL\texample.com/pkg [setup failed]\n", 1);
+
+			expect(result.error).toBe("Runner go exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("leaves a go build failure with no 'error' text blocking", () => {
+			// Review round 2, F5: the amendment on #2870 names `[setup failed]`
+			// only. A `[build failed]` package is a COMPILE error, usually one
+			// the agent just introduced, so this fix does not downgrade it —
+			// even though its classification still turns on whether the
+			// compiler happened to print the word "error" (the case above,
+			// where it does, still reads as a runner error via #1524's path).
+			// Pinned so the scope of the new branch cannot drift silently.
+			const result = parse(
+				"# example.com/pkg\n./main_test.go:8:2: undefined: Bar\nFAIL\texample.com/pkg [build failed]\n",
+				1,
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBe(1);
+		});
+
+		it("keeps a real go test failure blocking even when a sibling package reported [setup failed]", () => {
+			// The `!matched`/`goFailNames` vetoes still decide: a run that
+			// produced a real `--- FAIL:` is a verdict, never advisory.
+			const result = parse(
+				"--- FAIL: TestA\n    a_test.go:5: boom\nFAIL\texample.com/a\t0.01s\nFAIL\texample.com/b [setup failed]\n",
+				1,
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBe(1);
+			expect(result.failures[0]?.name).toBe("TestA");
 		});
 
 		it("counts clean packages as passed alongside a real failure in the same run", () => {
@@ -1797,9 +1920,16 @@ describe("test-runner-client", () => {
 			fs.mkdirSync(path.join(tmpDir, "node_modules", "vitest"), {
 				recursive: true,
 			});
-			// Nest the cwd deeper than MAX_NODE_MODULES_WALK_UP (5) so the
-			// hoisted node_modules at tmpDir is out of range.
-			const deepDir = path.join(tmpDir, "a", "b", "c", "d", "e", "f", "g");
+			// #2870: the private `MAX_NODE_MODULES_WALK_UP` climb (5 levels, no
+			// `$HOME` ceiling) folded onto `workspace-topology.ts`'s shared
+			// walker, so the bound under test is now that walker's
+			// `MAX_WALK_DEPTH` (64, with its cap-trip latency record) plus the
+			// `$HOME` ceiling the private loop never had. Nest deeper than the
+			// cap so the hoisted node_modules at tmpDir is out of range.
+			const deepDir = path.join(
+				tmpDir,
+				...Array.from({ length: 70 }, () => "a"),
+			);
 			fs.mkdirSync(deepDir, { recursive: true });
 			fs.writeFileSync(
 				path.join(deepDir, "package.json"),

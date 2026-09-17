@@ -149,7 +149,7 @@ export function _resetDiagnosticsPublishForTests(): void {
 	reportedDirtyPaths.clear();
 }
 
-export interface PublishDiagnosticsFileInput {
+interface PublishDiagnosticsFileInput {
 	/** Absolute path (pre-normalization — this function normalizes). */
 	path: string;
 	/** Current FULL diagnostic set for this file (this call's complete picture — full-replace semantics). */

@@ -15,6 +15,10 @@ import {
 	renderDegradationLines,
 } from "./clients/degradation-ledger.js";
 import {
+	TOOL_REGISTRY,
+	toolRegistryEntryForPi,
+} from "./clients/tool-config.js";
+import {
 	adoptProjectTrustFromPorts,
 	assertInstallAllowed,
 	readProjectTrustFromContext,
@@ -110,8 +114,7 @@ import { CacheManager } from "./clients/cache-manager.js";
 // #1561 F2: the retire hook re-syncs the gate latch and the persisted record
 // the same way the per-dispatch path does, so a retired blocker stops gating
 // the commit.
-import { retireInlineBlockerAndResyncGuard } from "./clients/git-guard.js";
-import { resolvePackagePath } from "./clients/package-root.js";
+import { resolveSkillPaths } from "./clients/skills-resolver.js";
 import {
 	clearWidgetState,
 	exportWidgetState,
@@ -166,7 +169,16 @@ import {
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
 import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
+import {
+	LENS_TOOL_NAMES,
+	resolveLensToolEnabled,
+} from "./clients/tool-config.js";
+import { recordDegradationOnce } from "./clients/degradation-ledger.js";
 import { wrapToolsForCompactLine } from "./clients/tool-render.js";
+import {
+	finalizeToolResultWithDelivery,
+	renderToolText,
+} from "./tools/render-compact.js";
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
@@ -197,6 +209,7 @@ import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js"
 import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
+import { shouldInitializeSessionRoot } from "./clients/lsp/session-roots.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
 import {
 	sweepOrphans,
@@ -236,8 +249,8 @@ import {
 	consumeTurnEndFindings,
 } from "./clients/runtime-context.js";
 import {
+	consumeStagedTestRunnerFindings,
 	deliverStagedTestRunnerFindings,
-	registerTestRunnerEntryRenderer,
 	stageTestRunnerDelivery,
 } from "./clients/test-runner-delivery.js";
 import {
@@ -245,9 +258,11 @@ import {
 	RuntimeCoordinator,
 } from "./clients/runtime-coordinator.js";
 import { handleSessionStart } from "./clients/runtime-session.js";
+import { resetTurnContext } from "./clients/turn-context.js";
 import { handleToolCall } from "./clients/runtime-tool-call.js";
 import {
 	isStaleExtensionCtxError,
+	surfaceHandlerCrash,
 	wrapSessionEventHandler,
 	wrapSessionEventHandlerWithResult,
 } from "./clients/session-event-guard.js";
@@ -273,7 +288,6 @@ import {
 } from "./clients/quiet-window.js";
 import { setAmbientAbortSignal } from "./clients/safe-spawn.js";
 import { initI18n, t } from "./i18n.js";
-import { createAstGrepDumpTool } from "./tools/ast-dump.js";
 import {
 	createActivateToolsTool,
 	type ActivatableToolInfo,
@@ -283,7 +297,6 @@ import { createLensDiagnosticMarkTool } from "./tools/lens-diagnostic-mark.js";
 import { createAstGrepReplaceTool } from "./tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "./tools/ast-grep-search.js";
 import { createAstGrepOutlineTool } from "./tools/ast-grep-outline.js";
-import { createLspDiagnosticsTool } from "./tools/lsp-diagnostics.js";
 import { createLspNavigationTool } from "./tools/lsp-navigation.js";
 import {
 	createModuleReportTool,
@@ -316,10 +329,20 @@ import {
 const LOOP_BLOCK_IDENTITY = "<pi-lens>";
 import {
 	isFreshSessionStart,
+	clearRememberedLazyTools,
+	getRememberedLazyTools,
+	inheritRememberedLazyTools,
 	planToolSet,
 	recordToolSetMutation,
+	rememberLazyTools,
 	supportsDeferredTools,
 } from "./clients/tool-set-policy.js";
+import {
+	endSituationalToolTelemetry,
+	observeSituationalToolActivation,
+	observeSituationalToolCall,
+	startSituationalToolTelemetrySession,
+} from "./clients/situational-tool-telemetry.js";
 import {
 	type CacheContextInjectionSlice,
 	clearCachePrefixSession,
@@ -327,6 +350,9 @@ import {
 	logCacheUsage,
 	observeCacheContext,
 	observeCachePrefix,
+	recordToolResultDelivery,
+	resetCacheFindingIdentitiesSession,
+	recordTurnEndAdvisoryBytes,
 } from "./clients/cache-observability.js";
 import {
 	buildStartupTimingRecords,
@@ -650,12 +676,25 @@ let _turnSummaryEmitCtx:
 	| undefined;
 let _testRunnerDeliveryRegistered = false;
 let _nextTestRunnerDeliveryOwnerId = 0;
+/**
+ * A memo cap, not a mirror of the session-root registry's own bound (#2518).
+ * It used to be described as matching that registry so an uninitializable root
+ * could not stay served; the check below asks the registry directly instead, so
+ * the two numbers no longer have to agree for the answer to be right.
+ */
 const LSP_CONFIG_CWD_CAP = 128;
 const _lspConfigInitializedCwds = new BoundedSet<string>(LSP_CONFIG_CWD_CAP);
 
 async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
 	const normalizedCwd = path.resolve(cwd);
-	if (_lspConfigInitializedCwds.has(normalizedCwd)) return;
+	// #2518: the memo alone is not enough, exactly as in `mcp/server.ts`'s
+	// `ensureReady`. `initLSPConfig` also runs from `clients/runtime-session.ts`
+	// and `clients/lens-engine.ts`, which this memo never sees, so the registry
+	// can evict this cwd while the memo still calls it initialized — and the
+	// evicted entry carries the operator's `disabledServers` denial with it.
+	if (!shouldInitializeSessionRoot(normalizedCwd, _lspConfigInitializedCwds)) {
+		return;
+	}
 	await initLSPConfig(normalizedCwd);
 	_lspConfigInitializedCwds.add(normalizedCwd);
 }
@@ -987,6 +1026,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			default: spec.default,
 		});
 	}
+	pi.registerFlag("no-tool", {
+		description: "Disable a lens tool for this session (repeatable).",
+		type: "string",
+	});
 
 	const globalConfig = loadPiLensGlobalConfig();
 	function getLensFlag(
@@ -1022,6 +1065,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 			runtime.projectRoot,
 		).source;
 	}
+	const noToolFlag = (): string | undefined => {
+		const value = pi.getFlag("no-tool");
+		const cliValues = process.argv
+			.filter((arg) => arg.startsWith("--no-tool="))
+			.map((arg) => arg.slice("--no-tool=".length));
+		if (typeof value === "string") cliValues.unshift(value);
+		return cliValues.length > 0 ? cliValues.join(",") : undefined;
+	};
+	const isToolEnabled = (name: string): boolean =>
+		resolveLensToolEnabled(
+			name,
+			globalConfig,
+			loadPiLensProjectConfig(runtime.projectRoot).raw,
+			noToolFlag(),
+		);
+	const disabledToolNames = LENS_TOOL_NAMES.filter(
+		(name) => !isToolEnabled(name),
+	);
 
 	let lensEnabled = !getLensFlag("no-lens");
 
@@ -1190,11 +1251,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			dbg(`turn-summary renderer registration failed: ${registerRendererErr}`);
 		}
 	}
-	// #2366: test failures are a persistent, non-context custom entry. The
-	// delivery task still checks appendEntry at fire time; this registration is
-	// capability detection only and never authorizes a sendMessage fallback.
-	registerTestRunnerEntryRenderer(pi);
-
 	// --- Commands ---
 
 	pi.registerCommand("lens-toggle", {
@@ -1727,7 +1783,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// owns the same tool name, registerTool throws and would abort extension load.
 	// Catch the collision silently so both extensions can coexist.
 	//
-	// Always-active tools (6): stay on for every turn — cheap, broadly useful,
+	// Always-active tools (5): stay on for every turn — cheap, broadly useful,
 	// or (in the loader's case) required to bootstrap dynamic activation below.
 	const alwaysActiveTools = [
 		createLensDiagnosticsTool(
@@ -1745,36 +1801,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			() => runtime.nextWriteIndex(),
 			captureLspStatusRepaint,
 			() => runtime,
-		),
-		createLspDiagnosticsTool(
-			// #571: same reconciliation wiring as lens_diagnostics mode=full, for
-			// the standalone on-demand check.
-			() => runtime.nextWriteIndex(),
-			// #1561: and the same confirmed result must retire this file's stale
-			// inline blocker, not only correct the footer. The eviction is logged so
-			// it is confirmable from the runtime log rather than from the absence of
-			// complaints (#1432 Gap 1).
-			// #1561 F2: the retire also recomputes the commit-gate latch and the
-			// persisted record — see `retireInlineBlockerAndResyncGuard`.
-			({ filePath, writeIndex, coveredSources, cwd }) => {
-				const retired = retireInlineBlockerAndResyncGuard({
-					runtime,
-					cacheManager,
-					cwd,
-					filePath,
-					writeIndex,
-					coveredSources,
-					lensGuardEnabled: getLensFlag("lens-guard") === true,
-				});
-				if (retired) {
-					dbg(
-						`inline_blocker: retired for ${filePath} — lsp_diagnostics confirmed clean (writeIndex ${writeIndex ?? "none"}, covered ${coveredSources.join(",") || "none"})`,
-					);
-				}
-			},
+			() => Boolean(getLensFlag("lens-guard")),
 		),
 		createSymbolSearchTool(() => runtime.projectRoot),
-		createEffectiveConfigTool(() => runtime.projectRoot),
+		createEffectiveConfigTool(() => runtime.projectRoot, noToolFlag),
 		createProjectReportTool(() => runtime.projectRoot),
 		createModuleReportTool(() => runtime.projectRoot),
 		createReadSymbolTool(
@@ -1811,7 +1841,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 		createAstGrepSearchTool(astGrepClient),
 		createAstGrepReplaceTool(astGrepClient),
 		createAstGrepOutlineTool(astGrepClient),
-		createAstGrepDumpTool(astGrepClient),
 		createLspNavigationTool((name, cwd) => getLensFlag(name, cwd), {
 			runtime,
 			cacheManager,
@@ -1826,45 +1855,45 @@ function activateExtension(hostPi: ExtensionAPI) {
 			}),
 		),
 	];
-	const LAZY_TOOL_CATALOG: ActivatableToolInfo[] = [
-		{
-			name: "ast_grep_search",
-			summary:
-				"AST-aware structural code search across ~40 languages (ast-grep patterns).",
-		},
-		{
-			name: "ast_grep_replace",
-			summary:
-				"AST-aware structural code rewrite/refactor (ast-grep patterns).",
-		},
-		{
-			name: "ast_grep_outline",
-			summary:
-				"Syntax-only file/dir structure (symbols/imports/exports/members) via ast-grep outline — no index/LSP.",
-		},
-		{
-			name: "ast_grep_dump",
-			summary:
-				"Dump the tree-sitter AST for a source snippet to discover node kinds/field names.",
-		},
-		{
-			name: "lsp_navigation",
-			summary:
-				"IDE-style LSP navigation: definition, references, implementation, rename, call hierarchy.",
-		},
-		{
-			name: "lens_diagnostic_mark",
-			summary:
-				"Record a disposition for a diagnostic: false-positive / suppress (inline ignore comment) / defer (this session) / flagged (to fix).",
-		},
-	];
-	// #1453: the lazy tools the model activated in THIS logical conversation.
-	// Extension closure state outlives a session rebuild (the runner keeps the
-	// activated extension; it does not re-run this factory), which is exactly
-	// what lets a fork/reload/resume restore the parent's tool posture. Reset
-	// on startup/new, carried across fork/reload/resume — see the session_start
-	// handler below.
-	const rememberedLazyTools = new Set<string>();
+	const LAZY_TOOL_CATALOG: ActivatableToolInfo[] = TOOL_REGISTRY.filter(
+		(
+			entry,
+		): entry is Extract<
+			(typeof TOOL_REGISTRY)[number],
+			{ situational: true }
+		> => "situational" in entry && entry.situational === true,
+	).map(({ name, summary }) => ({ name, summary }));
+	const enabledLazyTools = new Set(
+		LAZY_TOOL_CATALOG.filter((tool) => isToolEnabled(tool.name)).map(
+			(tool) => tool.name,
+		),
+	);
+	const filteredLazyTools = lazyTools.filter((tool) =>
+		enabledLazyTools.has((tool as { name: string }).name),
+	);
+	const filteredLazyCatalog = LAZY_TOOL_CATALOG.filter((tool) =>
+		enabledLazyTools.has(tool.name),
+	);
+	// #1453/#2889: activation memory is module-owned and keyed by pi's session
+	// file, so it survives this factory re-run while staying conversation-local.
+	const getSessionFile = (ctx: unknown): string | undefined => {
+		try {
+			return (
+				ctx as {
+					sessionManager?: { getSessionFile?: () => string | undefined };
+				}
+			)?.sessionManager?.getSessionFile?.();
+		} catch {
+			return undefined;
+		}
+	};
+	// pi RPC can announce the same replacement twice. Keep one admission key for
+	// the complete session_start mutation pass so every downstream reset observes
+	// the same (reason, session file) identity. A different file remains a real
+	// replacement and must run the normal primary path.
+	// The key is cleared per factory instance because pi re-runs the factory on
+	// every replacement; if that ever changes, clear the key in session_shutdown.
+	let lastSessionStartIdentity: string | undefined;
 	const activateToolsTool = createActivateToolsTool(
 		// SAFETY: `getActiveTools`/`setActiveTools` are not on the pinned
 		// host's ExtensionAPI baseline (they live behind a dynamic-tooling
@@ -1875,10 +1904,22 @@ function activateExtension(hostPi: ExtensionAPI) {
 			getActiveTools?: () => string[];
 			setActiveTools?: (names: string[]) => void;
 		},
-		LAZY_TOOL_CATALOG,
+		filteredLazyCatalog,
 		{
-			onActivated: (names) => {
-				for (const name of names) rememberedLazyTools.add(name);
+			onActivated: (names, ctx) => {
+				observeSituationalToolActivation(names);
+				rememberLazyTools(getSessionFile(ctx), names);
+			},
+			onRejected: (name) => {
+				if (
+					LENS_TOOL_NAMES.includes(name as (typeof LENS_TOOL_NAMES)[number])
+				) {
+					recordDegradationOnce({
+						kind: "tool-disabled",
+						subject: name,
+						reason: `disabled by tools.${name}.enabled`,
+					});
+				}
 			},
 			deferredToolSupport: (ctx) => {
 				try {
@@ -1905,19 +1946,74 @@ function activateExtension(hostPi: ExtensionAPI) {
 	const toolsToRegister = [
 		...alwaysActiveTools,
 		activateToolsTool,
-		...lazyTools,
-	];
+		...filteredLazyTools,
+	].filter(
+		(tool) =>
+			tool.name === "pi_lens_activate_tools" || isToolEnabled(tool.name),
+	);
 	for (const tool of compactToolLineEnabled
 		? wrapToolsForCompactLine(toolsToRegister as any)
 		: toolsToRegister) {
 		try {
-			pi.registerTool(normalizeToolDefinition(tool) as any);
+			const normalized = normalizeToolDefinition(tool) as Record<
+				string,
+				unknown
+			>;
+			const execute = normalized.execute;
+			if (typeof execute === "function") {
+				const recordDelivery = (
+					delivery: {
+						deliveredBytes: number;
+						truncated: boolean;
+					},
+					args: unknown[],
+				) => {
+					if (!lensEnabled) return;
+					try {
+						const ctx = args[4];
+						const sessionId = getStableSessionId(ctx);
+						recordToolResultDelivery({
+							sessionId,
+							sessionRole: classifyOwnedSessionEmission(ctx, sessionId),
+							bytes: delivery.deliveredBytes,
+							truncated: delivery.truncated,
+						});
+					} catch {
+						// Observability must never break tool delivery.
+					}
+				};
+				normalized.execute = (...args: unknown[]) =>
+					Promise.resolve(execute(...args)).then(
+						(result) => {
+							const delivery = finalizeToolResultWithDelivery(
+								result as Parameters<typeof finalizeToolResultWithDelivery>[0],
+							);
+							// #2800 item 7: the per-turn cache_usage row sums each delivered
+							// tool result's bytes. The SDK hands the live ExtensionContext as
+							// the fifth execute argument, so attribution mirrors the
+							// message_end handler: stable session id plus this activation's
+							// owned role.
+							recordDelivery(delivery, args);
+							return delivery.result;
+						},
+						(err) => {
+							const text = err instanceof Error ? err.message : String(err);
+							const delivery = finalizeToolResultWithDelivery({
+								...renderToolText(text),
+								isError: true,
+							});
+							recordDelivery(delivery, args);
+							return delivery.result;
+						},
+					);
+			}
+			pi.registerTool(normalized as any);
 		} catch {
 			// another extension already registered a tool with this name
 		}
 	}
 
-	// Dynamic tooling (#pi 0.80.x+): deactivate the 6 situational tools so they
+	// Dynamic tooling (#pi 0.80.x+): deactivate the 5 situational tools so they
 	// start inactive and the model must call `pi_lens_activate_tools` to bring
 	// them in (next-turn visibility, per the docs' loader pattern). This used
 	// to run synchronously right here, immediately after registration — but
@@ -1943,12 +2039,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// module's own directory — under the compiled dist/ layout (#182) the module
 		// lives in dist/ but skills/ stays at the package root, so a module-relative
 		// join lands on the non-existent dist/skills/ and skills silently fail to load
-		// (#205). resolvePackagePath walks up to package.json, correct for both the
-		// source (index.ts at root) and dist (dist/index.js) layouts.
-		const skillsDir = resolvePackagePath(import.meta.url, "skills");
-
+		// (#205). resolveSkillPaths walks up to package.json (same as
+		// resolvePackagePath) and ALWAYS returns that path — pi handles an absent
+		// directory gracefully and the manifest may register the same dir — while
+		// separately recording a bounded skills-dir-missing degradation when pi's
+		// own discovery rule (root SKILL.md, nested SKILL.md, loose root .md) would
+		// load nothing there (#2626). Never turn the health check into a [] return:
+		// that inversion dropped real skills on four pi layouts in #2637 round 1.
 		return {
-			skillPaths: [skillsDir],
+			skillPaths: resolveSkillPaths(import.meta.url),
 		};
 	});
 
@@ -1972,6 +2071,82 @@ function activateExtension(hostPi: ExtensionAPI) {
 		wrapSessionEventHandler(
 			"session_start",
 			async (event, ctx) => {
+				const sessionStartReason = (event as { reason?: string }).reason;
+				const previousSessionFile = (event as { previousSessionFile?: string })
+					.previousSessionFile;
+				const sessionIdentityParts = (() => {
+					try {
+						const sessionManager = (
+							ctx as {
+								sessionManager?: {
+									getSessionId?: () => string | undefined;
+									getSessionFile?: () => string | undefined;
+								};
+							}
+						)?.sessionManager;
+						return {
+							sessionId: sessionManager?.getSessionId?.(),
+							sessionFile: getSessionFile(ctx),
+						};
+					} catch {
+						return { sessionId: undefined, sessionFile: undefined };
+					}
+				})();
+				const sessionStartKey =
+					sessionIdentityParts.sessionId ?? sessionIdentityParts.sessionFile;
+				const sessionStartIdentity =
+					sessionStartKey === undefined
+						? undefined
+						: `${sessionStartReason ?? ""}\u0000${sessionStartKey}`;
+				// With neither a stable session ID nor a session file, fail open: the
+				// event cannot be safely identified for duplicate suppression.
+				const liveToolPlan = (() => {
+					if (
+						getLensFlag("no-lazy-tools") === true ||
+						typeof (pi as unknown as { getActiveTools?: unknown })
+							.getActiveTools !== "function"
+					) {
+						return undefined;
+					}
+					try {
+						const piWithActiveTools = pi as unknown as {
+							getActiveTools: () => string[];
+						};
+						const lazyNames = new Set(
+							LAZY_TOOL_CATALOG.map((tool) => tool.name),
+						);
+						return planToolSet(
+							piWithActiveTools.getActiveTools(),
+							lazyNames,
+							isFreshSessionStart(sessionStartReason)
+								? new Set<string>()
+								: getRememberedLazyTools(getSessionFile(ctx)),
+						);
+					} catch {
+						return undefined;
+					}
+				})();
+				if (
+					sessionStartIdentity !== undefined &&
+					lastSessionStartIdentity === sessionStartIdentity &&
+					liveToolPlan?.changed !== true
+				) {
+					emitBounded(
+						"session_start_duplicate_suppressed",
+						sessionStartIdentity,
+						{
+							durationMs: 0,
+							metadata: { reason: "duplicate start suppressed" },
+						},
+						{
+							ledgerKind: "session-start-duplicate",
+							risingEdgePer: "identity",
+							reason: "duplicate start suppressed",
+						},
+					);
+					return;
+				}
+				lastSessionStartIdentity = sessionStartIdentity;
 				const sessionStartMonotonicAt = performance.now();
 				warmDispatchAtSessionStart();
 				void warmLspService().catch((err) =>
@@ -2002,7 +2177,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// this line would be a no-op anyway.
 					const buildIdentity = getBuildIdentity(import.meta.url);
 					if (buildIdentity) dbg(formatBuildIdentity(buildIdentity));
-					const sessionReason = (event as { reason?: string }).reason;
+					const sessionReason = sessionStartReason;
+					dbg(
+						`session_start: disabled tools = ${disabledToolNames.join(",") || "none"}`,
+					);
 
 					// #1334 S5: adopt the HOST's project-trust decision before anything
 					// below can auto-install a tool or spawn an LSP server. pi-lens is a
@@ -2128,6 +2306,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// accepted cost on the other side (a torn-down secondary's own
 					// bracket goes stale until the next full session start).
 					resetCurrentPhaseForSession();
+					resetCacheFindingIdentitiesSession(stableSessionId, ownedSessionRole);
 					// #2526 review round 2, F1: the once-per-session phase claims
 					// (`config_resolved`) and the session record identity they are
 					// stamped with are re-armed HERE, not inside handleSessionStart.
@@ -2140,6 +2319,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// reaches handleSessionStart and so never publishes an expectation
 					// line of its own — must not re-arm a live primary's claims.
 					resetOncePerSessionPhases();
+					// #2858: pi owns one observation set per session file. A replacement
+					// shutdown emits the ending file's row before the next set opens.
+					// Open this before the handler below can hang (#2859), so the
+					// session-end row does not depend on handleSessionStart returning.
+					startSituationalToolTelemetrySession("pi");
 					// #2249: same gate — a declined bind's own session_start must never
 					// reach here (it returned above), so this only fires for a genuine
 					// new primary. A crash or forced kill can skip session_shutdown's
@@ -2168,9 +2352,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// an active-tool set per session. Skipping the call on those reasons
 					// would therefore leave every lazy tool active forever AND change the
 					// advertised tool list relative to the parent's cached prompt prefix.
-					// Rebuilding the same set instead keeps the prefix identical and
-					// genuinely preserves the model's activations, because pi-lens's own
-					// closure state (`rememberedLazyTools`) survives the rebuild.
+					// Rebuilding the same set keeps the prefix identical. The remembered
+					// set is keyed by session file in the module-level policy store, so it
+					// survives pi re-running this factory on every rebuild.
 					//
 					// Deliberately BELOW the #473 concurrent-secondary guard: the active
 					// tool set is shared runtime state (one loader per process), so a
@@ -2194,20 +2378,25 @@ function activateExtension(hostPi: ExtensionAPI) {
 							getActiveTools?: () => string[];
 							setActiveTools?: (names: string[]) => void;
 						};
+						// A fresh conversation starts with no activation memory; a
+						// rebuild inherits the current session file's memory.
+						const sessionFile = getSessionFile(ctx);
+						if (sessionStartReason === "fork") {
+							inheritRememberedLazyTools(previousSessionFile, sessionFile);
+						}
+						if (isFreshSessionStart(sessionReason)) {
+							clearRememberedLazyTools(sessionFile);
+						}
 						if (
 							getLensFlag("no-lazy-tools") !== true &&
 							typeof piWithActiveTools.getActiveTools === "function" &&
 							typeof piWithActiveTools.setActiveTools === "function"
 						) {
-							// A fresh conversation starts with no activation memory; a
-							// rebuild inherits the parent's.
-							if (isFreshSessionStart(sessionReason))
-								rememberedLazyTools.clear();
 							const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
 							const plan = planToolSet(
 								piWithActiveTools.getActiveTools(),
 								lazyNames,
-								rememberedLazyTools,
+								getRememberedLazyTools(sessionFile),
 							);
 							if (plan.changed) {
 								piWithActiveTools.setActiveTools(plan.desired);
@@ -2331,6 +2520,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// reset beside the primary session-start reset block so a tightened
 					// sampling window cannot leak across sessions.
 					resetMemorySamplerCadence();
+					// #2815 R7: reset before the handler can publish its
+					// session_start_prehandler row. Keep this inside the primary gate so
+					// a concurrent secondary cannot erase the primary's live counter.
+					resetTurnContext(stableSessionId);
 					await handleSessionStart({
 						ctxCwd: ctx.cwd,
 						sessionStartFiredAt,
@@ -2339,6 +2532,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 						emitHostReadyDelay,
 						sessionReason,
 						handlerEnteredAt,
+						globalConfig,
+						projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
 						// #2129: this call site is only reached for "primary"/
 						// "sequential-replacement" — a declined start returned above.
 						sessionStartClassification: sessionStartDecision.classification,
@@ -2476,8 +2671,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// session swap as a pi-lens crash (#1929, same shape as the
 					// agent_end and turn_end catches).
 					if (isStaleExtensionCtxError(sessionErr)) throw sessionErr;
-					dbg(`session_start crashed: ${sessionErr}`);
-					dbg(`session_start crash stack: ${(sessionErr as Error).stack}`);
+					// #2859/#2884: `dbg` writes nothing in tests, so a crashed
+					// session_start was indistinguishable from a completed one —
+					// fourteen awaits in tests/index-integration.test.ts rejected into
+					// this catch (a leaked `vi.doMock` had dropped an installer
+					// export), every assertion after them was vacuous, and the whole
+					// file stayed green. A test budget cannot see this: the handler
+					// settles promptly, it just did nothing. `surfaceHandlerCrash`
+					// logs, records one bounded ledger row, and under the runner
+					// rethrows so the crash fails the test that caused it; production
+					// keeps the swallow, because a pi-lens session_start bug must
+					// never take down the host's session. #2866 wrote that guard
+					// inline here; #2884 folded it onto the shared helper so the nine
+					// sibling catches below cannot drift from it.
+					surfaceHandlerCrash("session_start", sessionErr, { dbg });
 				}
 			},
 			{ dbg },
@@ -2499,11 +2706,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 				`session_before_fork: stashed ${pendingForkSnapshot.files.length} file(s) + ${pendingForkReadGuard.reads.length} read-guard file(s) for the fork`,
 			);
 		} catch (forkErr) {
-			dbg(`session_before_fork crashed: ${forkErr}`);
+			surfaceHandlerCrash("session_before_fork", forkErr, { dbg });
 		}
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		const toolEntry = toolRegistryEntryForPi(
+			(event as { toolName?: string }).toolName ?? "",
+		);
+		if (toolEntry && "situational" in toolEntry && toolEntry.situational) {
+			observeSituationalToolCall(toolEntry.name);
+		}
 		return handleToolCall({
 			// SAFETY: `event` and `ctx` are typed as the host SDK's
 			// `ToolCallEvent`/`ExtensionContext` (devDep-narrowed to the
@@ -2776,7 +2989,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				);
 			}
 		} catch (sweepErr) {
-			dbg(`observed_settled_sweep crashed: ${sweepErr}`);
+			surfaceHandlerCrash("observed_settled_sweep", sweepErr, { dbg });
 		}
 	}
 
@@ -2796,6 +3009,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	async function refreshObservedLedgerSafely(
 		ctx: DeferredDrainCtx,
 	): Promise<void> {
+		const signal = ctx?.signal;
 		try {
 			await refreshObservedMutationLedger({
 				turnIndex: runtime.turnIndex,
@@ -2804,10 +3018,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// rather than a read (#2449 review round 2, F3).
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(runtime.readGuard, candidate),
-				signal: ctx?.signal,
+				signal,
 			});
 		} catch (refreshErr) {
-			dbg(`observed_ledger_refresh crashed: ${refreshErr}`);
+			surfaceHandlerCrash("observed_ledger_refresh", refreshErr, { dbg });
 		}
 	}
 
@@ -2887,8 +3101,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// registration owns it, instead of a second copy here logging it as a
 			// crash (#1925).
 			if (isStaleExtensionCtxError(agentEndErr)) throw agentEndErr;
-			dbg(`agent_end crashed: ${agentEndErr}`);
-			dbg(`agent_end crash stack: ${(agentEndErr as Error).stack}`);
+			surfaceHandlerCrash("agent_end", agentEndErr, { dbg });
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
@@ -3095,12 +3308,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 				depChecker,
 				testRunnerClient,
 				sessionId: getStableSessionId(ctx),
+				signal: ctx.signal,
 				onTestRunnerComplete: (delivery) =>
 					stageTestRunnerDelivery({
 						...delivery,
 						owner: {
 							ownerId: testRunnerDeliveryOwnerId,
-							pi,
 							cacheManager,
 							runtime,
 							getCtx: () => ownEventCtx ?? {},
@@ -3150,8 +3363,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		} catch (turnEndErr) {
 			// One classifier for the stale-ctx class — see `agent_end` above.
 			if (isStaleExtensionCtxError(turnEndErr)) throw turnEndErr;
-			dbg(`turn_end crashed: ${turnEndErr}`);
-			dbg(`turn_end crash stack: ${(turnEndErr as Error).stack}`);
+			surfaceHandlerCrash("turn_end", turnEndErr, { dbg });
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
@@ -3284,6 +3496,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						display: true,
 						details,
 					});
+					recordTurnEndAdvisoryBytes(
+						runtime.telemetrySessionId,
+						Buffer.byteLength(line, "utf8"),
+					);
 				} catch (sendErr) {
 					if (isStaleExtensionCtxError(sendErr)) {
 						dbg(
@@ -3359,7 +3575,15 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// this site only declines to swallow it: rethrow, and the wrapper
 				// around the registration skips the run and counts it.
 				if (isStaleExtensionCtxError(drainErr)) throw drainErr;
-				dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
+				// Under the runner the two `…Safely` helpers above rethrow their own
+				// crash into this catch, so ONE crash can leave two ledger subjects
+				// (the inner site and this one). That is a test-path artifact and
+				// deliberately not deduplicated: in production the inner catches
+				// swallow, so this catch only ever sees a crash the drain itself
+				// raised, and the record stays one row per real crash.
+				surfaceHandlerCrash("agent_settled deferred_mutation_drain", drainErr, {
+					dbg,
+				});
 			} finally {
 				setAmbientAbortSignal(undefined);
 			}
@@ -3371,7 +3595,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 				sessionId: getStableSessionId(ctx),
 				ownerId: testRunnerDeliveryOwnerId,
 			}).catch((err) => {
-				dbg(`quiet_window crashed: ${err}`);
+				// This is the only fire-and-forget site of the nine. Nothing awaits
+				// this promise, so rethrowing here creates an unhandled rejection
+				// that can terminate the pi host. The bounded row is the observable
+				// for this site; production and the test runner must keep the host alive.
+				surfaceHandlerCrash("quiet_window", err, { dbg, rethrow: false });
 			});
 			// #1123 item 4: dump active handles AFTER the quiet-window work is
 			// scheduled — the #1097-class leak (a stray ref'd timer surviving
@@ -3400,7 +3628,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// --- Session shutdown: release all handles so subagent processes exit cleanly ---
 	// The LSP idle-reset timer (240s) is unref'd but we cancel it explicitly here
 	// so it does not fire after shutdown. resetLSPService shuts down any live clients.
-	(pi as any).on("session_shutdown", (_event: unknown, ctx: unknown) => {
+	(pi as any).on("session_shutdown", (event: unknown, ctx: unknown) => {
 		// #473: a concurrently-live in-process subagent session shutting down
 		// (its sibling primary — the real parent — still active) must NOT run
 		// the shared-infra teardown below: no LSP fleet shutdown, no idle-timer
@@ -3473,6 +3701,20 @@ function activateExtension(hostPi: ExtensionAPI) {
 				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
 			);
 			return;
+		}
+		const shutdownEvent = event as
+			| { reason?: string; targetSessionFile?: string }
+			| undefined;
+		const shutdownReason = shutdownEvent?.reason;
+		const switchesSessionFile =
+			typeof shutdownEvent?.targetSessionFile === "string" &&
+			shutdownEvent.targetSessionFile.length > 0;
+		if (
+			switchesSessionFile ||
+			shutdownReason === "quit" ||
+			shutdownReason === undefined
+		) {
+			endSituationalToolTelemetry();
 		}
 
 		// #1654: no drain runs here — see the module comment above
@@ -3584,10 +3826,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 					incrementDegradationCount(degradation);
 				}
 			} catch (err) {
-				dbg(`message_end handler error: ${err}`);
+				// #2884 class sweep: the ninth member. The issue's grep looked for
+				// `… crashed: ` and this one says `handler error`, so it was not in
+				// the table — same shape, same fix.
+				surfaceHandlerCrash("message_end", err, { dbg });
 			}
 		});
 	} catch (err) {
+		// NOT the same class: this catch guards the `pi.on` REGISTRATION against
+		// an older host that has no `message_end` event, so it must keep
+		// swallowing under the runner too — a host-capability probe is not a
+		// handler crash. Same for the `agent_settled` registration above.
 		dbg(`message_end subscribe failed (older pi host?): ${err}`);
 	}
 
@@ -3708,6 +3957,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cacheManager,
 						cwd,
 					);
+					const testFindings = consumeStagedTestRunnerFindings({
+						cwd,
+						sessionId: runtime.telemetrySessionId,
+						ownerId: testRunnerDeliveryOwnerId,
+						cacheManager,
+						runtime,
+					});
 					const agentNudge = consumeAgentNudge(dbg);
 					const sourceMessages = [
 						{
@@ -3717,6 +3973,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						{
 							source: "turn-findings" as const,
 							messages: turnEndFindings?.messages ?? [],
+						},
+						{
+							source: "test-findings" as const,
+							messages: testFindings?.messages ?? [],
 						},
 						{
 							source: "agent-nudge" as const,

@@ -58,10 +58,10 @@ import {
 	PROJECT_FOREIGN_CONFIG_NAMESPACES,
 	PROJECT_NON_FLAG_CONFIG_SECTIONS,
 } from "./lens-flag-registry.js";
+import { LENS_TOOL_NAMES } from "./tool-config.js";
 
 /** The JSON Schema dialect the published artifact declares. */
-export const CONFIG_SCHEMA_DIALECT =
-	"https://json-schema.org/draft/2020-12/schema";
+const CONFIG_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
 /**
  * A node the schema says nothing else about. `config-core` treats a node with
@@ -131,8 +131,6 @@ export { LSP_KEY_TYPES };
 const LSP_KEY_DENY: Readonly<Record<string, DenyPolicy>> = {
 	disabledServers: "array-union",
 };
-
-export { LSP_KEY_DENY };
 
 /** The `x-deny` annotation for a key, or nothing when it carries no denial. */
 function denyAnnotation(key: string): { [DENY_KEY]?: DenyPolicy } {
@@ -226,6 +224,24 @@ function buildConfigSchema(): ConfigSchemaNode {
 	]) {
 		properties[key] = opaque("stable");
 	}
+	properties.tools = {
+		type: "object",
+		additionalProperties: true,
+		properties: Object.fromEntries(
+			LENS_TOOL_NAMES.map((name) => [
+				name,
+				{
+					type: "object",
+					additionalProperties: true,
+					properties: {
+						enabled: { type: "boolean", [STABILITY_TIER_KEY]: "experimental" },
+					},
+					[STABILITY_TIER_KEY]: "experimental",
+				},
+			]),
+		),
+		[STABILITY_TIER_KEY]: "stable",
+	};
 
 	// Namespaces owned by another tool that ride in the same file (`trivy`,
 	// `helm`). Reserved so they survive validation, `experimental` because their
@@ -233,6 +249,45 @@ function buildConfigSchema(): ConfigSchemaNode {
 	for (const key of PROJECT_FOREIGN_CONFIG_NAMESPACES) {
 		properties[key] ??= opaque("experimental");
 	}
+
+	for (const key of [
+		"knip",
+		"jscpd",
+		"madge",
+		"gitleaks",
+		"govulncheck",
+		"deadCode",
+		"complexity",
+	]) {
+		properties[key] = {
+			type: "object",
+			additionalProperties: true,
+			properties: {
+				enabled: { type: "boolean", [STABILITY_TIER_KEY]: "experimental" },
+			},
+			[STABILITY_TIER_KEY]: "stable",
+		};
+	}
+	properties.startup = {
+		type: "object",
+		additionalProperties: true,
+		properties: {
+			mode: {
+				type: "string",
+				enum: ["quick", "full", "minimal"],
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+			scans: {
+				type: "object",
+				additionalProperties: true,
+				properties: {
+					enabled: { type: "boolean", [STABILITY_TIER_KEY]: "experimental" },
+				},
+				[STABILITY_TIER_KEY]: "experimental",
+			},
+		},
+		[STABILITY_TIER_KEY]: "stable",
+	};
 
 	// The four legacy ROOT LSP keys. Still accepted for their deprecation window
 	// (#2418 registry), and `experimental` because they are scheduled for

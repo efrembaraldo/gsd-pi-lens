@@ -36,6 +36,7 @@ import {
 	findNestedProjectMutationValue,
 	type PiLensProjectConfig,
 } from "./project-lens-config.js";
+import { readToolConfig } from "./tool-config.js";
 
 /**
  * The canonical global location, looked up rather than constructed, so a change
@@ -54,10 +55,10 @@ function globalCanonicalLocation(): ConfigLocation {
 	return location;
 }
 
-export type PiLensFormatMode = "deferred" | "immediate";
+type PiLensFormatMode = "deferred" | "immediate";
 
 /** The `{ enabled?: boolean }` section every registry flag key lives under. */
-export interface PiLensToggleConfig {
+interface PiLensToggleConfig {
 	enabled?: boolean;
 }
 
@@ -85,6 +86,11 @@ export interface PiLensReadGuardConfig extends PiLensToggleConfig {
 }
 
 export interface PiLensGlobalConfig {
+	tools?: Record<string, { enabled?: boolean }>;
+	startup?: {
+		mode?: "quick" | "full" | "minimal";
+		scans?: { enabled?: boolean };
+	};
 	/**
 	 * Gitignore-style patterns excluded from pi-lens scans across ALL projects.
 	 * Merged at LOWEST precedence: a project `.gitignore` or `.pi-lens.json`
@@ -284,6 +290,8 @@ export function loadPiLensGlobalConfig(
 		const raw = resolved.value;
 		const warnInvalid = note;
 		const config: Record<string, unknown> = {};
+		const toolConfig = readToolConfig(raw, warnInvalid);
+		if (toolConfig) config.tools = toolConfig;
 
 		for (const spec of LENS_FLAGS) {
 			if (spec.readGlobal) continue;
@@ -294,6 +302,25 @@ export function loadPiLensGlobalConfig(
 			? raw.ignore.filter((p): p is string => typeof p === "string")
 			: undefined;
 		if (ignore && ignore.length > 0) config.ignore = ignore;
+
+		const startup = asConfigObject(raw.startup);
+		if (startup) {
+			const startupConfig: PiLensGlobalConfig["startup"] = {};
+			const mode = startup.mode;
+			const scans = asConfigObject(startup.scans);
+			if (mode === "quick" || mode === "full" || mode === "minimal")
+				startupConfig.mode = mode;
+			else if ("mode" in startup)
+				warnInvalid('startup.mode must be "quick", "full", or "minimal"');
+			if (scans) {
+				if (typeof scans.enabled === "boolean") {
+					startupConfig.scans = { enabled: scans.enabled };
+				} else if ("enabled" in scans)
+					warnInvalid("startup.scans.enabled must be a boolean");
+			}
+			if (startupConfig.mode !== undefined || startupConfig.scans !== undefined)
+				config.startup = startupConfig;
+		}
 
 		const dispatch = asConfigObject(raw.dispatch);
 		if (dispatch) {

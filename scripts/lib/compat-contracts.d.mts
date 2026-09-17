@@ -17,23 +17,22 @@ export function checkTintinwebInProcessBind(
 	source: string,
 ): ContractCheckResult;
 
-export interface ContractCheckEntry extends ContractCheckResult {
+export interface ContractSourceCandidate {
+	path: string;
+	observedAt: string;
+}
+
+export interface ContractSourcePart {
+	name: string;
+	candidates: ContractSourceCandidate[];
+}
+
+export interface ContractDefinition {
 	id: string;
 	package: string;
 	description: string;
+	check: (source: string) => ContractCheckResult;
+	parts: ContractSourcePart[];
 }
 
-export interface ContractCheckInputs {
-	nicobailonPiArgsSource: string;
-	avtcProcessRunnerSource: string;
-	sdkLoaderSource: string;
-	sdkRunnerSource: string;
-	sdkAgentSessionExtensionsSource: string;
-	sdkAgentSessionEventsSource: string;
-	tintinwebAgentRunnerSource: string;
-}
-
-export function runAllContractChecks(inputs: ContractCheckInputs): {
-	results: ContractCheckEntry[];
-	allPass: boolean;
-};
+export const CONTRACTS: ContractDefinition[];

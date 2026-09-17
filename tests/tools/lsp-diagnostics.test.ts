@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../clients/test-utils.js";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
 const mocked = vi.hoisted(() => ({
 	service: null as unknown,
@@ -43,7 +44,7 @@ vi.mock("../../clients/lsp/wait-policy/index.js", () => ({
 	classifyCascadeWaitTier: () => mocked.cascadeTier,
 }));
 
-const reconcileScanDiagnosticsMock = vi.fn();
+const reconcileScanDiagnosticsMock = vi.fn().mockReturnValue(true);
 
 vi.mock("../../clients/widget-state.js", () => ({
 	reconcileScanDiagnostics: (...args: unknown[]) =>
@@ -58,9 +59,8 @@ describe("lsp_diagnostics tool", () => {
 		mocked.cascadeTier = "waits";
 		mocked.warmAttached = false;
 		mocked.attachedDiagnostics.mockReset();
-		reconcileScanDiagnosticsMock.mockReset();
-		mocked.service = {
-			openFile: vi.fn().mockResolvedValue(undefined),
+		reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
+		mocked.service = makeLspServiceDouble({
 			getDiagnostics: vi.fn().mockImplementation(async (filePath: string) => {
 				if (filePath.endsWith("bad.ts")) {
 					return [
@@ -80,7 +80,17 @@ describe("lsp_diagnostics tool", () => {
 			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
 			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
 			runWorkspaceDiagnostics: vi.fn(),
-		};
+			// #2598: `collectDiagnosticsForFile` now touches unconditionally —
+			// the real `LSPService` defines `touchFile` on every shape, so the
+			// probe that used to route this suite down an `openFile` arm is
+			// gone. `undefined` is what the real `touchFile` resolves to when
+			// it resolves NO client for the file (clients/lsp/index.ts, the
+			// `no_clients` return), and it is the state these cases want: the
+			// tool falls through to `getDiagnostics`, where their fixtures
+			// live. Cases that want the touch itself to answer install their
+			// own `touchFile` on the double.
+			touchFile: vi.fn(async () => undefined),
+		});
 	});
 
 	it("uses attached diagnostics for a batch without local warm-up or touches", async () => {
@@ -159,7 +169,7 @@ describe("lsp_diagnostics tool", () => {
 			expect(String(result.content[0]?.text)).toContain("Files checked: 2");
 			expect(String(result.content[0]?.text)).toContain("not assignable");
 			expect(
-				(mocked.service as { openFile: ReturnType<typeof vi.fn> }).openFile,
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
 			).toHaveBeenCalledTimes(2);
 			expect(
 				(
@@ -298,7 +308,7 @@ describe("lsp_diagnostics tool", () => {
 		// No file was opened in the language server — the worker loop saw the
 		// aborted signal and returned before scheduling any file.
 		expect(
-			(mocked.service as { openFile: ReturnType<typeof vi.fn> }).openFile,
+			(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
 		).not.toHaveBeenCalled();
 		// Still returns a (partial) batch result, not a throw.
 		expect(result.isError).toBeUndefined();
@@ -328,7 +338,7 @@ describe("lsp_diagnostics tool", () => {
 			// abort-aware fan-out opened NONE of them in the language server — the
 			// #343 invariant: no in-flight files after the turn is abandoned.
 			expect(
-				(mocked.service as { openFile: ReturnType<typeof vi.fn> }).openFile,
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
 			).not.toHaveBeenCalled();
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.mode).toBe("directory");
@@ -377,12 +387,12 @@ describe("lsp_diagnostics tool", () => {
 			expect(result.details?.totalDiagnostics).toBe(0);
 			expect(String(result.content[0]?.text)).toContain("Files scanned: 1");
 
-			const openFile = (
+			const touchFile = (
 				mocked.service as {
-					openFile: ReturnType<typeof vi.fn>;
+					touchFile: ReturnType<typeof vi.fn>;
 				}
-			).openFile;
-			const opened = openFile.mock.calls.map(([filePath]) =>
+			).touchFile;
+			const opened = touchFile.mock.calls.map(([filePath]) =>
 				path.relative(tmpDir, String(filePath)).replace(/\\/g, "/"),
 			);
 			expect(opened).toEqual(["src/good.ts"]);
@@ -414,10 +424,10 @@ describe("lsp_diagnostics tool", () => {
 			// relative order LANG_EXTENSIONS's ".ts" key had before ".py"), so the
 			// directory scans as typescript and the python file is not opened.
 			expect(result.details?.filesScanned).toBe(1);
-			const openFile = (
-				mocked.service as { openFile: ReturnType<typeof vi.fn> }
-			).openFile;
-			const opened = openFile.mock.calls.map(([filePath]) =>
+			const touchFile = (
+				mocked.service as { touchFile: ReturnType<typeof vi.fn> }
+			).touchFile;
+			const opened = touchFile.mock.calls.map(([filePath]) =>
 				path.relative(tmpDir, String(filePath)).replace(/\\/g, "/"),
 			);
 			expect(opened).toEqual(["a.ts"]);
@@ -445,10 +455,10 @@ describe("lsp_diagnostics tool", () => {
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.mode).toBe("directory");
 			expect(result.details?.filesScanned).toBe(1);
-			const openFile = (
-				mocked.service as { openFile: ReturnType<typeof vi.fn> }
-			).openFile;
-			const opened = openFile.mock.calls.map(([filePath]) =>
+			const touchFile = (
+				mocked.service as { touchFile: ReturnType<typeof vi.fn> }
+			).touchFile;
+			const opened = touchFile.mock.calls.map(([filePath]) =>
 				path.relative(tmpDir, String(filePath)).replace(/\\/g, "/"),
 			);
 			expect(opened).toEqual(["config.ru"]);
@@ -494,10 +504,10 @@ describe("lsp_diagnostics tool", () => {
 			// from `.pi-lens.json` both suppress, not just the canonical dir list.
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.filesScanned).toBe(1);
-			const openFile = (
-				mocked.service as { openFile: ReturnType<typeof vi.fn> }
-			).openFile;
-			const opened = openFile.mock.calls.map(([filePath]) =>
+			const touchFile = (
+				mocked.service as { touchFile: ReturnType<typeof vi.fn> }
+			).touchFile;
+			const opened = touchFile.mock.calls.map(([filePath]) =>
 				path.relative(tmpDir, String(filePath)).replace(/\\/g, "/"),
 			);
 			expect(opened).toEqual(["src/good.ts"]);
@@ -657,28 +667,17 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
-		it("compact render: batch with unconfirmed files shows the clean/unconfirmed split, not a bare diagnostic count", () => {
-			const tool = createLspDiagnosticsTool();
-			const fakeTheme = { fg: (_c: unknown, t: string) => t } as any;
-			const component = (tool.renderResult as any)(
-				{
-					content: [{ type: "text", text: "Files checked: 3" }],
-					details: {
-						mode: "batch",
-						totalDiagnostics: 1,
-						cleanFiles: 0,
-						unconfirmedFiles: 2,
-					},
-				},
-				{ expanded: false },
-				fakeTheme,
-				{ args: {} },
-			);
-			expect((component as { text: string }).text).toContain("unconfirmed");
-			expect((component as { text: string }).text).not.toMatch(
-				/— 1 diagnostic\s*$/,
-			);
-		});
+		// #2860 round 3 N5/F10: `createLspDiagnosticsTool` no longer returns a
+		// `renderResult` — the fold's only production caller
+		// (`tools/lens-diagnostics.ts`) routes rendering through its OWN
+		// `details.source === "lsp"` branch (never through this probe's
+		// renderer, which was unreachable dead code since round 1 per #533).
+		// The same invariant this test pinned — a batch/directory result with
+		// unconfirmed files must never compact-render as a bare N-diagnostic
+		// count — is covered on the surviving renderer by
+		// tests/tools/lens-diagnostics.test.ts's "lens_diagnostics source=lsp
+		// compact render" describe block ("preserves unconfirmed and
+		// timed-out files").
 	});
 
 	// #611: for a tier3-silent server (classic typescript-language-server), an
@@ -920,9 +919,19 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
-		it("falls back to unconfirmed when the service exposes no executeCommand/getAdvertisedCommands at all (older mock/service shape)", async () => {
+		it("falls back to unconfirmed when the sync command IS advertised but the service exposes no executeCommand (older mock/service shape)", async () => {
 			mocked.cascadeTier = "tier3-silent";
-			// beforeEach's mocked.service has neither method — the default shape.
+			// #2592: this case used to lean on `getAdvertisedCommands` ALSO being
+			// missing, which made it bail at clients/lsp/tsserver-sync.ts:424 —
+			// the same observable as the "isn't advertised" sibling above, so
+			// nothing here could tell the two apart. `executeCommand` is outside
+			// `makeLspServiceDouble`'s surface and therefore still genuinely
+			// absent, so advertise the command and let the bail happen at
+			// tsserver-sync.ts:380 instead: a branch no other case in this file
+			// reaches, and one that reds the moment `executeCommand` is stubbed.
+			(mocked.service as any).getAdvertisedCommands = vi
+				.fn()
+				.mockResolvedValue(["typescript.tsserverRequest"]);
 			const tool = createLspDiagnosticsTool();
 			const tmpDir = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-lsp-diag-611-nomethod-"),
@@ -2029,6 +2038,7 @@ describe("lsp_diagnostics tool", () => {
 									end: { line: 0, character: 1 },
 								},
 								source: "typescript",
+								serverId: "typescript",
 							},
 							{
 								severity: 2,
@@ -2038,6 +2048,7 @@ describe("lsp_diagnostics tool", () => {
 									end: { line: 1, character: 1 },
 								},
 								source: "ast-grep",
+								serverId: "ast-grep",
 							},
 						];
 					}
@@ -2283,6 +2294,7 @@ describe("lsp_diagnostics tool", () => {
 									end: { line: 0, character: 1 },
 								},
 								source: "typescript",
+								serverId: "typescript",
 							},
 						];
 					}
@@ -2296,6 +2308,7 @@ describe("lsp_diagnostics tool", () => {
 									end: { line: 0, character: 1 },
 								},
 								source: "ast-grep",
+								serverId: "ast-grep",
 							},
 						];
 					}

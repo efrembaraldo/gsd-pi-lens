@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
 const TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md";
 const TEMPLATE_FILE = resolve(
@@ -119,6 +120,191 @@ function hasRealContent(lines, section, placeholders) {
 			!templateLines.has(value)
 		);
 	});
+}
+
+function blankCommentsAndStrings(source) {
+	let state = "code";
+	let result = "";
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index];
+		const next = source[index + 1];
+		if (state === "line-comment") {
+			result += char === "\n" ? "\n" : " ";
+			if (char === "\n") state = "code";
+			continue;
+		}
+		if (state === "block-comment") {
+			result += char === "\n" ? "\n" : " ";
+			if (char === "*" && next === "/") {
+				result += " ";
+				index += 1;
+				state = "code";
+			}
+			continue;
+		}
+		if (state !== "code") {
+			result += char === "\n" ? "\n" : " ";
+			if (char === "\\") {
+				if (next === "\n") result += "\n";
+				else {
+					result += " ";
+					index += 1;
+				}
+			} else if (char === state) state = "code";
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			result += "  ";
+			index += 1;
+			state = "line-comment";
+		} else if (char === "/" && next === "*") {
+			result += "  ";
+			index += 1;
+			state = "block-comment";
+		} else if (char === "'" || char === '"' || char === "`") {
+			result += " ";
+			state = char;
+		} else result += char;
+	}
+	return result;
+}
+
+function isRuntimeObservabilityPath(name) {
+	return (
+		/^(?:clients|tools|mcp)\//.test(name) &&
+		!/(?:^|\/)__tests__(?:\/|$)/.test(name) &&
+		!/\.test\.[^/]+$/.test(name) &&
+		!/\.d\.(?:ts|mts)$/.test(name)
+	);
+}
+
+function runtimeObservabilityFromDiff(diff = "") {
+	const records = new Set();
+	let runtime = false;
+	let added = "";
+	let currentRuntime = false;
+	for (const line of String(diff).split(/\r?\n/)) {
+		const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+		if (header) {
+			currentRuntime = [header[1], header[2]].some(isRuntimeObservabilityPath);
+			runtime ||= currentRuntime;
+			continue;
+		}
+		if (currentRuntime && /^\+(?!\+\+)/.test(line))
+			added += `${line.slice(1)}\n`;
+	}
+	if (!runtime) return { runtime: false, records, failurePath: false };
+	const blanked = blankCommentsAndStrings(added);
+	return {
+		runtime: true,
+		records: recordLiteralsFromRuntimeSource(added),
+		failurePath:
+			/\bcatch\b|\brecordDegradationOnce\b|\bthrow\b|\breturn\s+null\b/.test(
+				blanked,
+			),
+	};
+}
+
+function observabilitySectionContent(body, lines, headings) {
+	const heading = headings.find((candidate) =>
+		hasSection(candidate, "observability"),
+	);
+	if (!heading) return "";
+	const next = headings.find(
+		(candidate) =>
+			candidate.index > heading.index && candidate.level <= heading.level,
+	);
+	return lines.slice(heading.index + 1, next?.index ?? lines.length).join("\n");
+}
+
+function recordLiteralsFromRuntimeSource(source) {
+	return new Set(
+		recordLocationsFromRuntimeSource(source).map(({ value }) => value),
+	);
+}
+
+function recordLocationsFromRuntimeSource(source) {
+	const records = [];
+	const blanked = blankCommentsAndStrings(source);
+	const calls = [
+		["recordDegradationOnce", ["kind"]],
+		["incrementDegradationCount", ["kind"]],
+		["logExtension", ["subsystem", "message"]],
+		["logLatency", ["phase", "event", "eventName", "name"]],
+		["emitBounded", ["kind", "event", "eventName"]],
+	];
+	for (const [name, fields] of calls) {
+		const callPattern = new RegExp(`${name}\\s*\\(\\s*\\{[\\s\\S]*?\\}`, "g");
+		for (const match of blanked.matchAll(callPattern)) {
+			const original = source.slice(match.index, match.index + match[0].length);
+			for (const field of fields) {
+				const fieldMatch = new RegExp(`${field}\\s*:\\s*["']([^"']+)["']`).exec(
+					original,
+				);
+				const value = fieldMatch?.[1];
+				if (value) {
+					const valueIndex =
+						match.index + fieldMatch.index + fieldMatch[0].indexOf(value);
+					records.push({
+						value,
+						line: source.slice(0, valueIndex).split("\n").length,
+					});
+				}
+			}
+		}
+	}
+	return records;
+}
+
+function lintRuntimeObservability(
+	body,
+	lines,
+	headings,
+	diff,
+	cwd = process.cwd(),
+) {
+	const observation = runtimeObservabilityFromDiff(diff);
+	if (!observation.runtime) return [];
+	const content = observabilitySectionContent(body, lines, headings);
+	if ([...observation.records].some((record) => content.includes(record)))
+		return [];
+	const existingRecord =
+		/covered by existing record `([^`]+)` at `([^`:]+):(\d+)`/.exec(content);
+	if (
+		existingRecord &&
+		!/(?:^|\/)\.\.(?:\/|$)/.test(existingRecord[2]) &&
+		isRuntimeObservabilityPath(existingRecord[2])
+	) {
+		const [, kind, file, lineText] = existingRecord;
+		const lineNumber = Number(lineText);
+		try {
+			const source = readFileSync(
+				isAbsolute(file) ? file : resolve(cwd, file),
+				"utf8",
+			);
+			if (
+				recordLocationsFromRuntimeSource(source).some(
+					({ value, line }) =>
+						value === kind && Math.abs(line - lineNumber) <= 20,
+				)
+			)
+				return [];
+		} catch {
+			// Fall through to the existing strict error.
+		}
+	}
+	if (
+		!observation.failurePath &&
+		content.includes("No new failure path; no record added.")
+	)
+		return [];
+	if (observation.failurePath)
+		return [
+			`PR body Observability must name a record literal from the runtime diff${observation.records.size ? ` (${[...observation.records].join(", ")})` : ""}; "No new failure path; no record added." is not valid when the added lines contain a failure path.`,
+		];
+	return [
+		'PR body Observability must name a record literal present in the runtime diff, or state exactly "No new failure path; no record added.".',
+	];
 }
 
 /** Detect the high-confidence shape produced when a worker flattens a body. */
@@ -354,6 +540,16 @@ export function lintPrBody(body = "", options = {}) {
 				sectionMessage(name, "has no content before the next heading"),
 			);
 	}
+	if (options.diff)
+		errors.push(
+			...lintRuntimeObservability(
+				body,
+				lines,
+				headings,
+				options.diff,
+				options.cwd,
+			),
+		);
 	return { valid: errors.length === 0, errors };
 }
 
@@ -369,7 +565,7 @@ export function lintPrBody(body = "", options = {}) {
  *
  * @param {{ number: number, body?: string | null }} payloadPr
  * @param {typeof fetch} fetchImpl
- * @returns {Promise<{body: string, normalized: boolean}>}
+ * @returns {Promise<{body: string, normalized: boolean, title: string | undefined}>}
  */
 export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const token = process.env.GITHUB_TOKEN;
@@ -393,7 +589,10 @@ export async function fetchLivePrBody(payloadPr, fetchImpl) {
 	const data = await response.json();
 	if (data.body !== null && typeof data.body !== "string")
 		throw new Error("GitHub API returned no body");
-	return normalizePrBodyForChecking(data.body ?? "", payloadPr.number);
+	return {
+		...normalizePrBodyForChecking(data.body ?? "", payloadPr.number),
+		title: data.title,
+	};
 }
 
 export async function resolveLivePrBody(
@@ -485,7 +684,18 @@ export async function lintPullRequestEvent(
 	const { body, normalized } = await resolveLivePrBody(pullRequest, fetchImpl);
 	const requireTestAssessment =
 		(await resolveTouchesTests(pullRequest, fetchImpl)) === true;
-	const result = lintPrBody(body, { requireTestAssessment });
+	let diff = "";
+	try {
+		diff = localDiff();
+	} catch (error) {
+		if (process.env.GITHUB_ACTIONS) {
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(`diff unavailable: ${reason}`);
+		}
+		// Local callers may not have an upstream ref. Preserve structural lint
+		// outside CI rather than inventing a runtime scope.
+	}
+	const result = lintPrBody(body, { requireTestAssessment, diff });
 	if (result.valid) {
 		console.log(`PR body OK: ${pullRequest.number}`);
 		return { valid: true, repaired: normalized };
@@ -494,13 +704,78 @@ export async function lintPullRequestEvent(
 	return { valid: false, repaired: false };
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	lintPullRequestEvent()
-		.then((result) => {
-			if (!result.valid) process.exitCode = 1;
-		})
-		.catch((error) => {
-			console.error(error instanceof Error ? error.message : error);
-			process.exitCode = 1;
+export function localDiff(cwd = process.cwd(), git = gitExecFileSync) {
+	return git(["diff", "--unified=0", "--no-color", "origin/master...HEAD"], {
+		cwd,
+		encoding: "utf8",
+	});
+}
+
+export function localTouchesTests(cwd = process.cwd(), git = gitExecFileSync) {
+	let names;
+	try {
+		names = git(["diff", "--name-only", "origin/master...HEAD"], {
+			cwd,
+			encoding: "utf8",
 		});
+	} catch {
+		names = git(["diff", "--name-only", "HEAD~1"], {
+			cwd,
+			encoding: "utf8",
+		});
+	}
+	return names.split(/\r?\n/).some((name) => name.startsWith("tests/"));
+}
+
+export function lintLocalPrBody(
+	body,
+	cwd = process.cwd(),
+	git = gitExecFileSync,
+) {
+	let diff;
+	try {
+		diff = localDiff(cwd, git);
+	} catch {
+		// A local preflight must use the same range as CI. If the caller has no
+		// upstream ref, retain structural lint rather than inventing scope.
+		diff = "";
+	}
+	return lintPrBody(body, {
+		requireTestAssessment: localTouchesTests(cwd, git),
+		diff,
+		cwd,
+	});
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+	// Local contract: --lint-local <body-file> remains the preflight form from
+	// #2796. The equivalent --body <body-file> --title <title-file> form keeps
+	// title validation in check-pr-title.mjs while accepting preflight's inputs.
+	const bodyIndex = process.argv.indexOf("--body");
+	const titleIndex = process.argv.indexOf("--title");
+	if (bodyIndex !== -1) {
+		const bodyPath = process.argv[bodyIndex + 1];
+		if (!bodyPath) throw new Error("--body requires a file path");
+		// --title is accepted for preflight parity. Title validation belongs to
+		// check-pr-title.mjs, but preflight passes both local input files.
+		if (titleIndex !== -1 && !process.argv[titleIndex + 1])
+			throw new Error("--title requires a file path");
+		const result = lintLocalPrBody(readFileSync(bodyPath, "utf8"));
+		for (const error of result.errors) console.error(error);
+		process.exitCode = result.valid ? 0 : 1;
+	} else if (process.argv[2] === "--lint-local") {
+		const bodyPath = process.argv[3];
+		if (!bodyPath) throw new Error("--lint-local requires a file path");
+		const result = lintLocalPrBody(readFileSync(bodyPath, "utf8"));
+		for (const error of result.errors) console.error(error);
+		process.exitCode = result.valid ? 0 : 1;
+	} else
+		lintPullRequestEvent()
+			.then((result) => {
+				if (!result.valid) process.exitCode = 1;
+			})
+			.catch((error) => {
+				console.error(error instanceof Error ? error.message : error);
+				process.exitCode = 1;
+			});
 }

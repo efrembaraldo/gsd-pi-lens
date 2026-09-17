@@ -1,9 +1,25 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it, afterEach, vi } from "vitest";
+// flake-shape: real-process-spawn — the exact local CLI and shallow checkout are the subject; an in-process call cannot prove either command boundary.
+import { execFileSync } from "node:child_process";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
+import {
+	gitExecFileSync,
+	gitExecSync,
+} from "../../scripts/lib/git-fixture-env.mjs";
 import {
 	detectEscapedNewlineBody,
 	detectFlattenedBody,
 	lintPullRequestEvent,
+	lintLocalPrBody,
+	localDiff,
 	lintPrBody,
 	repairEscapedNewlineBody,
 	repairFlattenedBody,
@@ -12,6 +28,32 @@ import {
 } from "../../scripts/check-pr-body.mjs";
 
 const body = `Summary\nOpening context.\n\n## Tests\nTargeted tests pass.\n\n## Blast radius\nNo runtime module touched.\n\n## Class sweep\nWhole-tree grep completed.\n\n## Observability\nThe advisory check run is the record.`;
+const repositoryRoot = process.cwd();
+type MergedRuntimeRecord = { name: string; kind: string; diff: string };
+const mergedRuntimeRecords = JSON.parse(
+	readFileSync(
+		join(
+			repositoryRoot,
+			"tests",
+			"fixtures",
+			"ci-pr-bodies",
+			"merged-runtime-records.json",
+		),
+		"utf8",
+	),
+) as MergedRuntimeRecord[];
+// Regenerated from `gh pr diff 2860`, `gh pr diff 2823`, and `gh pr diff 2846`;
+// the snippets retain the real runtime paths and record literals from those diffs.
+
+function fetchForEvent(bodyText: string, files: unknown) {
+	return vi.fn().mockImplementation(async (url: string | URL | Request) => {
+		if (String(url).includes("/files")) {
+			if (files instanceof Error) throw files;
+			return new Response(JSON.stringify(files), { status: 200 });
+		}
+		return new Response(JSON.stringify({ body: bodyText }), { status: 200 });
+	});
+}
 const flattenedBody =
 	"## Summary Await the first lifecycle run's asynchronous word-index snapshot promotion before reseeding the current-format snapshot for the fallback run. ## Tests - Native master flake justification for the count barrier: 2/10 forced runs reproduced the promotion race. - Fixed lifecycle test: 5/5 tests passed. ### Test assessment - tests/clients/word-index-lifecycle.test.ts uniquely pins the ordering guard. ## Blast radius This change is test-only. ## Class sweep The async-persist lifecycle race is fully covered. ## Observability The test observes existing project snapshot records.";
 const multiRoundFlattenedBody =
@@ -21,6 +63,14 @@ const motivatingFlattenedBodies = [
 	"## Summary Fixes #2104 by making the stale-open-issues detector prove exhaustion for the open-issue population. If the safety bound is reached while a full page remains, the detector throws instead of interpreting a partial population. ## Tests - tests/scripts/stale-open-issues.test.ts adds a page-aware regression. - F1 mutation red after dropping the exhaustive flag. - Green targeted run: 20 tests passed. ### Test assessment - stale-open-issues.test.ts uniquely pins exhaustive pagination and truncation disclosure. ## Blast radius The scheduled stale-open-issues detector and its pagination helper. ## Class sweep Bounded API reads classify truncation before interpreting results. ## Observability Successful comments include the scanned population; a bound hit fails the workflow.",
 	flattenedBody,
 ].map((candidate) => candidate.replaceAll("\\n", " "));
+
+function createOriginMasterFixture() {
+	const directory = mkdtempSync(join(repositoryRoot, ".tmp-pr-body-origin-"));
+	gitExecSync(
+		`git init --quiet --initial-branch=main '${directory}' && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet --allow-empty -m fixture-base && git -C '${directory}' update-ref refs/remotes/origin/master HEAD && printf 'fixture change\n' > '${directory}/fixture.md' && git -C '${directory}' add fixture.md && git -C '${directory}' -c user.name=pi-lens-test -c user.email=pi-lens-test@example.com commit --quiet -m fixture-head`,
+	);
+	return directory;
+}
 
 describe("flattened PR body repair", () => {
 	it("detects the clearly flattened real-world shape and repairs it", () => {
@@ -275,7 +325,18 @@ describe("escaped-newline PR body repair", () => {
 });
 
 describe("flattened body CI entrypoint", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
 	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
 
 	function stubApi() {
 		vi.stubEnv("GITHUB_TOKEN", "t");
@@ -405,6 +466,374 @@ describe("flattened body CI entrypoint", () => {
 });
 
 describe("PR body lint (#1844)", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("requires a diff record literal for runtime changes", () => {
+		const runtimeDiff = [
+			"diff --git a/clients/example.ts b/clients/example.ts",
+			"@@ -1,0 +2,3 @@",
+			'+recordDegradationOnce({ kind: "runtime-example" });',
+		].join("\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"A runtime record is present.",
+			),
+			process.cwd(),
+			() => runtimeDiff,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("runtime-example");
+	});
+
+	it.each(mergedRuntimeRecords)(
+		"accepts the added-line record from merged runtime body %s",
+		({ name, kind, diff }) => {
+			expect(diff).toContain(kind);
+			const result = lintPrBody(
+				body.replace(
+					"The advisory check run is the record.",
+					`The bounded record is ${kind}.`,
+				),
+				{ diff },
+			);
+			expect(result, name).toEqual({ valid: true, errors: [] });
+		},
+	);
+
+	it("accepts an existing record named with its source location", () => {
+		const source = join(process.cwd(), "clients", "existing-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "tool-cwd-resolution" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/existing-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(true);
+	});
+
+	it("rejects an existing-record claim pointing to a test file", () => {
+		const source = join(process.cwd(), "tests", "existing-record.test.ts");
+		mkdirSync(join(process.cwd(), "tests"), { recursive: true });
+		writeFileSync(source, 'recordDegradationOnce({ kind: "test-record" });\n');
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `test-record` at `tests/existing-record.test.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result).toEqual({
+			valid: false,
+			errors: [
+				'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+			],
+		});
+	});
+
+	it.each([
+		[
+			"tests file",
+			"runner-unavailable",
+			"clients/../tests/support/session-state-registry.ts:429",
+		],
+		["scripts probe", "script-probe", "clients/../scripts/probe-record.mjs:1"],
+	])(
+		"rejects a traversal existing-record citation to a %s",
+		(_name, kind, file) => {
+			// The probe lives under a throwaway root, never the live repository
+			// (#2865 v5 N1: a probe written into scripts/ reds lint-js on a hard kill).
+			const root = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-traversal-"));
+			mkdirSync(join(root, "scripts"));
+			const probe = join(root, "scripts", "probe-record.mjs");
+			writeFileSync(
+				probe,
+				'recordDegradationOnce({ kind: "script-probe" });\n',
+			);
+			try {
+				const result = lintLocalPrBody(
+					body.replace(
+						"The advisory check run is the record.",
+						`covered by existing record \`${kind}\` at \`${file}\``,
+					),
+					root,
+					() =>
+						"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+				);
+				expect(result).toEqual({
+					valid: false,
+					errors: [
+						'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+					],
+				});
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("rejects a stale existing-record citation without throwing", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `missing-record` at `clients/does-not-exist.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result).toEqual({
+			valid: false,
+			errors: [
+				'PR body Observability must name a record literal from the runtime diff; "No new failure path; no record added." is not valid when the added lines contain a failure path.',
+			],
+		});
+	});
+
+	it("does not accept a record literal from a touched runtime file without an explicit claim", () => {
+		const source = join(process.cwd(), "clients", "touched-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "touched-record" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"The touched-record is the record.",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/touched-record.ts b/clients/touched-record.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it.each([
+		["wrong literal", "missing-record", "1"],
+		["line too far", "tool-cwd-resolution", "100"],
+	])("rejects an invalid explicit record claim (%s)", (_case, kind, line) => {
+		const source = join(process.cwd(), "clients", "located-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "tool-cwd-resolution" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				`covered by existing record \`${kind}\` at \`clients/located-record.ts:${line}\``,
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects the right line when it contains the wrong record kind", () => {
+		const source = join(process.cwd(), "clients", "wrong-kind-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			'recordDegradationOnce({ kind: "different-record" });\n',
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/wrong-kind-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects a comment at the cited line when the real record is elsewhere", () => {
+		const source = join(process.cwd(), "clients", "comment-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(
+			source,
+			[
+				'// recordDegradationOnce({ kind: "comment-record" });',
+				...Array.from({ length: 498 }, () => "export const filler = 1;"),
+				'recordDegradationOnce({ kind: "comment-record" });',
+			].join("\n") + "\n",
+		);
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `comment-record` at `clients/comment-record.ts:1`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+	});
+
+	it("rejects an existing-record claim when the named file has no matching literal", () => {
+		const source = join(process.cwd(), "clients", "missing-record.ts");
+		mkdirSync(join(process.cwd(), "clients"), { recursive: true });
+		writeFileSync(source, "export const value = 1;\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"covered by existing record `tool-cwd-resolution` at `clients/missing-record.ts:42`",
+			),
+			process.cwd(),
+			() =>
+				"diff --git a/clients/new-path.ts b/clients/new-path.ts\n+catch (error) { resolveToolCwd(error); }",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("rejects a no-failure claim when the runtime diff adds a catch", () => {
+		const runtimeDiff = [
+			"diff --git a/clients/example.ts b/clients/example.ts",
+			"@@ -1,0 +2,3 @@",
+			"+try { run(); } catch (error) { report(error); }",
+		].join("\n");
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() => runtimeDiff,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("failure path");
+	});
+
+	it("does not apply the runtime rule to a docs-only diff", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"Documentation explains the change.",
+			),
+			process.cwd(),
+			() => "diff --git a/docs/example.md b/docs/example.md\n+docs",
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it.each([
+		["test file", "tools/example.test.ts"],
+		["__tests__ file", "tools/__tests__/example.ts"],
+		["declaration file", "tools/example.d.ts"],
+		["declaration module", "tools/example.d.mts"],
+	])("ignores runtime markers in a %s", (_name, file) => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() =>
+				`diff --git a/${file} b/${file}\n+try { run(); } catch (error) { report(error); }`,
+		);
+		expect(result).toEqual({ valid: true, errors: [] });
+	});
+
+	it.each([
+		["comment", '// recordDegradationOnce({ kind: "comment-record" });'],
+		[
+			"template literal",
+			'const text = `recordDegradationOnce({ kind: "template-record" });`;',
+		],
+	])("rejects an apparent record call in a %s", (_name, line) => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"The apparent discriminator is named: comment-record template-record.",
+			),
+			process.cwd(),
+			() => `diff --git a/clients/example.ts b/clients/example.ts\n+${line}`,
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("rejects a missing diff in CI from a real shallow clone", async () => {
+		const repository = process.cwd();
+		const shallow = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-shallow-"));
+		const previousCwd = process.cwd();
+		const previousActions = process.env.GITHUB_ACTIONS;
+		try {
+			vi.stubEnv("GITHUB_TOKEN", "test-token");
+			vi.stubEnv("GITHUB_API_URL", "https://api.example");
+			vi.stubEnv("GITHUB_REPOSITORY", "o/r");
+			gitExecFileSync(
+				["clone", "--depth", "1", `file://${repository}`, shallow],
+				{
+					stdio: "ignore",
+				},
+			);
+			process.chdir(shallow);
+			process.env.GITHUB_ACTIONS = "true";
+			await expect(
+				lintPullRequestEvent(fetchForEvent(body, []), {
+					pull_request: { number: 2807, body },
+				}),
+			).rejects.toThrow(/^diff unavailable:/);
+		} finally {
+			process.chdir(previousCwd);
+			if (previousActions === undefined) delete process.env.GITHUB_ACTIONS;
+			else process.env.GITHUB_ACTIONS = previousActions;
+			vi.unstubAllEnvs();
+			rmSync(shallow, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts the exact preflight --lint-local command and the title form", () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-lens-pr-body-cli-"));
+		const bodyPath = join(directory, "PR_BODY.md");
+		const titlePath = join(directory, "COMMIT_MSG.txt");
+		const checker = resolve(repositoryRoot, "scripts/check-pr-body.mjs");
+		try {
+			writeFileSync(
+				bodyPath,
+				`${body}\n\n### Test assessment\nThe targeted test covers the local CLI.`,
+			);
+			writeFileSync(
+				titlePath,
+				"ci(test): verify local body lint (refs #2807)\n",
+			);
+			for (const args of [
+				[checker, "--lint-local", bodyPath],
+				[checker, "--body", bodyPath, "--title", titlePath],
+			]) {
+				execFileSync(process.execPath, args, { cwd: fixtureCwd });
+			}
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts the required sections", () => {
 		expect(lintPrBody(body)).toEqual({ valid: true, errors: [] });
 	});
@@ -449,7 +878,10 @@ describe("PR body lint (#1844)", () => {
 	});
 
 	it("rejects the unfilled template", () => {
-		const template = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
+		const template = readFileSync(
+			resolve(repositoryRoot, ".github/PULL_REQUEST_TEMPLATE.md"),
+			"utf8",
+		);
 		expect(lintPrBody(template)).toMatchObject({ valid: false });
 	});
 
@@ -717,6 +1149,65 @@ ${placeholder}`,
 	});
 });
 
+describe("local lint parity", () => {
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
+
+	it("acquires a non-empty origin/master...HEAD diff in a full checkout", () => {
+		const diff = localDiff();
+		expect(diff).toContain("diff --git a/");
+	});
+
+	it("rejects a runtime-shaped body that names no record", () => {
+		const result = lintLocalPrBody(
+			body.replace(
+				"The advisory check run is the record.",
+				"No new failure path; no record added.",
+			),
+			process.cwd(),
+			() =>
+				'diff --git a/clients/example.ts b/clients/example.ts\n+throw new Error("boom");',
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("record literal");
+	});
+
+	it("requires Test assessment when the local diff touches tests/", () => {
+		const result = lintLocalPrBody(
+			body,
+			process.cwd(),
+			() => "tests/scripts/example.test.ts\n",
+		);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toContain("Test assessment");
+	});
+	it("falls back to HEAD~1 when the upstream range is unavailable", () => {
+		const ranges: string[][] = [];
+		const result = lintLocalPrBody(body, process.cwd(), (args) => {
+			ranges.push(args);
+			if (args.includes("origin/master...HEAD"))
+				throw new Error("missing upstream");
+			return "tests/scripts/example.test.ts\n";
+		});
+		expect(result.valid).toBe(false);
+		expect(ranges).toEqual([
+			["diff", "--unified=0", "--no-color", "origin/master...HEAD"],
+			["diff", "--name-only", "origin/master...HEAD"],
+			["diff", "--name-only", "HEAD~1"],
+		]);
+	});
+});
+
 describe("resolveTouchesTests", () => {
 	const payloadPr = { number: 7, body: "fallback" };
 
@@ -846,7 +1337,19 @@ describe("the event entrypoint consumes the tri-state (#2124 F2)", () => {
 ### Test assessment
 foo.test.ts uniquely pins the retry ladder.`;
 
+	let previousCwd: string;
+	let fixtureCwd: string;
+	beforeEach(() => {
+		previousCwd = process.cwd();
+		fixtureCwd = createOriginMasterFixture();
+		process.chdir(fixtureCwd);
+	});
+
 	afterEach(() => vi.unstubAllEnvs());
+	afterEach(() => {
+		process.chdir(previousCwd);
+		rmSync(fixtureCwd, { recursive: true, force: true });
+	});
 
 	function stubApi() {
 		vi.stubEnv("GITHUB_TOKEN", "t");

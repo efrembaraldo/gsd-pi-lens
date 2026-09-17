@@ -4,18 +4,8 @@
  *
  * Each matcher is exercised against a MINIMAL synthetic snippet that carries
  * just the semantic shape it looks for (never real vendor source — that's
- * what scripts/compat-contracts.mjs verifies live against either a real npm
- * install, for the third-party extensions, or the gsd-pi checkout, for the
- * @gsd SDK packages), plus a mutated/absent variant to confirm the matcher
- * actually fails closed.
- *
- * The four SDK contracts (2a-2d) now pin the @gsd re-scoped SDK. They read
- * from a gsd-pi checkout (the SDK is a monorepo workspace, absent from the
- * npm registry), so the fixtures mirror the real dist sources:
- *   - 2a  loader.js  (@gsd/pi-coding-agent)         `_moduleImporters` cache
- *   - 2b  agent-session-extensions.js (@gsd/agent-core) bindExtensions emit
- *   - 2c  agent-session-events.js (@gsd/agent-core)  invalidate call site
- *   - 2d  runner.js  (@gsd/pi-coding-agent)          stale-ctx message
+ * what scripts/compat-contracts.mjs verifies live against an npm install),
+ * plus a mutated/absent variant to confirm the matcher actually fails closed.
  */
 
 import { describe, expect, it } from "vitest";
@@ -27,18 +17,15 @@ import {
 	checkSdkInvalidateCalled,
 	checkSdkStaleCtxMessage,
 	checkTintinwebInProcessBind,
-	runAllContractChecks,
 } from "../../scripts/lib/compat-contracts.mjs";
 
 describe("checkNicobailonChildEnv", () => {
 	const GOOD = `
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
-export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
-export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 env[SUBAGENT_CHILD_ENV] = "1";
 `;
 
-	it("passes when the child flag is set and both identity consts exist", () => {
+	it("passes when the child flag is set", () => {
 		const result = checkNicobailonChildEnv(GOOD);
 		expect(result.pass).toBe(true);
 	});
@@ -50,14 +37,40 @@ env[SUBAGENT_CHILD_ENV] = "1";
 		expect(result.detail).toContain("PI_SUBAGENT_CHILD");
 	});
 
-	it("fails when the run-id const is missing", () => {
-		const noRunId = GOOD.replace(
-			'export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";',
+	it("fails when the const definition is missing (assignment alone isn't enough)", () => {
+		const noConst = GOOD.replace(
+			'export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";',
 			"",
 		);
-		const result = checkNicobailonChildEnv(noRunId);
+		const result = checkNicobailonChildEnv(noConst);
 		expect(result.pass).toBe(false);
-		expect(result.detail).toContain("PI_SUBAGENT_RUN_ID");
+	});
+
+	// #2581/#2680 F4: pi-subagents@0.65.0's native-AgentSession rewrite
+	// removed PI_SUBAGENT_RUN_ID / PI_SUBAGENT_CHILD_AGENT from the whole
+	// package AND split the const definition and the assignment across two
+	// files (child-runtime-config.ts + subagent-runner.ts) that used to be
+	// co-located in one pi-args.ts. This fixture reproduces that REAL
+	// 0.66.0-shaped concatenation (what the orchestrator's
+	// locateContractSources actually hands the check, not the single-file
+	// GOOD snippet above) so this case has its own signature — re-adding
+	// the run-id requirement would red this AND the plain GOOD case above;
+	// a regression that only broke cross-file concatenation would red only
+	// this one.
+	it("passes against a real 0.66.0-shaped concatenation (const + assignment in different files, no identity consts)", () => {
+		const constantsFile = `
+export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
+export const SUBAGENT_PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
+`;
+		const assignmentFile = `
+import { SUBAGENT_CHILD_ENV } from "../shared/child-runtime-config.ts";
+process.env[SUBAGENT_CHILD_ENV] = "1";
+`;
+		const concatenated = `${constantsFile}\n${assignmentFile}`;
+		expect(concatenated).not.toContain("PI_SUBAGENT_RUN_ID");
+		expect(concatenated).not.toContain("PI_SUBAGENT_CHILD_AGENT");
+		const result = checkNicobailonChildEnv(concatenated);
+		expect(result.pass).toBe(true);
 	});
 
 	it("fails on an unrelated source", () => {
@@ -115,96 +128,54 @@ subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
 });
 
 describe("checkSdkExtensionCache", () => {
-	// 2a — @gsd/pi-coding-agent dist/core/extensions/loader.js: the
-	// module-scope `_moduleImporters` Map cache consulted via get/set. This
-	// (formely `extensionCache`) is what makes an in-process bindExtensions()
-	// reuse pi-lens's own module-scope singletons instead of a fresh isolated
-	// instance.
-	const GOOD = `
-const _moduleImporters = new Map();
-function getModuleImporter(parentModuleUrl) {
-    let importer = _moduleImporters.get(parentModuleUrl);
-    if (!importer) {
-        importer = createJiti(parentModuleUrl, { moduleCache: true });
-        _moduleImporters.set(parentModuleUrl, importer);
-    }
-    return importer;
-}
-`;
-
-	it("passes when the module-scope Map cache exists AND is consulted via get/set", () => {
-		const result = checkSdkExtensionCache(GOOD);
+	it("passes when the process-global cache Map exists", () => {
+		const result = checkSdkExtensionCache("const extensionCache = new Map();");
 		expect(result.pass).toBe(true);
 	});
 
 	it("fails when the cache is a plain object, not a Map", () => {
-		const result = checkSdkExtensionCache(
-			"const _moduleImporters = {};\n_moduleImporters.get(k);\n_moduleImporters.set(k, v);",
-		);
+		const result = checkSdkExtensionCache("const extensionCache = {};");
 		expect(result.pass).toBe(false);
 	});
 
-	it("fails when the Map is declared but never consulted via get", () => {
-		const noGet = GOOD.replace("_moduleImporters.get(parentModuleUrl);", "");
-		const result = checkSdkExtensionCache(noGet);
-		expect(result.pass).toBe(false);
-	});
-
-	it("fails when the Map is declared but never consulted via set", () => {
-		const noSet = GOOD.replace(
-			"_moduleImporters.set(parentModuleUrl, importer);",
-			"",
-		);
-		const result = checkSdkExtensionCache(noSet);
-		expect(result.pass).toBe(false);
-	});
-
-	it("fails when there is no cache Map at all", () => {
+	it("fails when there is no extensionCache at all", () => {
 		const result = checkSdkExtensionCache("const somethingElse = new Map();");
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkBindExtensionsEmitsSessionStart", () => {
-	// 2b — @gsd/agent-core dist/session/agent-session-extensions.js: the
-	// real bindExtensions() body emits `this.host._sessionStartEvent`.
-	const GOOD = `
+	it("passes with an inline session_start emit inside bindExtensions", () => {
+		const source = `
     async bindExtensions(bindings) {
-        this.applyExtensionBindings(this.host._extensionRunner);
-        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
+        this._applyExtensionBindings(this._extensionRunner);
+        await this._extensionRunner.emit({ type: "session_start", reason: "startup" });
     }
 `;
-
-	it("passes when bindExtensions() unconditionally emits this.host._sessionStartEvent", () => {
-		const result = checkSdkBindExtensionsEmitsSessionStart(GOOD);
+		const result = checkSdkBindExtensionsEmitsSessionStart(source);
 		expect(result.pass).toBe(true);
 	});
 
-	it("passes with extra statements between the emit and the closing brace", () => {
-		const withTail = `
-    async bindExtensions(bindings) {
-        this.applyExtensionBindings(this.host._extensionRunner);
-        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
-        await this.extendResourcesFromExtensions("startup");
+	it("passes with the field-indirection form (_sessionStartEvent)", () => {
+		const source = `
+class AgentSession {
+    constructor(config) {
+        this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
     }
+    async bindExtensions(bindings) {
+        this._applyExtensionBindings(this._extensionRunner);
+        await this._extensionRunner.emit(this._sessionStartEvent);
+    }
+}
 `;
-		const result = checkSdkBindExtensionsEmitsSessionStart(withTail);
+		const result = checkSdkBindExtensionsEmitsSessionStart(source);
 		expect(result.pass).toBe(true);
-	});
-
-	it("fails when bindExtensions exists but emits a different event", () => {
-		const otherEmit = GOOD.replace(
-			"this.host._extensionRunner.emit(this.host._sessionStartEvent)",
-			"this.host._extensionRunner.emit({ type: \"other_event\" })",
-		);
-		const result = checkSdkBindExtensionsEmitsSessionStart(otherEmit);
-		expect(result.pass).toBe(false);
 	});
 
 	it("fails when bindExtensions exists but never emits", () => {
 		const source = `
     async bindExtensions(bindings) {
-        this.applyExtensionBindings(this.host._extensionRunner);
+        this._applyExtensionBindings(this._extensionRunner);
     }
 `;
 		const result = checkSdkBindExtensionsEmitsSessionStart(source);
@@ -217,46 +188,37 @@ describe("checkSdkBindExtensionsEmitsSessionStart", () => {
 		expect(result.detail).toContain("not found");
 	});
 
-	it("fails when the emit uses the legacy this._ (non-host) receiver", () => {
-		const legacyReceiver = GOOD.replaceAll("this.host.", "this.");
-		const result = checkSdkBindExtensionsEmitsSessionStart(legacyReceiver);
+	it("fails when the emitted event is not session_start-typed", () => {
+		const source = `
+    async bindExtensions(bindings) {
+        await this._extensionRunner.emit({ type: "other_event" });
+    }
+`;
+		const result = checkSdkBindExtensionsEmitsSessionStart(source);
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkInvalidateCalled", () => {
-	// 2c — @gsd/agent-core dist/session/agent-session-events.js: the dispose
-	// route calls this.host._extensionRunner.invalidate(...), which is what
-	// probeCtxActive() in session-lifecycle.ts depends on.
-	it("passes when invalidate() is called on the host extension runner", () => {
+	it("passes when invalidate() is called on the extension runner", () => {
 		const result = checkSdkInvalidateCalled(
-			'this.host._extensionRunner.invalidate("This extension ctx is stale after session replacement");',
+			'this._extensionRunner.invalidate("stale after session replacement");',
 		);
 		expect(result.pass).toBe(true);
 	});
 
-	it("fails when invalidate uses the legacy this._ (non-host) receiver", () => {
-		const result = checkSdkInvalidateCalled(
-			'this._extensionRunner.invalidate("stale after session replacement");',
-		);
-		expect(result.pass).toBe(false);
-	});
-
 	it("fails when invalidate is never called", () => {
 		const result = checkSdkInvalidateCalled(
-			"this.host._extensionRunner.emit(event);",
+			"this._extensionRunner.emit(event);",
 		);
 		expect(result.pass).toBe(false);
 	});
 });
 
 describe("checkSdkStaleCtxMessage", () => {
-	// 2d — @gsd/pi-coding-agent dist/core/extensions/runner.js: the default
-	// param of invalidate() (canonical source) carries the exact fragment
-	// probeCtxActive() matches on.
 	it("passes when the exact fragment is present", () => {
 		const result = checkSdkStaleCtxMessage(
-			'invalidate(message = "This extension ctx is stale after session replacement or reload.") {',
+			'invalidate("This extension ctx is stale after session replacement or reload.");',
 		);
 		expect(result.pass).toBe(true);
 	});
@@ -297,104 +259,9 @@ await session.bindExtensions({ onError });
 	});
 });
 
-// Shared SDK fixtures used by the runAllContractChecks aggregate tests.
-const SDK_LOADER_GOOD = `
-const _moduleImporters = new Map();
-function getModuleImporter(parentModuleUrl) {
-    let importer = _moduleImporters.get(parentModuleUrl);
-    if (!importer) {
-        importer = createJiti(parentModuleUrl, { moduleCache: true });
-        _moduleImporters.set(parentModuleUrl, importer);
-    }
-    return importer;
-}
-`;
-
-const SDK_RUNNER_GOOD = `invalidate(message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession().") { ... }`;
-
-const SDK_EXTENSIONS_GOOD = `
-    async bindExtensions(bindings) {
-        this.applyExtensionBindings(this.host._extensionRunner);
-        await this.host._extensionRunner.emit(this.host._sessionStartEvent);
-    }
-`;
-
-const SDK_EVENTS_GOOD = `
-class AgentSessionEvents {
-    dispose() {
-        this.host._extensionRunner.invalidate("This extension ctx is stale after session replacement");
-    }
-}
-`;
-
-describe("runAllContractChecks", () => {
-	it("aggregates all seven checks and reports allPass=false on any single failure", () => {
-		const inputs = {
-			nicobailonPiArgsSource: "export const X = 1;", // fails
-			avtcProcessRunnerSource: `
-if (agent.name) subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name;
-subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
-`,
-			sdkLoaderSource: SDK_LOADER_GOOD,
-			sdkRunnerSource: SDK_RUNNER_GOOD,
-			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
-			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
-			tintinwebAgentRunnerSource: `
-const loader = new DefaultResourceLoader({ cwd });
-await session.bindExtensions({});
-`,
-		};
-		const { results, allPass } = runAllContractChecks(inputs);
-		expect(results).toHaveLength(7);
-		expect(allPass).toBe(false);
-		const failed = results.filter((r) => !r.pass);
-		expect(failed.map((r) => r.id)).toEqual(["nicobailon.child-env"]);
-	});
-
-	it("reports allPass=true when every check passes", () => {
-		const inputs = {
-			nicobailonPiArgsSource: `
-export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
-export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
-export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
-env[SUBAGENT_CHILD_ENV] = "1";
-`,
-			avtcProcessRunnerSource: `
-if (agent.name) subagentEnv.PI_SUBAGENT_CHILD_AGENT = agent.name;
-subagentEnv.PI_SUBAGENT_PARENT_PID = String(process.pid);
-`,
-			sdkLoaderSource: SDK_LOADER_GOOD,
-			sdkRunnerSource: SDK_RUNNER_GOOD,
-			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
-			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
-			tintinwebAgentRunnerSource: `
-const loader = new DefaultResourceLoader({ cwd });
-await session.bindExtensions({});
-`,
-		};
-		const { allPass } = runAllContractChecks(inputs);
-		expect(allPass).toBe(true);
-	});
-
-	it("exposes the re-scoped @gsd package names on the SDK result rows", () => {
-		const { results } = runAllContractChecks({
-			nicobailonPiArgsSource: "export const X = 1;",
-			avtcProcessRunnerSource: "no",
-			sdkLoaderSource: SDK_LOADER_GOOD,
-			sdkRunnerSource: SDK_RUNNER_GOOD,
-			sdkAgentSessionExtensionsSource: SDK_EXTENSIONS_GOOD,
-			sdkAgentSessionEventsSource: SDK_EVENTS_GOOD,
-			tintinwebAgentRunnerSource: "no",
-		});
-		const sdkRows = results.filter((r) => r.id.startsWith("sdk."));
-		const byPackage = Object.fromEntries(
-			sdkRows.map((r) => [r.id, r.package]),
-		);
-		expect(byPackage["sdk.extension-cache"]).toBe("@gsd/pi-coding-agent");
-		expect(byPackage["sdk.bind-extensions-session-start"]).toBe(
-			"@gsd/agent-core",
-		);
-		expect(byPackage["sdk.invalidate-called"]).toBe("@gsd/agent-core");
-		expect(byPackage["sdk.stale-ctx-message"]).toBe("@gsd/pi-coding-agent");
-	});
-});
+// Aggregation across all seven contracts (formerly `runAllContractChecks`,
+// which only ever fed a resolved-source map nothing in production actually
+// built — #2680 F3) now lives at the seam that ships:
+// `resolveAndCheckContracts` in scripts/lib/compat-contract-resolution.mjs,
+// covered by tests/scripts/compat-contract-resolution.test.ts against a
+// real on-disk fixture (verified/drift/infra together).

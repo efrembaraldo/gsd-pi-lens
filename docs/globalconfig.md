@@ -18,6 +18,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--no-autofix` | `autofix.enabled` | `true` |
 | `--no-lens-context` | `contextInjection.enabled` | `true` |
 | `--lens-guard` | `guard.enabled` | `false` |
+| `--lens-checkout-guard` | `guard.sharedCheckout` | `false` |
 | `--immediate-format` | `format.mode` (`"immediate"`) | `"deferred"` |
 | `--lens-turn-summary` | `turnSummary.enabled` | `false` |
 | `--lens-actionable-warnings` | `actionableWarnings.enabled` | `false` |
@@ -27,8 +28,22 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-compact-tool-line` | `ui.compactToolLine` | `false` |
 | `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
+| `--no-knip` | `knip.enabled` | `true` |
+| `--no-jscpd` | `jscpd.enabled` | `true` |
+| `--no-madge` | `madge.enabled` | `true` |
+| `--no-gitleaks` | `gitleaks.enabled` | `true` |
+| `--no-govulncheck` | `govulncheck.enabled` | `true` |
+| `--no-dead-code` | `deadCode.enabled` | `true` |
+| `--no-complexity` | `complexity.enabled` | `true` |
 
-By default pi-lens registers six situational tools (the `ast_grep_*` family,
+## Startup controls
+
+| Configuration key | Default | Accepted values |
+| --- | --- | --- |
+| `startup.mode` | `full` | `quick`, `full`, or `minimal`; `PI_LENS_STARTUP_MODE` wins |
+| `startup.scans.enabled` | `true` | `true` or `false` |
+
+By default pi-lens registers five situational tools (the `ast_grep_*` family,
 `lsp_navigation`, `lens_diagnostic_mark`) inactive and exposes a small loader,
 `pi_lens_activate_tools`, that the model calls to activate the ones it needs.
 `--no-lazy-tools` turns that off: every pi-lens tool is active from the first
@@ -108,6 +123,15 @@ Turn subsystems off globally instead of retyping flags every session:
 ```
 
 `lens.enabled: false` starts every session with pi-lens off (the `--no-lens` equivalent); `/lens-toggle` still re-enables it for one session. `lsp.enabled: false` falls back to language-specific checkers such as pyright. `tests.enabled: false` skips the on-write test runner. `delta.enabled: false` reports every diagnostic rather than only ones introduced this turn. `opengrep.enabled: false` detaches the Opengrep security scanner. `readGuard.enabled: false` turns off the read-before-edit monitor. `guard.enabled: true` opts into the experimental commit/push blocker.
+
+The `tools.<name>.enabled` setting controls each model-facing tool. Valid names
+include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
+`lsp_navigation`, `lens_diagnostics`,
+`lens_diagnostic_mark`, `symbol_search`, `module_report`, `project_report`,
+`read_symbol`, `read_enclosing`, `effective_config`, `analyze`, `health`,
+`latency`, `project_scan`, and `rebuild`. The activation loader and MCP
+lifecycle tools `session_start`, `turn_end`, and `session_end` cannot be
+disabled.
 
 ## Project Config
 
@@ -248,6 +272,12 @@ Explicit override for the review graph's own file budget (#775), for monorepos t
 - Why the review graph tapers instead of scaling flatly like the other four budgets: its per-file cost (tree-sitter parse + import-fact extraction) is measurably higher than a directory-entry count or file-existence check, so an unbounded linear budget on a huge `maxProjectFiles` would risk a very slow cold build on the synchronous edit-hook path. See `clients/project-scale.ts`'s `taperedReviewGraphMaxFiles` doc comment for the exact shape and the measured per-file cost it's grounded in.
 
 ### Schema rules
+
+Session-start analyzer keys default to `true` and work in both the global
+config and `.pi-lens.json`. Set one to `false` to skip that analyzer; pi-lens
+records the disabled skip. `startup.mode` accepts `quick`, `full`, or
+`minimal`, and `startup.scans.enabled: false` disables background startup scans
+while leaving diagnostics and LSP active. `PI_LENS_STARTUP_MODE` still wins.
 
 - Unknown rule ids are ignored (forward-compat). Unrecognized **top-level** keys are logged once and then ignored — never fatal to the parse. The LSP namespaces a shared file legitimately carries (`servers`, `serverOverrides`, `disabledServers`, `warmFiles`) and `$schema` are tolerated silently; a user-level-only lens key placed here (e.g. `lsp`, `tests`, `delta`) is logged as "not honored at project scope"; anything else is logged as a likely typo. The raw parsed JSON is still exposed for forward-compat consumers regardless.
 - Every toggle key in the table above must be a boolean, and its containing section must be an object. A wrong type is logged once and the key is treated as absent, so the flag falls through to its default rather than the whole file being rejected.
