@@ -196,3 +196,59 @@ tests/native-ts7-live-*/
 
 # Probe hygiene home for tests and scripts (AGENTS.md "Probe hygiene"); never tracked.
 .probe-home/
+
+# >>> gsd-project-init >>>
+# The .gsd symlink points at an absolute path — machine-specific, never commit.
+.gsd
+.gsd-state
+.gsd-sessions
+# Runtime/ephemeral state inside .gsd-state/projects/<hash>/
+#.gsd-state/projects/*/activity/
+#.gsd-state/projects/*/agent/
+#.gsd-state/projects/*/audit/
+#.gsd-state/projects/*/audit/events.jsonl
+#.gsd-state/projects/*/auto.lock
+#.gsd-state/projects/*/completed-units*.json
+#.gsd-state/projects/*/doctor-history.jsonl
+#.gsd-state/projects/*/exec/
+#.gsd-state/projects/*/forensic/
+#.gsd-state/projects/*/graphs/
+#.gsd-state/projects/*/gsd.db
+#.gsd-state/projects/*/gsd.db-*
+#.gsd-state/projects/*/hook-state.json
+#.gsd-state/projects/*/journal/
+#.gsd-state/projects/*/metrics.json
+#.gsd-state/projects/*/milestones/**/continue.md
+#.gsd-state/projects/*/milestones/**/*-CONTINUE.md
+#.gsd-state/projects/*/notifications.jsonl
+#.gsd-state/projects/*/parallel/
+#.gsd-state/projects/*/quarantine/
+#.gsd-state/projects/*/reports/
+#.gsd-state/projects/*/runtime/
+#.gsd-state/projects/*/sessions/
+#.gsd-state/projects/*/state-manifest.json
+#.gsd-state/projects/*/STATE.md
+#.gsd-state/projects/*/uat/
+#.gsd-state/projects/*/worktrees/
+# <<< gsd-project-init <
+.gsd-sessions/
+
+# ── GSD baseline (auto-generated) ──
+.gsd-worktrees/
+.gsd-backups/
+.gsd-id
+.mcp.json
+.bg-shell/
+
+# #2250: .vscode/ and vendor/ ignore everything EXCEPT the two files
+# already git-tracked inside them -- a blanket dir-level rule prunes the
+# whole directory before any later negation is even considered, so the
+# `dir/*` + per-level negation form below is required, not `dir/` +
+# `!dir/file` (see git-scm.com/docs/gitignore, "It is not possible to
+# re-include a file if a parent directory of that file is excluded").
+.vscode/*
+!.vscode/settings.json
+vendor/*
+!vendor/grammars/
+vendor/grammars/*
+!vendor/grammars/tree-sitter-cue.wasm
