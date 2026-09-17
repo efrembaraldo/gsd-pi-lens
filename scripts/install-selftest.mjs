@@ -82,9 +82,15 @@ function hostProvidedMiss(err) {
 
 /** Import a module by URL and record whether its (eager) dep graph resolved. */
 async function probeImport(name, relPath) {
-	const url = new URL(
-		`file://${path.resolve(pkgRoot, relPath).replace(/\\/g, "/")}`,
-	);
+	let url;
+	try {
+		url = new URL(
+			`file://${path.resolve(pkgRoot, relPath).replace(/\\/g, "/")}`,
+		);
+	} catch {
+		// Trusted internal path; a malformed one is a bug — fail fast, loud.
+		throw new Error(`bad import URL for ${relPath}`);
+	}
 	try {
 		await import(url.href);
 		record(name, "resolve", true);
@@ -263,9 +269,15 @@ record("tree-sitter grammars", "asset", hasCoreGrammar, grammarDetail);
 // `loadSkillsFromDirInternal` walk (see that module's header for the exact
 // discovery rules and the two documented scope gaps).
 {
-	const pkgJson = JSON.parse(
-		fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8"),
-	);
+	let pkgJson;
+	try {
+		pkgJson = JSON.parse(
+			fs.readFileSync(path.join(pkgRoot, "package.json"), "utf8"),
+		);
+	} catch {
+		// Trusted own-manifest read; a corrupt package.json is a bug — fail fast.
+		throw new Error("unable to parse package.json");
+	}
 	const entries = pkgJson.pi?.skills ?? [];
 	if (entries.length === 0) {
 		record("pi.skills declared", "manifest", false, "pi.skills is empty");

@@ -120,9 +120,16 @@ describe("isCleanRun / isValidReport / decideAction (#2613 review F1)", () => {
 			"no-action",
 		],
 		["env vars missing (attack C)", missingEnvReport, "unknown"],
-	] as const)("%s -> %s", (_label, report, expected) => {
-		expect(decideAction(report)).toBe(expected);
-	});
+	] as const)(
+		"%s -> %s",
+		(
+			_label: string,
+			report: Parameters<typeof decideAction>[0],
+			expected: string,
+		) => {
+			expect(decideAction(report)).toBe(expected);
+		},
+	);
 
 	// Mutation-proof, dangerous direction (round-1's actual bug): "not
 	// hasDrift" is NOT a valid close condition -- reds every non-clean,

@@ -116,7 +116,7 @@ describe("release-QA baseline matrix parsing (#2606)", () => {
 		["mcp-turn-end", "#1605"],
 		["degradation-visible", "#1605"],
 		["mcp-lsp-navigation", "#1829"],
-	])("row %s cites umbrella %s", (id, umbrella) => {
+	])("row %s cites umbrella %s", (id: string, umbrella: string) => {
 		const { rows } = parseBaselineRows(baselineText());
 		const parsed = rows.find((r) => r.id === id);
 		expect(parsed, `row ${id} is missing from the matrix`).toBeDefined();
