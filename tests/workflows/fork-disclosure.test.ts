@@ -113,9 +113,9 @@ describe("README disclosure (S02)", () => {
 			"disclosure must name fork package '@efrembaraldo/gsd-pi-lens'",
 		).toMatch(/@efrembaraldo\/gsd-pi-lens/);
 
-		// Independent release line starting at 0.0.1.
-		expect(body, "disclosure must name initial release '0.0.1'").toMatch(
-			/0\.0\.1/,
+		// Independent release line starting at 0.1.0.
+		expect(body, "disclosure must name initial release '0.1.0'").toMatch(
+			/0\.1\.0/,
 		);
 
 		// Default branch pin: the fork's branch is 'master', not 'main'.
@@ -227,9 +227,9 @@ describe("CHANGELOG fork disclosure (S02)", () => {
 			"structural section must name the upstream history anchor '4.1.3'",
 		).toMatch(/4\.1\.3/);
 
-		// Independent fork release line starting at 0.0.1.
-		expect(body, "structural section must name fork release '0.0.1'").toMatch(
-			/0\.0\.1/,
+		// Independent fork release line starting at 0.1.0.
+		expect(body, "structural section must name fork release '0.1.0'").toMatch(
+			/0\.1\.0/,
 		);
 
 		// Fork package identity + host scope.

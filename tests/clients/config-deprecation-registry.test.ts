@@ -199,17 +199,22 @@ describe("deprecated config surface registry (#2418)", () => {
 
 	it("reads the last released version off the changelog, not package.json", () => {
 		expect(LAST_RELEASED_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
-		// Fork version model (S01/T06): the fork resets its own package.json to
-		// its release baseline (0.0.1) while CHANGELOG.md retains the full
-		// upstream history (newest shipped 4.1.3). So the changelog's newest
-		// released version is STRICTLY NEWER than the fork's package baseline —
-		// the reverse of the upstream "same number right after a release"
-		// relationship. The test must not silently start reading package.json as
-		// the last-released source: if a regression did, LAST_RELEASED_VERSION
-		// would collapse to 0.0.1 == PACKAGE_VERSION and this `> 0` would red.
+		// D016 (M003/S04/T01): the fork publishes its first release. From this
+		// bump onward, CHANGELOG and package.json are synchronized by definition
+		// — the release version is exactly PACKAGE_VERSION, so compareSemver
+		// returns 0, not > 0. The pre-bump fork model (S01/T06: package.json
+		// at 0.0.1 with CHANGELOG retaining upstream 4.1.x entries, so the
+		// changelog's newest was STRICTLY NEWER than the package baseline) no
+		// longer applies; the upstream "same number right after a release"
+		// relationship takes over. The regression-detection that previously
+		// lived in the `> 0` direction (a swap to read LAST_RELEASED_VERSION
+		// off package.json would collapse both args to PACKAGE_VERSION) now
+		// sits in the `toMatch` regex guard above plus the structural invariant
+		// that the last-released heading is a literal `## [x.y.z]` form in
+		// CHANGELOG.md.
 		expect(
 			compareSemver(LAST_RELEASED_VERSION, PACKAGE_VERSION),
-		).toBeGreaterThan(0);
+		).toBe(0);
 	});
 
 	it("points every row at a registered diagnostic code", () => {

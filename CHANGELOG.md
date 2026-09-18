@@ -4,7 +4,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ## Modifiche strutturali rispetto a pi-lens
 
-Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging from upstream release `4.1.3` (the last upstream release preserved verbatim in the history above). Independent fork release line starting at `0.0.1`, published on npm as `@efrembaraldo/gsd-pi-lens` under the host scope `@gsd/*`. Default branch: `master`. Dedicated CI pipeline and publish workflow on `master`; the publish job uses OIDC provenance (`id-token: write`, no `NPM_TOKEN`). Host type declarations are regenerated from a verified GSD checkout: `.d.ts` (and runtime `.js` where required) for `@gsd/pi-coding-agent` and `@gsd/pi-tui` are vendored, and the runtime closure (`@gsd/native`, `get-east-asian-width`, `marked`) is materialized into the package's dependency closure — both stages idempotent and re-run after every install. Fork-specific verification guards: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`.
+Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging from upstream release `4.1.3` (the last upstream release preserved verbatim in the history above). Independent fork release line starting at `0.1.0`, published on npm as `@efrembaraldo/gsd-pi-lens` under the host scope `@gsd/*`. Default branch: `master`. Dedicated CI pipeline and publish workflow on `master`; the publish job uses OIDC provenance (`id-token: write`, no `NPM_TOKEN`). Host type declarations are regenerated from a verified GSD checkout: `.d.ts` (and runtime `.js` where required) for `@gsd/pi-coding-agent` and `@gsd/pi-tui` are vendored, and the runtime closure (`@gsd/native`, `get-east-asian-width`, `marked`) is materialized into the package's dependency closure — both stages idempotent and re-run after every install. Fork-specific verification guards: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`.
 
 ## [Unreleased]
 
@@ -19,6 +19,12 @@ Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging f
 ### Fixed
 
 ### Security
+
+## [0.1.0] - 2026-09-18
+
+### Added
+
+- **Publish first public release of @efrembaraldo/gsd-pi-lens (`0.1.0`)** — Independent fork publishing its first release on the npm registry via OIDC Trusted Publishing. The pre-release candidate `0.1.0-rc.1` settles the 6-check pre-release gate locally before the publish dispatch, and the bump closes the fork CHANGELOG/package.json sync invariant that `tests/clients/config-deprecation-registry.test.ts` originally asserted as a divergence.
 
 ## [4.1.6] - 2026-09-10
 
