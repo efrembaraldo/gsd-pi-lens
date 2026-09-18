@@ -30,6 +30,8 @@ const KEPT_WORKFLOWS = new Set([
 	"parser-smoke.yml",
 	"osv-scan.yml",
 	"close-keyword-verification.yml",
+	"close-keywords.yml",
+	"mutation.yml",
 ]);
 
 type Workflow = { name?: string; on?: unknown };
