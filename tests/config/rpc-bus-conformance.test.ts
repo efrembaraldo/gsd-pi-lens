@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { repoRoot } from "../support/module-instance-scan.js";
 import {
 	assertNonEmptyScan,
+	escapeRegExp,
 	listSourceFiles,
 	relativePosix,
 	stripSource,
@@ -146,7 +147,7 @@ function busSubscriberFiles(
 		}
 		const eventArgument = `(?:["']${EVENT_DIAGNOSTICS}["']|["']${EVENT_FILES_TOUCHED}["']|${
 			[...bindings]
-				.map((binding) => binding.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+				.map((binding) => escapeRegExp(binding))
 				.join("|") || "(?!)"
 		})`;
 		return new RegExp(`\\.on\\s*\\(\\s*${eventArgument}(?=\\s*[,)])`).test(

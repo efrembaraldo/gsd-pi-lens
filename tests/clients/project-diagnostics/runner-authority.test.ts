@@ -25,6 +25,7 @@ import { JscpdClient } from "../../../clients/jscpd-client.js";
 import { KnipClient } from "../../../clients/knip-client.js";
 import { OpengrepClient } from "../../../clients/opengrep-client.js";
 import { TrivyClient } from "../../../clients/trivy-client.js";
+import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
 import { removeTempDirSync } from "../test-utils.js";
 import { _resetStateCacheForTests } from "../../../clients/diagnostic-dispositions.js";
@@ -493,6 +494,12 @@ describe("client results carry the analysed-this-root signal (#2154)", () => {
 			path.join(tmp, ".pi-lens.json"),
 			JSON.stringify({ trivy: { enabled: true } }),
 		);
+		// #2483: the project-config discovery cache tolerates a bounded
+		// staleness window after a config file first appears (a deliberate
+		// perf/complexity tradeoff, not a bug) — a second scan() of the SAME
+		// directory milliseconds later would otherwise still read the
+		// pre-config "not found" discovery result. Force a fresh read.
+		resetProjectLensConfigCache();
 		spawnMock.mockImplementation(
 			reportWriter("--output", JSON.stringify({ Results: [] })),
 		);

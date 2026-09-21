@@ -630,7 +630,7 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
  *  `wireRpcBusSubscriber` call starts from a clean slate. Pair with
  *  `_resetRpcCacheForTests` (`clients/runtime-config.ts`) so the env-memo
  *  knobs also reset. */
-export function _resetRpcPublishForTests(): void {
+export function resetRpcPublishSessionState(): void {
 	requestReceivedAt.clear();
 	lastWired = undefined;
 	moduleLiveEmitter.reset();

@@ -172,6 +172,7 @@ jobs:
         run: node scripts/check-changelog-fragments.mjs
 
   build:
+    name: Unit tests
     needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     steps:
@@ -425,6 +426,12 @@ jobs:
           mapfile -t FILES < "$RUNNER_TEMP/windows-vitest-files.txt"
           node_modules/.bin/vitest run "${FILES[@]}" --configLoader runner
 
+      # This lane is advisory (#2536): a Windows-specific regression must not
+      # block a PR on its own, since the primary gating lane runs on Ubuntu.
+      # Promote it to a required, gating check only after it has been green
+      # on 7 consecutive master/PR runs — the outcome recorded below is the
+      # input that decision reads, never a `continue-on-error` bypass of a
+      # real Windows finding.
       - name: Record Windows Vitest outcome
         if: always()
         shell: bash

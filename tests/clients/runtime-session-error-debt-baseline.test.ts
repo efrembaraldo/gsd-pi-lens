@@ -17,6 +17,7 @@
  */
 
 import { withResidentBootstrap } from "../support/bootstrap-access.js";
+import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -33,24 +34,29 @@ const safeSpawnMockHolder = vi.hoisted(() => ({
 }));
 
 vi.mock("../../clients/latency-logger.js", async (importActual) => ({
-	...(await importActual<typeof import("../../clients/latency-logger.js")>()),
+	...((await importActual()) as typeof import("../../clients/latency-logger.js")),
 	logLatency: (entry: LatencyEntry) => latencyEntries.push(entry),
 }));
 
-vi.mock("../../clients/lsp/config.js", () => ({
+vi.mock("../../clients/lsp/config.js", async (importActual) => ({
+	...((await importActual()) as typeof import("../../clients/lsp/config.js")),
 	loadLSPConfig: vi.fn().mockResolvedValue({}),
 	initLSPConfig: vi.fn().mockResolvedValue(undefined),
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
-	getLSPService: vi.fn(() => ({
-		touchFile: vi.fn().mockResolvedValue(undefined),
-		supportsLSP: () => false,
-	})),
+vi.mock("../../clients/lsp/index.js", async (importActual) => ({
+	...((await importActual()) as typeof import("../../clients/lsp/index.js")),
+	getLSPService: vi.fn(() =>
+		makeLspServiceDouble({
+			touchFile: vi.fn().mockResolvedValue(undefined),
+			supportsLSP: () => false,
+		}),
+	),
 }));
 
-vi.mock("../../clients/safe-spawn.js", () => ({
+vi.mock("../../clients/safe-spawn.js", async (importActual) => ({
+	...((await importActual()) as typeof import("../../clients/safe-spawn.js")),
 	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 1 })),
 	safeSpawnAsync: safeSpawnMockHolder.safeSpawnAsync,
 	resetSafeSpawnWindowsCommandCache: vi.fn(),
@@ -58,7 +64,8 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 const safeSpawnAsyncMock = safeSpawnMockHolder.safeSpawnAsync;
 
-vi.mock("../../clients/installer/index.js", () => ({
+vi.mock("../../clients/installer/index.js", async (importActual) => ({
+	...((await importActual()) as typeof import("../../clients/installer/index.js")),
 	ensureTool: vi.fn(async () => undefined),
 	resetResolvedPathCache: vi.fn(),
 	isSpawnableCommand: vi.fn(async () => false),

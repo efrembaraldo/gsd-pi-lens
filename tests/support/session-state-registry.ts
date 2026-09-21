@@ -997,6 +997,15 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"Same reason as the module graph: a cached workspace graph describes one revision of one tree. #2255 adds one memory-attribution companion on the same seam: _retainedGraphSites (WeakRefs to graphs retained outside the cache, cleared with it so a new session never samples the previous one's graphs).",
 	},
 	{
+		id: "rpc-publish:requestReceivedAt+lastWired",
+		module: "rpc-publish.ts",
+		state: "requestReceivedAt (per-token receive-timestamp map), lastWired",
+		policy: "session_start",
+		resetName: "resetRpcPublishSessionState",
+		reason:
+			"M003/S02 (v4.1.6 upstream merge) fork-only R009: the RPC pull-request/response surface's per-token receive-timestamp map enforces rpc.responseTtlMs, and lastWired tracks the current bus-subscription wiring. Both are durable for a SESSION: a stale token surviving into a new session could outlive its TTL window's real meaning, and rewiring the subscription without clearing lastWired would compare against the previous session's listener instead of arming clean.",
+	},
+	{
 		id: "runner-helpers:availabilityGeneration",
 		module: "dispatch/runners/utils/runner-helpers.ts",
 		state: "availabilityGeneration",
@@ -1652,6 +1661,10 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// BoundedLruCache, so this file's module-level bounded cache is counted.
 	"review-graph/tsconfig-paths.ts": 2,
 	"review-graph/workspace-modules.ts": 2,
+	// M003/S02 (v4.1.6 merge) fork-only R009: the one module-scope stateful
+	// symbol is requestReceivedAt (a Map). lastWired is a nullable reference,
+	// not a container the scan counts.
+	"rpc-publish.ts": 1,
 	"runtime-config.ts": 0,
 	// #2060: 3 -> 5 for GIT_INTEGRATION_SUBCOMMANDS and
 	// GIT_GLOBAL_OPTIONS_WITH_VALUE — command-shape vocabulary, not state.

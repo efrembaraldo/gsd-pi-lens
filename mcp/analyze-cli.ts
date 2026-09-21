@@ -72,12 +72,13 @@ function formatReport(result: McpAnalyzeResult, cwd: string): string {
 		lines.push(`  … ${result.diagnostics.length - 30} more`);
 	}
 	// #S03/T02: surface the LSP warm-up / type-check outcome honestly so a cold
-	// 0-diagnostic read never passes as clean. Three flavors, three messages —
+	// 0-diagnostic read never passes as clean. Four flavors, four messages —
 	// the remedies differ (start/restart the warm server for a fresh-timeout,
 	// retry the edited file for a transient warm-up failure, switch to warm
-	// mode for an opt-out skip). Keeping the messages distinct avoids the
-	// pre-T02 trap where every non-success collapsed to one "skipped" line
-	// that hid the real cause from the agent.
+	// mode for an opt-out skip, re-run once the deferred check has caught
+	// up). Keeping the messages distinct avoids the pre-T02 trap where every
+	// non-success collapsed to one "skipped" line that hid the real cause
+	// from the agent.
 	if (result.lsp) {
 		if (result.lsp.status === "warmup-timeout") {
 			lines.push(
@@ -90,6 +91,16 @@ function formatReport(result: McpAnalyzeResult, cwd: string): string {
 		} else if (result.lsp.status === "skipped") {
 			lines.push(
 				"  (LSP type-check skipped — run pilens_analyze on the warm MCP server for type errors)",
+			);
+		} else if (result.lsp.status === "deferred") {
+			// dispatch/types.ts's own DispatchOutcomeStatus includes "deferred"
+			// (lsp.ts can defer a check rather than fully skip it, e.g. a cold
+			// touch still catching up); status is typed as a loose `string`
+			// on McpAnalyzeResult["lsp"] specifically because it forwards
+			// lspRunner.status verbatim (analyze.ts), so this fourth real
+			// outcome reaching formatReport was never given its own line.
+			lines.push(
+				"  (LSP diagnostics were skipped or deferred — run pilens_analyze on the warm MCP server for type errors)",
 			);
 		}
 	}

@@ -450,6 +450,19 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"alone also exceeds turn_end's whole 3000ms budget.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-session.ts#059be7b9~4892fe42": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"error-debt-baseline's `npm test` spawn: opt-in and disabled " +
+			"by default (`error-debt-baseline` flag), already carries its " +
+			"own explicit 60_000ms timeout via safeSpawnAsync, and runs " +
+			"detached from session_start's own return via `runTask` " +
+			"(no outer await) — a session-generation change short-circuits " +
+			"it via `runtime.isCurrentSession` between spawns, so it never " +
+			"holds up anything else in the hook.",
+		owner: "#2523 slice 2",
+	},
 	"clients/runtime-session.ts#07098027~195e8353": {
 		family: "hook-await",
 		site: "session_start",
@@ -545,6 +558,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"has a spawn-level timeout at the leaf and none has a wall " +
 			"bound above it; together they are session_start's 5000ms " +
 			"budget many times over.",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-session.ts#60c9318b~225faacd": {
+		family: "hook-await",
+		site: "session_start",
+		reason:
+			"error-debt-baseline's `npm run build` spawn: same shape as " +
+			"the `npm test` spawn above it in source — opt-in, disabled " +
+			"by default, its own explicit 60_000ms safeSpawnAsync " +
+			"timeout, detached from session_start's return via `runTask`, " +
+			"and short-circuited by `runtime.isCurrentSession` on a " +
+			"session-generation change.",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-session.ts#79639cbb~7cf260f9": {

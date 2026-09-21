@@ -12,7 +12,7 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 
 ## Fork di pi-lens
 
-This repository is an independent fork of [apmantza/pi-lens](https://github.com/apmantza/pi-lens), published on npm as `@efrembaraldo/gsd-pi-lens` starting from release `0.0.1`. The host packages are republished under the `@gsd/*` scope. The fork's default branch is `master`, and it runs its own dedicated CI pipeline and publish workflow, separate from the upstream repository. For the full list of structural transformations, see the [structural changes relative to pi-lens](CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens) section in the changelog.
+This repository is an independent fork of [apmantza/pi-lens](https://github.com/apmantza/pi-lens), published on npm as `@efrembaraldo/gsd-pi-lens` starting from release `0.1.0`. The host packages are republished under the `@gsd/*` scope. The fork's default branch is `master`, and it runs its own dedicated CI pipeline and publish workflow, separate from the upstream repository. For the full list of structural transformations, see the [structural changes relative to pi-lens](CHANGELOG.md#modifiche-strutturali-rispetto-a-pi-lens) section in the changelog.
 
 ## What It Does
 

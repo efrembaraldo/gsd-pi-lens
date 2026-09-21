@@ -52,14 +52,34 @@ const CHANGELOG = fs.readFileSync(
  * review, S3).
  */
 function lastReleasedVersion(): string {
-	const versions = [...CHANGELOG.matchAll(/^##\s+\[(\d+\.\d+\.\d+)\]/gm)].map(
-		(match) => match[1],
-	);
-	if (versions.length === 0) throw new Error("CHANGELOG.md names no release");
-	return versions.reduce((newest, candidate) =>
-		compareSemver(candidate, newest) > 0 ? candidate : newest,
+	// The changelog holds two independent, non-comparable version lineages:
+	// the fork's own release line (0.x/1.x, at the top) and the preserved
+	// upstream history (3.x/4.x, archived verbatim below it, per README's
+	// fork-disclosure section). Taking the numeric-max across both would
+	// always pick an upstream entry (e.g. 4.1.6) over the fork's actual
+	// latest release, since upstream's numbering is unrelated and higher.
+	// Changelogs are newest-first by convention, so the first real release
+	// heading in document order is the fork's own most recent release.
+	const match = /^##\s+\[(\d+\.\d+\.\d+)\]/m.exec(CHANGELOG);
+	if (!match) throw new Error("CHANGELOG.md names no release");
+	return match[1];
+}
+
+// All release headings ever announced in CHANGELOG.md, across BOTH lineages
+// (fork's own 0.x/1.x line and the preserved upstream 3.x/4.x history). A
+// deprecatedSince value inherited from an upstream deprecation (e.g. "4.1.4")
+// is genuinely shipped — just shipped by upstream, before the fork's own
+// release line began — so "shipped" means "names a real heading here", not
+// "is numerically <= the fork's own latest version" (the two numbering
+// schemes aren't comparable at all).
+function allReleasedVersions(): Set<string> {
+	return new Set(
+		[...CHANGELOG.matchAll(/^##\s+\[(\d+\.\d+\.\d+)\]/gm)].map(
+			(match) => match[1],
+		),
 	);
 }
+const ALL_RELEASED_VERSIONS = allReleasedVersions();
 
 const LAST_RELEASED_VERSION = lastReleasedVersion();
 
@@ -181,9 +201,9 @@ describe("deprecated config surface registry (#2418)", () => {
 		for (const row of DEPRECATED_CONFIG_SURFACES) {
 			if (isAnnounced(released, row.surface)) {
 				expect(
-					compareSemver(row.deprecatedSince, LAST_RELEASED_VERSION),
-					`${row.surface} is announced in a shipped release, so deprecatedSince ${row.deprecatedSince} must be <= ${LAST_RELEASED_VERSION}`,
-				).toBeLessThanOrEqual(0);
+					ALL_RELEASED_VERSIONS.has(row.deprecatedSince),
+					`${row.surface} is announced in a shipped release, so deprecatedSince ${row.deprecatedSince} must name a real release heading in CHANGELOG.md (fork's own line or preserved upstream history)`,
+				).toBe(true);
 				continue;
 			}
 			expect(

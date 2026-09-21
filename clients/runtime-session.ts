@@ -16,6 +16,7 @@ import {
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
+import { resetRpcPublishSessionState } from "./rpc-publish.js";
 import { resetLazyInstallAttempts } from "./dispatch/runners/utils/lazy-installer.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import { resetObservedRunnerLatency } from "./dispatch/collect-later-tier.js";
@@ -2383,6 +2384,13 @@ export async function handleSessionStart(
 	// the session" is terminal for the process, and a repaired network never
 	// re-earns its `go install`.
 	resetInstallRetryLatches();
+	// R009: the RPC pull-request/response surface's per-token receive-timestamp
+	// map (used for rpc.responseTtlMs enforcement) and its bus-subscription
+	// wiring state are both durable for a SESSION, not the process. Left
+	// unreset, a stale token from a prior session could linger past its TTL
+	// window's real meaning, and re-wiring on a fresh session would compare
+	// against the previous session's subscription instead of arming clean.
+	resetRpcPublishSessionState();
 	// #1537: the lazy-install seam's hold (`gem install rubocop`, `rustup
 	// component add`) is durable for a SESSION. Its map is module-local, so the
 	// generation counter above does not reach it — same #1490/#1497 shape. It

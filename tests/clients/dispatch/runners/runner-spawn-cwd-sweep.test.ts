@@ -142,8 +142,8 @@ const POPULATION_FILES = [
  * one cwd decision they used to make 23 times over is now made once, inside
  * `probeToolAsync`, where this file admits it by name.
  */
-const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 130;
+const EXPECTED_FILES = 80;
+const EXPECTED_DIRECT_SITES = 132;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -195,6 +195,8 @@ const EXPECTED_WRAPPER_SITES = [
 	"clients/opengrep-client.ts:runScan",
 	"clients/pipeline.ts:tryEslintFix",
 	"clients/pipeline.ts:runAutofix",
+	"clients/runtime-session.ts:scheduleStartupScansWithClients",
+	"clients/runtime-session.ts:scheduleStartupScans",
 	"clients/trivy-client.ts:runScan",
 ] as const;
 const EXPECTED_WRAPPERS = [
@@ -225,6 +227,10 @@ const EXPECTED_WRAPPERS = [
  *   issue, and {@link WORKLIST_CEILING} can only ever be lowered.
  */
 const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
+	[
+		"clients/runtime-session.ts#scheduleStartupScans:d67682a3~dd092be9",
+		"passes analysisRoot positionally as scheduleStartupScansWithClients's own wrapper parameter, not a {cwd:} options shape the presence scan recognizes; the value is a real session-scoped project root, admitted for its own spawns below via ORIGIN_ADMISSION_ROWS",
+	],
 	[
 		"clients/child-unref.ts#spawnCollectStdoutResult:499d1fcc",
 		"forwards a caller-supplied SpawnOptions object unchanged; its process-snapshot caller supplies no cwd and its argv does not resolve project configuration",
@@ -411,6 +417,18 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	],
 ];
 const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
+	[
+		"clients/runtime-session.ts#scheduleStartupScansWithClients:e93fe198~5aba8c2d",
+		"error-debt-baseline (R006) npm-test spawn derives cwd from analysisRoot, scheduleStartupScansWithClients's own wrapper parameter — a session-scoped project root, not the per-file dispatch resolveToolCwd seam",
+	],
+	[
+		"clients/runtime-session.ts#scheduleStartupScansWithClients:6ba28166~5aba8c2d",
+		"error-debt-baseline (R006) npm-run-build spawn derives cwd from analysisRoot, scheduleStartupScansWithClients's own wrapper parameter — a session-scoped project root, not the per-file dispatch resolveToolCwd seam",
+	],
+	[
+		"clients/runtime-session.ts#handleSessionStart:063f5217~c1c4ea1b",
+		"scheduleStartupScans is invoked with analysisRoot, handleSessionStart's own session-scoped project root — the same wrapper-parameter derivation as the spawns it schedules, not the per-file dispatch resolveToolCwd seam",
+	],
 	[
 		"clients/safe-spawn.ts#safeSpawn:ad6fe3ed~0cd6d898",
 		"the synchronous safe-spawn path derives its cwd from its own compatibility options, not the dispatch resolveToolCwd seam",

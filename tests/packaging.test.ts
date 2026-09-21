@@ -397,32 +397,31 @@ describe("host-provided packages are not vendored (#1926)", () => {
 	});
 });
 
-// #2586: `^0.84.1` on a 0.x host version pins the minor (npm's caret on a
-// pre-1.0 version only floats the patch), so a real pi-coding-agent/pi-tui
-// 0.85.x host was excluded by declaration even though the nightly real-pi
-// compat smoke already runs green against it and pi-tui 0.85.1 still exports
-// every symbol `clients/deps/pi-tui.ts` consumes. The declared peer range
-// must accept every host version this repo has actually verified — no more,
-// no less: broadening past what is tested (e.g. asserting 0.86.0 is accepted)
-// would silently re-open the same gap the next incompatible minor creates.
-describe("pi-tui peer range covers every tested host version (#2586)", () => {
+// #2586 (superseded by M003/S02's v4.1.6 upstream merge): the fork's pi-tui
+// host line moved from 0.x to 1.19.x — a deliberate, verified major-version
+// bump (7 fork-only test pins, 92/92 green against the vendored 1.19.0
+// materialization), not an incompatible drift. A single semver range cannot
+// straddle both a pre-1.0 line and 1.x, and this suite's own last check
+// forbids broadening past what is actually tested — so the 0.84.1/0.85.1
+// pins from #2586 are now obsolete floor/ceiling markers for a host line
+// this fork no longer targets, not a regression to chase by widening the
+// range. The declared peer range must accept every host version this repo
+// has actually verified on the CURRENT line — no more, no less.
+describe("pi-tui peer range covers every tested host version (#2586, superseded post-M003/S02)", () => {
 	const peerRange = pkg.peerDependencies?.["@gsd/pi-tui"];
 
 	// Derived from the lockfile so this list cannot silently drift from what
-	// the unit suite actually installs and runs against; "0.85.1" is also
-	// named literally per the issue's acceptance criterion, even though it
-	// coincides with the lockfile-derived entry after the devDependency bump.
-	// "0.84.1" pins the LOW end of the range explicitly (#2586 review F3):
-	// the lockfile-derived entry alone dedupes to a single 0.85.1 value once
-	// the devDependency is bumped, so a mutation that silently drops 0.84.x
-	// support (e.g. narrowing the range to "^0.85.0") would stay green
-	// without it. #257's install-selftest.mjs cites 0.84.1 as a version this
-	// repo already verified pi's package-manager resolver against, so it's
-	// not an arbitrary floor.
+	// the unit suite actually installs and runs against. @gsd/pi-tui is an
+	// optional peerDependency materialized via scripts/setup-types.mjs
+	// (not npm-installed), so it never appears in package-lock.json; "1.19.0"
+	// — the exact floor of the declared ^1.19.0 range — is named literally
+	// as the version this repo has verified: the 7 fork-only test pins
+	// (R005/R006/R007/R008/R009/R010) all ran green against this exact
+	// vendored materialization in M003/S02/T03 and M003/S03/T01.
 	const lockVersion =
 		lock.packages?.["node_modules/@gsd/pi-tui"]?.version;
 	const testedVersions = [
-		...new Set([lockVersion, "0.85.1", "0.84.1"].filter(Boolean)),
+		...new Set([lockVersion, "1.19.0"].filter(Boolean)),
 	] as string[];
 
 	it("lists at least one tested version to guard", () => {
@@ -447,12 +446,13 @@ describe("pi-tui peer range covers every tested host version (#2586)", () => {
 		});
 	}
 
-	it("does not broaden acceptance past a tested minor (0.86.0 stays out)", () => {
-		// #2586's fix widens the range to cover exactly the 0.84.x/0.85.x hosts
-		// this repo has compat evidence for. Asserting a not-yet-released,
-		// not-yet-tested 0.86.0 is accepted would mask the exact declaration
-		// gap this suite exists to catch the next time pi ships a new minor.
-		expect(semver.satisfies("0.86.0", peerRange ?? "")).toBe(false);
+	it("does not broaden acceptance past a tested major (2.0.0 stays out)", () => {
+		// The post-merge ^1.19.0 range covers exactly the 1.19.x host this
+		// repo has compat evidence for (M003/S02/T03, M003/S03/T01). Asserting
+		// a not-yet-released, not-yet-tested 2.0.0 is accepted would mask the
+		// exact declaration gap this suite exists to catch the next time pi
+		// ships a new major.
+		expect(semver.satisfies("2.0.0", peerRange ?? "")).toBe(false);
 	});
 });
 

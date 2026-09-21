@@ -41,22 +41,17 @@ function hostEditDiffSource(): string {
 }
 
 // 0.85.1 extracted the BOM split/strip primitive out of edit-diff.js into a
-// shared utils module (edit-diff.js now imports `splitBom` from here instead
-// of inlining `content.startsWith(BOM)`). Read separately so the BOM
-// assertion below tracks wherever the host actually defines the primitive,
-// not wherever it happened to live when this guard was written.
-function hostTextUtilsSource(): string {
-	return fs.readFileSync(
-		path.join(hostPackageDir(), "dist/utils/text.js"),
-		"utf-8",
-	);
-}
+// shared utils module (`splitBom` in utils/text.js). 1.19.x (M003/S02's
+// upstream merge) folded it back into edit-diff.js directly, renamed to
+// `stripBom` — utils/text.js no longer exists in this host version. The
+// primitive's exact HOME has moved twice now; only its behavior (the BOM
+// code-point check) is what this guard actually needs to track.
 
 // Slice out ONE named top-level `export function <name>(...) { ... }`'s own
 // source, bounded by the next top-level `export function`/`export const`/EOF
 // -- so an assertion against the slice can't be satisfied by a SIBLING
-// declaration (e.g. a hypothetical `legacySplitBom` keeping the old literal
-// while the real `splitBom` drifts to something else). Good enough for this
+// declaration (e.g. a hypothetical `legacyStripBom` keeping the old literal
+// while the real `stripBom` drifts to something else). Good enough for this
 // file's flat, unminified shape; not a general JS parser.
 function sliceExportedFunction(source: string, name: string): string {
 	const startMarker = `export function ${name}(`;
@@ -137,24 +132,20 @@ describe("host-edit-normalize sync (host source drift guard)", () => {
 		expect(src).toContain("export function restoreLineEndings");
 	});
 
-	it("host still delegates BOM stripping to splitBom, and splitBom matches our vendored copy", () => {
-		// edit-diff.js no longer inlines the BOM check itself (0.85.1 extracted
-		// it into utils/text.js's `splitBom`) — assert the delegation still
-		// exists, so a future host version that inlines something DIFFERENT
-		// here (rather than keeping the shared primitive) still fails this
-		// guard, then assert the actual code-point check against wherever
-		// splitBom is now defined.
-		expect(src).toMatch(/import\s*\{[^}]*\bsplitBom\b[^}]*\}\s*from/);
-		expect(src).toContain("splitBom(");
-		// Scoped to splitBom's OWN body, not "anywhere in text.js": a sibling
-		// function (e.g. a hypothetical legacySplitBom) keeping the old
-		// literal while the REAL splitBom drifts to something else must NOT
-		// satisfy this assertion.
-		const splitBomBody = sliceExportedFunction(
-			hostTextUtilsSource(),
-			"splitBom",
-		);
-		expect(splitBomBody).toContain(`startsWith("${esc(HOST_BOM_CODE_POINT)}")`);
+	it("host still strips BOM via stripBom, and stripBom's own body matches our vendored copy", () => {
+		// 1.19.x folded the primitive back into edit-diff.js itself, renamed
+		// `splitBom` -> `stripBom` — assert it's still a real top-level
+		// export here (not re-inlined as a bare `content.startsWith(BOM)`,
+		// which would silently drop the shared primitive), then assert the
+		// actual code-point check against stripBom's own body.
+		expect(src).toContain("export function stripBom(");
+		expect(src).toContain("stripBom(");
+		// Scoped to stripBom's OWN body, not "anywhere in edit-diff.js": a
+		// sibling function (e.g. a hypothetical legacyStripBom) keeping the
+		// old literal while the REAL stripBom drifts to something else must
+		// NOT satisfy this assertion.
+		const stripBomBody = sliceExportedFunction(src, "stripBom");
+		expect(stripBomBody).toContain(`startsWith("${esc(HOST_BOM_CODE_POINT)}")`);
 	});
 
 	it("host match decision is still exact-then-fuzzy, counted in fuzzy space", () => {

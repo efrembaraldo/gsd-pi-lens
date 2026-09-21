@@ -6,6 +6,7 @@
 // F1).
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -58,22 +59,62 @@ describe("supply-host-provided-deps.mjs --install-args (#2586 review F1)", () =>
 
 	it("preserves a range's internal space as ONE token, not split further", () => {
 		// The regression this guards: a peer range containing a space (like the
-		// pi-tui OR-form range) must survive as a single argv entry once split
-		// on newlines — proving the delimiter choice, not just the count, is
-		// correct (a coincidental count match wouldn't catch a shuffled split).
-		const pkg = JSON.parse(
-			fs.readFileSync(path.join(root, "package.json"), "utf8"),
-		) as { peerDependencies?: Record<string, string> };
+		// pre-merge pi-tui OR-form range, #2586) must survive as a single argv
+		// entry once split on newlines — proving the delimiter choice, not just
+		// the count, is correct (a coincidental count match wouldn't catch a
+		// shuffled split). M003/S02's v4.1.6 upstream merge deliberately bumped
+		// @gsd/pi-tui's declared range to a clean "^1.19.0" (no space), so the
+		// REAL package.json no longer has a naturally-occurring space to prove
+		// this against — the guard now needs a synthetic fixture package.json,
+		// carrying an OR-form range shaped exactly like the one #2586 fixed, to
+		// keep exercising the real behavior this test exists to pin.
 		const tui = "@gsd/pi-tui";
-		const range = pkg.peerDependencies?.[tui];
-		expect(range, "peerDependencies must declare pi-tui").toBeTruthy();
+		const range = "^1.19.0 || ^2.0.0";
 		expect(
-			range?.includes(" "),
-			"this guard only proves something when the range actually contains a space; update the fixture range if this ever changes",
+			range.includes(" "),
+			"this guard only proves something when the fixture range actually contains a space",
 		).toBe(true);
 
-		const output = runInstallArgs();
-		const tokens = output.split("\n").filter((line) => line.length > 0);
-		expect(tokens).toContain(`${tui}@${range}`);
+		// The script resolves its OWN package.json by walking up from
+		// import.meta.url, not from the invoking process's cwd — so proving
+		// this against a synthetic range means copying the script (and the
+		// lib module it imports) into an isolated tree with a fixture
+		// package.json at the matching relative path, not just chdir'ing.
+		const tmpRoot = fs.mkdtempSync(
+			path.join(fs.realpathSync(os.tmpdir()), "supply-deps-"),
+		);
+		try {
+			fs.mkdirSync(path.join(tmpRoot, "scripts", "lib"), { recursive: true });
+			fs.copyFileSync(
+				scriptPath,
+				path.join(tmpRoot, "scripts", "supply-host-provided-deps.mjs"),
+			);
+			fs.copyFileSync(
+				path.join(root, "scripts", "lib", "host-provided-deps.mjs"),
+				path.join(tmpRoot, "scripts", "lib", "host-provided-deps.mjs"),
+			);
+			const realPkg = JSON.parse(
+				fs.readFileSync(path.join(root, "package.json"), "utf8"),
+			) as { peerDependencies?: Record<string, string> };
+			fs.writeFileSync(
+				path.join(tmpRoot, "package.json"),
+				JSON.stringify({
+					peerDependencies: { ...realPkg.peerDependencies, [tui]: range },
+				}),
+			);
+
+			const output = execFileSync(
+				process.execPath,
+				[
+					path.join(tmpRoot, "scripts", "supply-host-provided-deps.mjs"),
+					"--install-args",
+				],
+				{ cwd: tmpRoot, encoding: "utf8" },
+			);
+			const tokens = output.split("\n").filter((line) => line.length > 0);
+			expect(tokens).toContain(`${tui}@${range}`);
+		} finally {
+			fs.rmSync(tmpRoot, { recursive: true, force: true });
+		}
 	});
 });

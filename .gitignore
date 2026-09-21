@@ -118,6 +118,7 @@ migrate-*.js
 !docs/astplayground.md
 !docs/public-api-stability.md
 !docs/configuration.md
+!docs/release-gate.md
 !docs/release-qa-baseline.md
 
 # release-qa run artifacts (scripts/release-qa.mjs writes these into cwd)
@@ -252,3 +253,6 @@ vendor/*
 !vendor/grammars/
 vendor/grammars/*
 !vendor/grammars/tree-sitter-cue.wasm
+!vendor/pi-coding-agent/
+vendor/pi-coding-agent/*
+!vendor/pi-coding-agent/package.json

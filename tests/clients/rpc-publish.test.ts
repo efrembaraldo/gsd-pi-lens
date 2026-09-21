@@ -33,7 +33,7 @@ import type {
 import {
 	BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
 	BUS_RPC_REQUEST_FILES_TOUCHED_EVENT,
-	_resetRpcPublishForTests,
+	resetRpcPublishSessionState,
 	wireRpcBusSubscriber,
 	type BusEventsLike,
 	type GetDiagnosticsState,
@@ -104,14 +104,14 @@ function setupRpcTestEnv(opts: SetupOpts = {}): RpcTestEnv {
 beforeEach(() => {
 	vi.useFakeTimers();
 	vi.setSystemTime(0);
-	_resetRpcPublishForTests();
+	resetRpcPublishSessionState();
 	_resetRpcCacheForTests();
 	_resetBusPublishForTests();
 });
 
 afterEach(() => {
 	vi.useRealTimers();
-	_resetRpcPublishForTests();
+	resetRpcPublishSessionState();
 	_resetRpcCacheForTests();
 	_resetBusPublishForTests();
 });
