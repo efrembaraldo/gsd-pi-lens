@@ -72,6 +72,20 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # The @gsd host is not installable from a registry (workspace:* deps,
+      # 404), so the publish job clones the open-gsd/gsd-pi checkout and
+      # builds its SDK sources the same way ci.yml does. Without this step
+      # `scripts/setup-types.mjs` exits 1 because /tmp/gsd-pi has no built
+      # dist/ tree to copy from.
+      - name: Checkout + build gsd-pi SDK
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/open-gsd/gsd-pi.git /tmp/gsd-pi
+          cd /tmp/gsd-pi
+          corepack enable
+          pnpm install --no-audit --no-fund
+          pnpm run build:pi
+          echo "GSD_PI_CHECKOUT=/tmp/gsd-pi" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Restore host-provided TypeScript deps
