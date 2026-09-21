@@ -83,7 +83,7 @@ jobs:
           git clone --depth 1 https://github.com/open-gsd/gsd-pi.git /tmp/gsd-pi
           cd /tmp/gsd-pi
           corepack enable
-          pnpm install --no-audit --no-fund
+          pnpm install
           pnpm run build:pi
           echo "GSD_PI_CHECKOUT=/tmp/gsd-pi" >> "$GITHUB_ENV"
       - name: Install dependencies
