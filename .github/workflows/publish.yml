@@ -72,6 +72,18 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # actions/setup-node installs whatever npm ships bundled with the
+      # requested Node.js version (Node 22 currently bundles npm ~10.9.x),
+      # ignoring this repo's own packageManager pin unless corepack is
+      # separately enabled for npm. npm's OIDC Trusted Publishing (the
+      # identity exchange the configured Trusted Publisher on npmjs.com
+      # relies on) was only added in npm CLI 11.5.1 -- on an older CLI,
+      # `npm publish --provenance` still signs a Sigstore attestation (an
+      # older, unrelated capability) but the actual PUT carries no valid
+      # npm auth, so the registry 404s it as unauthorized rather than
+      # accepting it. Force the version this repo actually declares.
+      - name: Upgrade npm to the pinned Trusted-Publishing-capable version
+        run: npm install -g npm@11.18.0
       # The @gsd host is not installable from a registry (workspace:* deps,
       # 404), so the publish job clones the open-gsd/gsd-pi checkout and
       # builds its SDK sources the same way ci.yml does. Without this step
