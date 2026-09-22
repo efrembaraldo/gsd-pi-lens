@@ -1,6 +1,6 @@
 {
 	"name": "@efrembaraldo/gsd-pi-lens",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"type": "module",
 	"description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
 	"repository": {
@@ -139,7 +139,7 @@
 		"jiti": "^2.7.0",
 		"web-tree-sitter": "0.25.10"
 	},
-"devDependencies": {
+	"devDependencies": {
 		"@biomejs/biome": "^2.4.10",
 		"@stryker-mutator/core": "10.0.0",
 		"@taplo/cli": "0.7.0",
