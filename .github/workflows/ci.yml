@@ -228,6 +228,13 @@ jobs:
       # host-provided types must be restored AFTER the install, never before.
       - name: Restore host-provided @gsd types
         run: node scripts/setup-types.mjs
+      # `npm ci`'s own `prepare` lifecycle only runs `build:dist` (the bundled
+      # single-file build), never `tsc --project tsconfig.build.json` — so
+      # without this step no compiled .js sibling exists next to any .ts
+      # source, and the freshness guard below (tests/support/check-build-
+      # freshness.ts) fails the whole job before a single test runs.
+      - name: Build compiled clients
+        run: npm run build
       - name: Lint
         run: npm run lint
 
