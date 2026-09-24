@@ -41,7 +41,7 @@ jobs:
       - name: Check version is not already published
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          if npm view @efrembaraldo/gsd-pi-lens@${VERSION} version >/dev/null 2>&1; then
+          if npm view "@efrembaraldo/gsd-pi-lens@${VERSION}" version >/dev/null 2>&1; then
             echo "::error::Version ${VERSION} is already published on npm. Bump package.json to a new 0.0.N (cap 0.0.999)."
             exit 1
           fi

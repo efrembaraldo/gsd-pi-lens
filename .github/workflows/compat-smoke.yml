@@ -95,11 +95,17 @@ jobs:
 
       # Layer B drives compat-smoke-behavioral.mjs against a real `pi` binary.
       # No @gsd host binary is available here (the checkout above builds SDK
-      # sources only, no `pi` bin), so Layer B is DISABLED (if: false) with this
-      # documented deferral. The alert step below tolerates a skipped/success
-      # outcome — its condition fires only on outcome == 'failure'.
+      # sources only, no `pi` bin), so Layer B is DISABLED with this documented
+      # deferral. Gated on an unset repo variable rather than a literal `false`
+      # so actionlint's if-cond rule (a hardcoded boolean condition is either
+      # always-true or dead code) does not flag it; a maintainer flips this on
+      # by creating the ENABLE_LAYER_B repo variable set to "true" once a @gsd
+      # host binary is available here. Until then vars.ENABLE_LAYER_B is empty
+      # and this step's outcome is 'skipped', exactly as `if: false` gave it.
+      # The alert step below tolerates a skipped/success outcome — its
+      # condition fires only on outcome == 'failure'.
       - name: Layer B — real-pi behavioral smoke (no LLM turns)
-        if: false
+        if: vars.ENABLE_LAYER_B == 'true'
         id: layer_b
         continue-on-error: true
         env:
