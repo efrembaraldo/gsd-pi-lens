@@ -12,13 +12,25 @@ Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), diverging f
 
 ### Changed
 
+- **Declare `@opengsd/gsd-pi` as an optional peer dependency** — the host package the extension actually runs in is now listed next to the internal `@gsd/*` specifiers, so the npm metadata names the real prerequisite.
+
 ### Deprecated
 
 ### Removed
 
 ### Fixed
 
+- **Re-narrow the lazy tools after a gsd `newSession`** — gsd replaces the session in place (same `SessionManager`, the prior extension context is never invalidated, no `session_shutdown`), so the new `session_start` was classified `concurrent-secondary` and skipped the lazy-tool restore after the host re-activated every extension tool. The same `SessionManager` announcing a new session id is now a sequential replacement; a positively different root still declines (#2129).
+
+- **Run the real-host harness against `gsd`** — the harness spawns `gsd` with `--extension` and `--model scripted/harness`, translates `--no-lazy-tools` into the global config, polls the asynchronous pi-lens logs, and skips the `--no-tool` precedence scenario because gsd rejects extension CLI flags.
+
 ### Security
+
+## [0.1.1] - 2026-09-22
+
+### Fixed
+
+- **Publish through the OIDC Trusted Publishing workflow** — `publish.yml` upgrades the npm CLI to `11.18.0` before `npm publish`: the CLI bundled with Node 22 predates OIDC Trusted Publishing (npm `11.5.1`+), so the registry rejected the provenance-signed upload with `E404`. No runtime change against `0.1.0`.
 
 ## [0.1.0] - 2026-09-18
 
