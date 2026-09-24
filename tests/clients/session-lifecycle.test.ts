@@ -365,6 +365,53 @@ describe("decideSessionStart (orchestration helper used by index.ts)", () => {
 		expect(withUnknownId.runFullSessionStart).toBe(true);
 	});
 
+	it("SAME SessionManager with a new session id (gsd in-place newSession, prior ctx still active) -> sequential-replacement, runs full session start", () => {
+		// gsd keeps one ExtensionRunner + one SessionManager across
+		// AgentSession.newSession(): a fresh ctx per emit, the prior ctx never
+		// invalidated, a new id. Same manager = replaced, not a live sibling.
+		const manager = {};
+		decideSessionStart(
+			{ isIdle: () => false, sessionManager: manager },
+			"session-a",
+		);
+		const decision = decideSessionStart(
+			{ isIdle: () => false, sessionManager: manager },
+			"session-b",
+		);
+		expect(decision.classification).toBe("sequential-replacement");
+		expect(decision.runFullSessionStart).toBe(true);
+		expect(decision.secondaryCount).toBe(0);
+	});
+
+	it("DIFFERENT SessionManager instances with a live prior -> still concurrent-secondary (a real in-process sibling)", () => {
+		decideSessionStart(
+			{ isIdle: () => false, sessionManager: {} },
+			"session-a",
+		);
+		const decision = decideSessionStart(
+			{ isIdle: () => false, sessionManager: {} },
+			"session-b",
+		);
+		expect(decision.classification).toBe("concurrent-secondary");
+		expect(decision.runFullSessionStart).toBe(false);
+	});
+
+	it("SAME SessionManager never overrides positive evidence of a different root (#2129 decline untouched)", () => {
+		const manager = {};
+		decideSessionStart(
+			{ isIdle: () => false, sessionManager: manager },
+			"session-a",
+			"/repo/primary",
+		);
+		const decision = decideSessionStart(
+			{ isIdle: () => false, sessionManager: manager },
+			"session-b",
+			"/tmp/pi-agent-worktree",
+		);
+		expect(decision.classification).toBe("concurrent-secondary");
+		expect(decision.runFullSessionStart).toBe(false);
+	});
+
 	it("prior ctx confirmed stale -> sequential-replacement, runs full session start", () => {
 		registerPrimarySession(staleCtx(), "session-a");
 		const decision = decideSessionStart(activeCtx(), "session-b");

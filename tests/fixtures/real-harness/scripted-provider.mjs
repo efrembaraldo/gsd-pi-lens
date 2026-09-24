@@ -1,7 +1,9 @@
 import { readFileSync, appendFileSync } from "node:fs";
-import {
-	createAssistantMessageEventStream,
-} from "../../../node_modules/@gsd/pi-coding-agent/node_modules/@gsd/pi-ai/dist/index.js";
+// Bare specifier on purpose: gsd's extension loader aliases "@gsd/pi-ai" to the
+// host's own copy (packages/pi-coding-agent/src/core/extensions/loader.ts), so
+// the stream this provider returns is built by the same pi-ai the host consumes.
+// A relative node_modules path would bind a different copy, or none at all.
+import { createAssistantMessageEventStream } from "@gsd/pi-ai";
 
 const scriptPath = process.env.REAL_PI_HARNESS_SCRIPT;
 const observationPath = process.env.REAL_PI_HARNESS_PROVIDER_LOG;

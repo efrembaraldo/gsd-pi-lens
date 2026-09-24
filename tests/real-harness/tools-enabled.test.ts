@@ -1,10 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
-import { withRealPi } from "../support/real-pi-harness.js";
+import {
+	pollLensLog,
+	REAL_HOST_BINARY,
+	REAL_HOST_FORWARDS_EXTENSION_FLAGS,
+	withRealPi,
+} from "../support/real-pi-harness.js";
 
 const realPiAvailable =
-	spawnSync("pi", ["--version"], {
+	spawnSync(REAL_HOST_BINARY, ["--version"], {
 		stdio: "ignore",
 	}).status === 0;
 
@@ -55,11 +60,17 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 						(name) => name !== "ast_grep_replace",
 					).sort(),
 				);
-				const disabledLines = pi.lens
-					.sessionStartLog()
-					.filter((line) =>
-						line.includes("session_start: disabled tools = ast_grep_replace"),
-					);
+				const disabledLines = await pollLensLog(
+					() =>
+						pi.lens
+							.sessionStartLog()
+							.filter((line) =>
+								line.includes(
+									"session_start: disabled tools = ast_grep_replace",
+								),
+							),
+					(lines) => lines.length > 0,
+				);
 				expect(disabledLines).toHaveLength(1);
 				for (const tool of tools) {
 					expect(tool.surfaceBytes).toBe(
@@ -68,7 +79,7 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 				}
 			},
 		);
-	});
+	}, 60_000);
 
 	it("keeps the activation loader registered and emits its config diagnostic once", async () => {
 		await withRealPi(
@@ -85,33 +96,46 @@ describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
 						.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
 						.map((tool) => tool.name),
 				).toContain("pi_lens_activate_tools");
-				const diagnostics = pi.lens
-					.extensionLog()
-					.filter((row) =>
-						String(row.message ?? "").includes("PILENS_CFG_0009"),
-					);
+				const diagnostics = await pollLensLog(
+					() =>
+						pi.lens
+							.extensionLog()
+							.filter((row) =>
+								String(row.message ?? "").includes("PILENS_CFG_0009"),
+							),
+					(rows) => rows.length > 0,
+				);
 				expect(diagnostics).toHaveLength(1);
 			},
 		);
-	});
+	}, 60_000);
 
-	it("lets --no-tool win over a project config that enables the tool", async () => {
-		await withRealPi(
-			{
-				fixture: "cli-no-tool",
-				script: "script.json",
-				args: ["--no-lazy-tools", "--no-tool=lsp_navigation"],
-				env: { PI_LENS_TEST_MODE: "0" },
-			},
-			async (pi) => {
-				await pi.prompt("report the CLI roster");
-				await pi.awaitAssistantTurn();
-				expect(
-					latestTools(pi)
-						.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
-						.map((tool) => tool.name),
-				).not.toContain("lsp_navigation");
-			},
-		);
-	});
+	// The precondition IS the `--no-tool` CLI flag, and gsd rejects every
+	// extension flag on its argv (see REAL_HOST_FORWARDS_EXTENSION_FLAGS).
+	// No config spelling is equivalent: tool enablement resolves
+	// CLI > project > global, so only the CLI channel can beat the project
+	// config this fixture enables. Skipped, not weakened.
+	it.skipIf(!REAL_HOST_FORWARDS_EXTENSION_FLAGS)(
+		"lets --no-tool win over a project config that enables the tool [skipped on gsd: host rejects extension CLI flags]",
+		async () => {
+			await withRealPi(
+				{
+					fixture: "cli-no-tool",
+					script: "script.json",
+					args: ["--no-lazy-tools", "--no-tool=lsp_navigation"],
+					env: { PI_LENS_TEST_MODE: "0" },
+				},
+				async (pi) => {
+					await pi.prompt("report the CLI roster");
+					await pi.awaitAssistantTurn();
+					expect(
+						latestTools(pi)
+							.filter((tool) => EXPECTED_PI_TOOLS.includes(tool.name))
+							.map((tool) => tool.name),
+					).not.toContain("lsp_navigation");
+				},
+			);
+		},
+		60_000,
+	);
 });

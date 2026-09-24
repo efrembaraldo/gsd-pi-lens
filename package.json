@@ -122,6 +122,7 @@
 	"peerDependencies": {
 		"@gsd/pi-coding-agent": "*",
 		"@gsd/pi-tui": "^1.19.0",
+		"@opengsd/gsd-pi": ">=1.19.0",
 		"typebox": "^1.0.0"
 	},
 	"peerDependenciesMeta": {
@@ -129,6 +130,9 @@
 			"optional": true
 		},
 		"@gsd/pi-tui": {
+			"optional": true
+		},
+		"@opengsd/gsd-pi": {
 			"optional": true
 		},
 		"typebox": {

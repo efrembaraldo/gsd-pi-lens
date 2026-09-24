@@ -14,7 +14,7 @@ import {
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
 
-// flake-shape: raw-timer-wait — the bounded timeout waits for real child progress
+// flake-shape: raw-timer-wait — the bounded timeout waits for real child progress, and the bounded log poll waits for the real child's async log writes to land
 
 type JsonObject = Record<string, unknown>;
 type HarnessEvent = JsonObject & { event?: string; type?: string };
@@ -66,6 +66,22 @@ export const realHarnessFixtureRoot = path.join(
 	"tests/fixtures/real-harness",
 );
 const fixtureRoot = realHarnessFixtureRoot;
+// The host this fork targets is @opengsd/gsd-pi, whose bin is `gsd` (the
+// upstream `pi` binary does not exist in this ecosystem). Exported so every
+// real-harness availability probe spawns the same binary the harness does.
+export const REAL_HOST_BINARY = "gsd";
+// gsd's top-level CLI parser (src/cli-web-branch.ts: parseCliArgs) rejects any
+// flag outside its own whitelist, and src/cli.ts never forwards extension-
+// registered flag values to the session. A scenario whose precondition IS a
+// pi-lens CLI flag therefore cannot run against this host: it skips on this
+// constant instead of silently proving something weaker. Flip it together with
+// REAL_HOST_BINARY if the host ever forwards extension flags; the harness then
+// passes such flags on argv instead of translating them.
+export const REAL_HOST_FORWARDS_EXTENSION_FLAGS: boolean = false;
+// gsd has no `--provider` flag: `--model` takes `<provider>/<model-id>` and is
+// resolved after extension-registered providers are flushed into the model
+// registry (src/cli.ts: flushPendingProviderRegistrations -> applyModelOverride).
+const SCRIPTED_MODEL = "scripted/harness";
 
 export function validateScript(value: unknown, source = "script.json"): Script {
 	if (!Array.isArray(value) || value.length === 0)
@@ -107,6 +123,35 @@ function fixtureProject(scenario: string, root: string): string {
 	return dir;
 }
 
+// gsd's top-level CLI parser (src/cli-web-branch.ts: parseCliArgs) throws
+// "Unknown option" for any flag outside its own whitelist, and gsd never
+// forwards extension-registered flag values to the session — so pi-lens flags
+// cannot travel on the gsd argv. A flag is translated into the global config
+// ONLY when that is semantically identical: `--no-lazy-tools` maps to
+// `tools.lazy=false`, a `scope: "global"` key no project config can override.
+// `--no-tool=<name>` is deliberately NOT translated: tool enablement resolves
+// CLI > project > global (clients/tool-config.ts: resolveLensToolEnabled), so
+// a global `tools.<name>.enabled=false` loses to a project config that enables
+// the tool — the one case the CLI flag exists to win. Anything untranslatable
+// fails loudly: silently weakening a precondition would let a scenario pass
+// while proving something else.
+function lensFlagArgsToGlobalConfig(
+	args: readonly string[],
+): JsonObject | undefined {
+	if (args.length === 0) return undefined;
+	const tools: JsonObject = {};
+	for (const arg of args) {
+		if (arg === "--no-lazy-tools") {
+			tools.lazy = false;
+			continue;
+		}
+		throw new Error(
+			`real-harness: pi-lens flag ${arg} has no gsd CLI channel (gsd rejects extension flags) and no semantically equivalent global-config translation`,
+		);
+	}
+	return { tools };
+}
+
 function startRealPi(
 	scenario: string,
 	scriptFile: string,
@@ -122,21 +167,26 @@ function startRealPi(
 		recursive: true,
 	});
 	const providerLog = path.join(home, "provider.jsonl");
+	const globalConfig = REAL_HOST_FORWARDS_EXTENSION_FLAGS
+		? undefined
+		: lensFlagArgsToGlobalConfig(args);
+	const globalConfigPath = path.join(home, "pi-lens-global-config.json");
+	if (globalConfig)
+		writeFileSync(globalConfigPath, JSON.stringify(globalConfig));
 	const child: ChildProcessWithoutNullStreams = spawn(
-		"pi",
+		REAL_HOST_BINARY,
 		[
 			"--mode",
 			"rpc",
 			"--no-session",
-			"--provider",
-			"scripted",
 			"--model",
-			"harness",
-			"-e",
+			SCRIPTED_MODEL,
+			// gsd accepts only the long form; `-e` is "Unknown option".
+			"--extension",
 			path.join(repoRoot, "index.js"),
-			"-e",
+			"--extension",
 			path.join(fixtureRoot, "scripted-provider.mjs"),
-			...args,
+			...(REAL_HOST_FORWARDS_EXTENSION_FLAGS ? args : []),
 		],
 		{
 			cwd: project,
@@ -150,6 +200,7 @@ function startRealPi(
 				REAL_PI_HARNESS_SCRIPT: scriptFile,
 				REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
 				ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
+				...(globalConfig ? { PI_LENS_CONFIG_PATH: globalConfigPath } : {}),
 				...env,
 			},
 		},
@@ -361,6 +412,26 @@ export async function withRealPi<T>(
 	} finally {
 		await harness.close();
 	}
+}
+
+// pi-lens's NDJSON sinks are synchronous-call, async-write
+// (clients/ndjson-logger.ts): a line enqueued before the turn ended can still
+// be in flight when an assertion reads the file, and a one-shot read then sees
+// no file at all. Re-read until `done` holds or the budget elapses, and return
+// the LAST read either way, so the caller's own assertion reports the real
+// value (including "more than once") instead of a synthetic timeout.
+export async function pollLensLog<T>(
+	read: () => T,
+	done: (value: T) => boolean,
+	timeoutMs = 10_000,
+): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	let value = read();
+	while (!done(value) && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		value = read();
+	}
+	return value;
 }
 
 function readRows(file: string): JsonObject[] {

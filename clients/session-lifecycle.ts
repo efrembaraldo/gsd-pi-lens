@@ -524,6 +524,23 @@ export interface SessionStartGuardDecision {
 }
 
 /**
+ * The SessionManager OBJECT a ctx exposes, or `undefined` when it has none or
+ * reading it throws (an invalidated ctx: every accessor goes through the SDK's
+ * `assertActive()`). Only ever compared by identity, never dereferenced.
+ */
+function sessionManagerIdentity(ctx: unknown): object | undefined {
+	try {
+		const manager = (ctx as { sessionManager?: unknown } | null | undefined)
+			?.sessionManager;
+		return typeof manager === "object" && manager !== null
+			? manager
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Single entry point `index.ts`'s `session_start` handler delegates to, so
  * the classify → probe → register decision is unit-testable independent of
  * the SDK's `pi.on("session_start", ...)` wiring (which cannot be invoked
@@ -548,9 +565,6 @@ export function decideSessionStart(
 	// today's SDK — ExtensionRunner.emit() builds a fresh ctx per emit — but
 	// identity is the one signal that can't false-positive, so honor it.)
 	const sameCtx = hasPrior && ctx !== undefined && ctx === s.activeCtx;
-	const sameSessionId =
-		sameCtx ||
-		(hasPrior && sessionId !== undefined && sessionId === s.activeSessionId);
 
 	// #2129: compare THIS start's cwd against the registered primary's root.
 	// `undefined` on either side means "unknown", never "different" — see
@@ -560,6 +574,32 @@ export function decideSessionStart(
 		hasPrior && s.activeRoot !== undefined && incomingRoot !== undefined
 			? s.activeRoot === incomingRoot
 			: undefined;
+
+	// SESSION-MANAGER IDENTITY (gsd host). gsd's `AgentSession.newSession()` is
+	// an IN-PLACE replacement: it keeps the same ExtensionRunner and the same
+	// SessionManager object (`sessionManager.newSession()`), never invalidates
+	// the prior ctx (`ExtensionRunner.invalidate()` runs only on dispose) and
+	// emits no `session_shutdown`. The prior ctx therefore still probes active,
+	// and the new session id alone would classify this start as a live
+	// concurrent sibling — skipping the whole start, including the lazy-tool
+	// restore, after the host has just re-activated every extension tool.
+	// One SessionManager instance holds exactly one current session, so the
+	// same manager announcing a different id is by definition a sequential
+	// replacement; a genuine in-process sibling runs its own AgentSession with
+	// its own SessionManager and keeps classifying `concurrent-secondary`.
+	// Identity-only (like `sameCtx`), and never overrides positive evidence of
+	// a different root, so the #2129 temp-worktree decline is untouched.
+	const incomingManager = sessionManagerIdentity(ctx);
+	const sameSessionHost =
+		hasPrior &&
+		sameRoot !== false &&
+		incomingManager !== undefined &&
+		incomingManager === sessionManagerIdentity(s.activeCtx);
+
+	const sameSessionId =
+		sameCtx ||
+		sameSessionHost ||
+		(hasPrior && sessionId !== undefined && sessionId === s.activeSessionId);
 
 	// #2129 review F5: capture the primary root BEFORE any registration mutates
 	// it, so the reported value is genuinely the decision-time input the

@@ -132,7 +132,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"raw-timer-wait:support/real-pi-harness.ts": {
 		detector: "raw-timer-wait",
 		reason:
-			"the harness timeout models real child-process progress and must remain bounded across teardown",
+			"the harness timeout models real child-process progress and must remain bounded across teardown; the bounded log poll waits for the real child's async NDJSON writes to land",
 	},
 	"real-process-spawn:clients/biome-config-decorator-metadata.test.ts": {
 		detector: "real-process-spawn",
