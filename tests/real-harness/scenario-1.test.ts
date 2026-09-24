@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { withRealPi } from "../support/real-pi-harness.js";
+import { REAL_PI_AVAILABLE, withRealPi } from "../support/real-pi-harness.js";
 
 function documentedToolBaselines(): { active: string[]; lazy: string[] } {
 	const docs = readFileSync(
@@ -45,29 +45,32 @@ function observedRoster(pi: {
 }
 
 // flake-shape: real-process-spawn — the real host must load the built extension and preserve its tool roster across turns
-describe("real pi harness: load and tool-set restore", () => {
-	it("loads commands and restores the baseline across a second turn", async () => {
-		await withRealPi(
-			{ fixture: "scenario-1", script: "script.json" },
-			async (pi) => {
-				const baseline = documentedToolBaselines();
-				await pi.newSession();
-				await pi.prompt("run the scripted turn");
-				await pi.awaitAssistantTurn();
-				const active = observedRoster(pi);
-				expect(
-					active
-						.filter((name) =>
-							[...baseline.active, ...baseline.lazy].includes(name),
-						)
-						.sort(),
-				).toEqual([...baseline.active].sort());
-				await pi.prompt("run the second scripted turn");
-				await pi.awaitAssistantTurn();
-				expect(pi.toolResults()).toEqual([]);
-				const second = observedRoster(pi);
-				expect(second).toEqual(active);
-			},
-		);
-	}, 60_000);
-});
+describe.skipIf(!REAL_PI_AVAILABLE)(
+	"real pi harness: load and tool-set restore",
+	() => {
+		it("loads commands and restores the baseline across a second turn", async () => {
+			await withRealPi(
+				{ fixture: "scenario-1", script: "script.json" },
+				async (pi) => {
+					const baseline = documentedToolBaselines();
+					await pi.newSession();
+					await pi.prompt("run the scripted turn");
+					await pi.awaitAssistantTurn();
+					const active = observedRoster(pi);
+					expect(
+						active
+							.filter((name) =>
+								[...baseline.active, ...baseline.lazy].includes(name),
+							)
+							.sort(),
+					).toEqual([...baseline.active].sort());
+					await pi.prompt("run the second scripted turn");
+					await pi.awaitAssistantTurn();
+					expect(pi.toolResults()).toEqual([]);
+					const second = observedRoster(pi);
+					expect(second).toEqual(active);
+				},
+			);
+		}, 60_000);
+	},
+);

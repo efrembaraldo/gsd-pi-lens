@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+	spawn,
+	spawnSync,
+	type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import {
 	cpSync,
 	existsSync,
@@ -70,6 +74,15 @@ const fixtureRoot = realHarnessFixtureRoot;
 // upstream `pi` binary does not exist in this ecosystem). Exported so every
 // real-harness availability probe spawns the same binary the harness does.
 export const REAL_HOST_BINARY = "gsd";
+// Every real-harness file spawns REAL_HOST_BINARY as a real OS process — on
+// a machine without it (a bare CI runner, unlike the dev host where gsd-pi
+// is globally npm-installed), spawn() fails with an 'error' event, not an
+// 'exit' event, and every file's own withRealPi() call throws
+// RealPiChildExitError before the test's own assertions ever run. Computed
+// once at module load and shared, so `describe.skipIf(!REAL_PI_AVAILABLE)`
+// skips visibly instead of failing on every machine lacking the binary.
+export const REAL_PI_AVAILABLE: boolean =
+	spawnSync(REAL_HOST_BINARY, ["--version"], { stdio: "ignore" }).status === 0;
 // gsd's top-level CLI parser (src/cli-web-branch.ts: parseCliArgs) rejects any
 // flag outside its own whitelist, and src/cli.ts never forwards extension-
 // registered flag values to the session. A scenario whose precondition IS a

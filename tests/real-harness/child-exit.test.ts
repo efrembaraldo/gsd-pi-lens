@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { withRealPi } from "../support/real-pi-harness.js";
+import { REAL_PI_AVAILABLE, withRealPi } from "../support/real-pi-harness.js";
 
 // flake-shape: real-process-spawn — child death is only observable at the real process boundary
-describe("real pi harness: child lifecycle", () => {
+describe.skipIf(!REAL_PI_AVAILABLE)("real pi harness: child lifecycle", () => {
 	it("rejects a governed wait immediately when pi is killed", async () => {
 		await withRealPi(
 			{ fixture: "scenario-1", script: "script.json" },

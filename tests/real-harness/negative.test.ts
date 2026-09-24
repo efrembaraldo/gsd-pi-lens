@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { withRealPi } from "../support/real-pi-harness.js";
+import { REAL_PI_AVAILABLE, withRealPi } from "../support/real-pi-harness.js";
 
 // The provider's typed exhaustion and the real tool's argument validation are
 // process-boundary behavior; a mocked provider cannot certify either path.
 // flake-shape: real-process-spawn — real pi must surface provider and tool errors
-describe("real pi harness: negative scripts", () => {
+describe.skipIf(!REAL_PI_AVAILABLE)("real pi harness: negative scripts", () => {
 	it("surfaces typed provider exhaustion instead of hanging", async () => {
 		await withRealPi(
 			{ fixture: "scenario-1", script: "short.json" },

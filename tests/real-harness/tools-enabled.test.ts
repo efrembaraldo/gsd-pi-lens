@@ -1,17 +1,11 @@
-import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import {
 	pollLensLog,
-	REAL_HOST_BINARY,
+	REAL_PI_AVAILABLE,
 	REAL_HOST_FORWARDS_EXTENSION_FLAGS,
 	withRealPi,
 } from "../support/real-pi-harness.js";
-
-const realPiAvailable =
-	spawnSync(REAL_HOST_BINARY, ["--version"], {
-		stdio: "ignore",
-	}).status === 0;
 
 // Pi-surface entries of the canonical registry (clients/tool-config.ts), the
 // one source of truth for the model-facing tool roster (#2800).
@@ -38,7 +32,7 @@ function latestTools(pi: {
 // test mode: its assertions read real sessionstart.log/extension.log rows, and
 // every NDJSON logger is a no-op under isTestMode(). Other scenarios keep the
 // harness default.
-describe.skipIf(!realPiAvailable)("real pi RPC: tools.<name>.enabled", () => {
+describe.skipIf(!REAL_PI_AVAILABLE)("real pi RPC: tools.<name>.enabled", () => {
 	it("omits a project-disabled tool from pi's wire roster and records it once", async () => {
 		await withRealPi(
 			{
