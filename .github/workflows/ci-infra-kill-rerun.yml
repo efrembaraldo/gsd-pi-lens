@@ -83,7 +83,7 @@ jobs:
       PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
       RUN_EVENT: ${{ github.event.workflow_run.event }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
 

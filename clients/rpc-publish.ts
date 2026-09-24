@@ -44,7 +44,6 @@
 import { isBusPublishEnabled } from "./bus-publish.js";
 import { logBusEvent } from "./bus-events-logger.js";
 import {
-	MAX_DIAGNOSTICS_PER_FILE_EVENT,
 	type PilensDiagnosticsFileEntry,
 	type PilensDiagnosticsPayload,
 } from "./diagnostics-publish.js";
@@ -643,6 +642,3 @@ export function resetRpcPublishSessionState(): void {
 	lastWired = undefined;
 	moduleLiveEmitter.reset();
 }
-
-// Re-export for tests / docs that need the per-file cap the handler enforces.
-export { MAX_DIAGNOSTICS_PER_FILE_EVENT };

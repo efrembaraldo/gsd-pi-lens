@@ -66,8 +66,10 @@ extend-exclude = [
 # "ERRORs" in clients/project-diagnostics/scanner.ts): a global word
 # allowlist would blind the checker to a REAL "immedaite"/"erro" typo
 # anywhere else in the repo, forever. Scoping to the exact line keeps the
-# checker live everywhere else.
-extend-ignore-re = ["(?Rm)^.*(#|//)\\s*spellchecker:disable-line$"]
+# checker live everywhere else. The marker alternation also matches a bare
+# `*` (a JSDoc/block-comment continuation line, e.g. inside `/** ... */`),
+# not just `#`/`//` — same reasoning, for that comment style.
+extend-ignore-re = ["(?Rm)^.*(#|//|\\*)\\s*spellchecker:disable-line$"]
 
 # Dictionary tuning — reaches BOTH lanes (typos-lsp and typos-cli).
 [default.extend-words]

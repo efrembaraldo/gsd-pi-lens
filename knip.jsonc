@@ -43,9 +43,11 @@
 		// reached by any import from index.ts.
 		"scripts/*.ts",
 		"scripts/*.mjs",
-		// The Windows CI job invokes this population source directly, and the
-		// governance test imports it as the same executable seam.
-		"scripts/lib/win32-gate-population.mjs",
+		// scripts/lib/win32-gate-population.mjs — the Windows CI job invokes
+		// this population source directly, but it's NOT listed here: it's
+		// already reached through tests/config/win32-gate-lane.test.ts's
+		// import (knip's own "redundant entry pattern" hint caught this,
+		// same precedent as merge-train-dispatch-validation.mjs below).
 		// scripts/lib/merge-train-dispatch-validation.mjs — the one
 		// scripts/lib/*.mjs a workflow `run:` step invokes directly — is
 		// NOT listed here despite that: it's already reached through
@@ -62,7 +64,11 @@
 		// consumer, so a lane can never hide dead code from knip.
 		"tests/real-harness/*.test.ts",
 		"tests/config/*.test.ts",
-		"tests/mcp/session-end.smoke.test.ts",
+		// tests/mcp/session-end.smoke.test.ts is NOT listed here despite
+		// being a lane test file otherwise excluded from the project graph:
+		// it's already reached through vitest.config.ts's own reference to
+		// it (knip's own "redundant entry pattern" hint caught this, same
+		// precedent as merge-train-dispatch-validation.mjs above).
 		"tests/clients/*.test.ts",
 		"tests/clients/**/*.test.ts",
 		"tests/scripts/*.test.ts"

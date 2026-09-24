@@ -3,13 +3,14 @@
  * Pre-release pre-flight: attesti la riproducibilità dei check automatizzabili
  * del fork @gsd/pi-lens (slice S09, milestone M001).
  *
- * SCOPE — Questo script NON sostituisce il gate umano documentato in
+ * SCOPE — Questo script NON sostituisce il gate umano documentato in * spellchecker:disable-line
  * `docs/release-gate.md` (run-through operativo del maintainer su una
  * sessione `gsd` reale, ispezione di 15 tool registrati, 9 bus events,
  * read-guard markdown, degradazione `registerEntryRenderer`). Riduce il
  * rischio di "ho taggato una release e due giorni dopo `npm test` era
  * rosso" producendo una pre-flight riproducibile dei check statici e dei
- * tre subprocess (lint, test, install-shape). Lo smoke `gsd` reale resta
+ * tre * spellchecker:disable-line
+ * subprocess (lint, test, install-shape). Lo smoke `gsd` reale resta
  * responsabilità del maintainer via T02.
  *
  * EXIT SEMANTICS — 0 quando tutti i check richiesti passano, 1 quando

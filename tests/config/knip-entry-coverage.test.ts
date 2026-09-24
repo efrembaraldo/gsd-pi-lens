@@ -143,6 +143,10 @@ const ALREADY_REACHED: Readonly<Record<string, string>> = {
 		"already reached through tests/scripts/merge-train-warden.test.ts's " +
 		"import — knip's own 'redundant entry pattern' hint caught this " +
 		"when it was added as an explicit entry",
+	"scripts/lib/win32-gate-population.mjs":
+		"already reached through tests/config/win32-gate-lane.test.ts's " +
+		"import — knip's own 'redundant entry pattern' hint caught this " +
+		"when it was added as an explicit entry",
 };
 
 const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
@@ -159,6 +163,9 @@ const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
 	"tests/support/git-fixture-env.test.ts":
+		"already reached through the Vitest config's default project graph; " +
+		"Knip reports an explicit entry as redundant",
+	"tests/mcp/session-end.smoke.test.ts":
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
 };

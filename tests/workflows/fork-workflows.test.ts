@@ -190,7 +190,7 @@ describe("publish.yml (fork)", () => {
 
 	it("checks the registry version and publishes with provenance", () => {
 		expect(
-			jobHasScript(parsed.jobs?.verify, "npm view @efrembaraldo/gsd-pi-lens"),
+			jobHasScript(parsed.jobs?.verify, 'npm view "@efrembaraldo/gsd-pi-lens'),
 		).toBe(true);
 		expect(
 			jobHasScript(parsed.jobs?.publish, "--provenance --access public"),
