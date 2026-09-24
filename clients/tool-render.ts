@@ -136,18 +136,12 @@ function captureComponentText(component: Component): string {
  * is what keeps the off path byte-identical to today rather than this
  * function branching on a live flag read per render.
  */
-export function wrapToolForCompactLine<T extends ToolDefinition>(
-	tool: T,
-): T {
+export function wrapToolForCompactLine<T extends ToolDefinition>(tool: T): T {
 	const originalRenderResult = tool.renderResult;
 	if (!originalRenderResult) return tool;
 	const originalRenderCall = tool.renderCall;
 
-	const renderCall: ToolDefinition["renderCall"] = (
-		args,
-		theme,
-		context,
-	) => {
+	const renderCall: ToolDefinition["renderCall"] = (args, theme, context) => {
 		// Only blank the call row once a settled (non-partial) result exists —
 		// `renderResult` is about to paint the single combined line. While the
 		// tool is still running/streaming, keep showing the normal call row
@@ -215,8 +209,8 @@ export function wrapToolForCompactLine<T extends ToolDefinition>(
 /** Wrap every tool in an array — tools without `renderResult` pass through
  * unchanged. Used by index.ts's registerTool loop, only when the
  * `ui.compactToolLine` flag resolved on for this session. */
-export function wrapToolsForCompactLine<
-	T extends ToolDefinition,
->(tools: readonly T[]): T[] {
+export function wrapToolsForCompactLine<T extends ToolDefinition>(
+	tools: readonly T[],
+): T[] {
 	return tools.map((tool) => wrapToolForCompactLine(tool));
 }

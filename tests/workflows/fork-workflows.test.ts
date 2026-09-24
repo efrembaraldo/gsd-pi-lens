@@ -6,17 +6,31 @@ import yaml from "../../clients/deps/js-yaml.js";
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 type Step = { name?: string; run?: string; uses?: string; with?: unknown };
-type Job = { steps?: Step[]; permissions?: unknown; environment?: unknown; if?: unknown };
-type Workflow = { name?: string; on?: unknown; permissions?: unknown; jobs?: Record<string, Job> };
+type Job = {
+	steps?: Step[];
+	permissions?: unknown;
+	environment?: unknown;
+	if?: unknown;
+};
+type Workflow = {
+	name?: string;
+	on?: unknown;
+	permissions?: unknown;
+	jobs?: Record<string, Job>;
+};
 
-function readWorkflow(relativePath: string): { content: string; parsed: Workflow } {
+function readWorkflow(relativePath: string): {
+	content: string;
+	parsed: Workflow;
+} {
 	const content = readFileSync(resolve(REPO_ROOT, relativePath), "utf8");
 	return { content, parsed: yaml.load(content) as Workflow };
 }
 
 /** Normalize the YAML trigger branches form (array or single string) to an array. */
 function toBranches(value: unknown): string[] {
-	if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
+	if (Array.isArray(value))
+		return value.filter((v): v is string => typeof v === "string");
 	if (typeof value === "string") return [value];
 	return [];
 }
@@ -31,14 +45,18 @@ function jobHasScript(job: Job | undefined, fragment: string): boolean {
 	return (
 		!!job &&
 		Array.isArray(job.steps) &&
-		job.steps.some((s) => typeof s?.run === "string" && s.run.includes(fragment))
+		job.steps.some(
+			(s) => typeof s?.run === "string" && s.run.includes(fragment),
+		)
 	);
 }
 
 /** Index of the first step whose `run` body contains `fragment`, or -1. */
 function firstRunIndexOf(job: Job | undefined, fragment: string): number {
 	if (!job || !Array.isArray(job.steps)) return -1;
-	return job.steps.findIndex((s) => typeof s?.run === "string" && s.run.includes(fragment));
+	return job.steps.findIndex(
+		(s) => typeof s?.run === "string" && s.run.includes(fragment),
+	);
 }
 
 function jobNodeVersion(job: Job | undefined): unknown {
@@ -90,7 +108,9 @@ describe("ci.yml (fork)", () => {
 		// so CI clones and builds open-gsd/gsd-pi via its verified `build:pi`
 		// script (same step as .github/workflows/compat-smoke.yml).
 		expect(jobHasScript(parsed.jobs?.build, "pnpm run build:pi")).toBe(true);
-		expect(jobHasScript(parsed.jobs?.build, "GSD_PI_CHECKOUT=/tmp/gsd-pi")).toBe(true);
+		expect(
+			jobHasScript(parsed.jobs?.build, "GSD_PI_CHECKOUT=/tmp/gsd-pi"),
+		).toBe(true);
 	});
 
 	it("runs setup-types.mjs after npm ci in the build job (MEM011)", () => {
@@ -105,7 +125,9 @@ describe("ci.yml (fork)", () => {
 		const prod = parsed.jobs?.["prod-install-build"];
 		expect(jobNodeVersion(prod)).toBe(22);
 		expect(jobHasScript(prod, "npm prune --omit=dev")).toBe(true);
-		expect(jobHasScript(prod, "scripts/check-prod-install-shape.mjs")).toBe(true);
+		expect(jobHasScript(prod, "scripts/check-prod-install-shape.mjs")).toBe(
+			true,
+		);
 	});
 
 	it("carries no upstream fork identities", () => {
@@ -125,7 +147,9 @@ describe("publish.yml (fork)", () => {
 	it("triggers on workflow_dispatch with a dry-run input defaulting to true", () => {
 		const on = workflowTriggers(parsed.on);
 		expect(on).toHaveProperty("workflow_dispatch");
-		const inputs = (on.workflow_dispatch as { inputs?: Record<string, unknown> } | undefined)?.inputs;
+		const inputs = (
+			on.workflow_dispatch as { inputs?: Record<string, unknown> } | undefined
+		)?.inputs;
 		const dryRun = (inputs?.["dry-run"] ?? {}) as Record<string, unknown>;
 		expect(dryRun["type"]).toBe("boolean");
 		expect(dryRun["default"]).toBe(true);
@@ -146,7 +170,9 @@ describe("publish.yml (fork)", () => {
 	});
 
 	it("gives the publish job id-token:write and contents:read for OIDC", () => {
-		const perms = parsed.jobs?.publish?.permissions as Record<string, unknown> | undefined;
+		const perms = parsed.jobs?.publish?.permissions as
+			| Record<string, unknown>
+			| undefined;
 		expect(perms?.["id-token"]).toBe("write");
 		expect(perms?.["contents"]).toBe("read");
 	});
@@ -163,8 +189,12 @@ describe("publish.yml (fork)", () => {
 	});
 
 	it("checks the registry version and publishes with provenance", () => {
-		expect(jobHasScript(parsed.jobs?.verify, "npm view @efrembaraldo/gsd-pi-lens")).toBe(true);
-		expect(jobHasScript(parsed.jobs?.publish, "--provenance --access public")).toBe(true);
+		expect(
+			jobHasScript(parsed.jobs?.verify, "npm view @efrembaraldo/gsd-pi-lens"),
+		).toBe(true);
+		expect(
+			jobHasScript(parsed.jobs?.publish, "--provenance --access public"),
+		).toBe(true);
 	});
 
 	it("carries no registry token and no environment key on publish", () => {
@@ -174,7 +204,9 @@ describe("publish.yml (fork)", () => {
 	});
 
 	it("removed the upstream release.yml (R009 net replacement)", () => {
-		expect(existsSync(resolve(REPO_ROOT, ".github/workflows/release.yml"))).toBe(false);
+		expect(
+			existsSync(resolve(REPO_ROOT, ".github/workflows/release.yml")),
+		).toBe(false);
 	});
 });
 
@@ -182,7 +214,11 @@ describe("default-branch policy (all workflows)", () => {
 	/** Load all workflow files and verify branch pin invariant. */
 
 	function extractBranchesFromTrigger(triggerValue: unknown): string[] {
-		if (!triggerValue || typeof triggerValue !== "object" || Array.isArray(triggerValue)) {
+		if (
+			!triggerValue ||
+			typeof triggerValue !== "object" ||
+			Array.isArray(triggerValue)
+		) {
 			return [];
 		}
 		const trigger = triggerValue as Record<string, unknown>;
@@ -218,7 +254,10 @@ describe("default-branch policy (all workflows)", () => {
 			"tool-smoke.yml",
 		];
 
-		const branchPolicy: Record<string, { pushBranches: string[]; prBranches: string[] }> = {};
+		const branchPolicy: Record<
+			string,
+			{ pushBranches: string[]; prBranches: string[] }
+		> = {};
 
 		for (const workflowFile of workflows) {
 			const { parsed } = readWorkflow(`.github/workflows/${workflowFile}`);
@@ -255,8 +294,9 @@ describe("default-branch policy (all workflows)", () => {
 			workflows.map((w) => ({
 				Workflow: w,
 				"push.branches": branchPolicy[w].pushBranches.join(", ") || "(none)",
-				"pull_request.branches": branchPolicy[w].prBranches.join(", ") || "(none)",
-			}))
+				"pull_request.branches":
+					branchPolicy[w].prBranches.join(", ") || "(none)",
+			})),
 		);
 	});
 });

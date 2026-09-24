@@ -96,14 +96,23 @@ const onlyIdx = argv.indexOf("--check-only");
 const onlyMode = onlyIdx !== -1;
 const onlyName = onlyMode ? argv[onlyIdx + 1] : null;
 if (onlyMode && !onlyName) {
-	process.stderr.write("[pre-release-checklist] --check-only requires a name\n");
+	process.stderr.write(
+		"[pre-release-checklist] --check-only requires a name\n",
+	);
 	printUsage();
 	process.exit(2);
 }
 
 // --- Check catalog ---
 
-const ALL_CHECKS = ["lint", "test", "install-shape", "tool-registrations", "flag-registrations", "bus-channels"];
+const ALL_CHECKS = [
+	"lint",
+	"test",
+	"install-shape",
+	"tool-registrations",
+	"flag-registrations",
+	"bus-channels",
+];
 
 if (onlyMode && !ALL_CHECKS.includes(onlyName)) {
 	process.stderr.write(
@@ -121,8 +130,12 @@ const results = []; // { name, ok, durationMs, detail }
 function record(name, ok, durationMs, detail) {
 	results.push({ name, ok, durationMs, detail });
 	const tag = ok ? "OK" : "FAIL";
-	const safeDetail = String(detail ?? "").replace(/\n/g, " ").slice(0, 200);
-	process.stderr.write(`[pre-release-checklist] ${tag} ${name} ${durationMs}ms ${safeDetail}\n`);
+	const safeDetail = String(detail ?? "")
+		.replace(/\n/g, " ")
+		.slice(0, 200);
+	process.stderr.write(
+		`[pre-release-checklist] ${tag} ${name} ${durationMs}ms ${safeDetail}\n`,
+	);
 }
 
 // --- Subprocess runner ---
@@ -143,14 +156,24 @@ function runSubprocess({ cmd, args, timeoutMs, env, cwd }) {
 		if (res.error.code === "ETIMEDOUT") {
 			return { ok: false, durationMs, detail: `timed-out (${timeoutMs}ms)` };
 		}
-		return { ok: false, durationMs, detail: `spawn-error: ${res.error.message}` };
+		return {
+			ok: false,
+			durationMs,
+			detail: `spawn-error: ${res.error.message}`,
+		};
 	}
 	if (res.status === 0) {
 		const tail = (res.stdout || "").trim().split("\n").pop() || "exit 0";
 		return { ok: true, durationMs, detail: tail.slice(0, 160) };
 	}
-	const tail = ((res.stderr || res.stdout || "").trim().split("\n").pop()) || `exit ${res.status}`;
-	return { ok: false, durationMs, detail: `exit-${res.status} ${tail.slice(0, 160)}` };
+	const tail =
+		(res.stderr || res.stdout || "").trim().split("\n").pop() ||
+		`exit ${res.status}`;
+	return {
+		ok: false,
+		durationMs,
+		detail: `exit-${res.status} ${tail.slice(0, 160)}`,
+	};
 }
 
 // --- Bracket-balanced extraction (string- and comment-aware) ---
@@ -274,7 +297,11 @@ function checkTest() {
 		if (res.error.code === "ETIMEDOUT") {
 			return { ok: false, durationMs, detail: `timed-out (${timeoutMs}ms)` };
 		}
-		return { ok: false, durationMs, detail: `spawn-error: ${res.error.message}` };
+		return {
+			ok: false,
+			durationMs,
+			detail: `spawn-error: ${res.error.message}`,
+		};
 	}
 	if (res.status === 0) {
 		const tail = (res.stdout || "").trim().split("\n").pop() || "exit 0";
@@ -458,10 +485,22 @@ function checkBusChannels() {
 	const checks = [
 		{ file: "clients/bus-publish.ts", literal: "pilens:files:touched" },
 		{ file: "clients/diagnostics-publish.ts", literal: "pilens:diagnostics" },
-		{ file: "clients/disposition-publish.ts", literal: "pilens:diagnostic:disposition" },
-		{ file: "clients/format-events-publish.ts", literal: "pilens:format:queued" },
-		{ file: "clients/format-events-publish.ts", literal: "pilens:format:start" },
-		{ file: "clients/format-events-publish.ts", literal: "pilens:autofix:start" },
+		{
+			file: "clients/disposition-publish.ts",
+			literal: "pilens:diagnostic:disposition",
+		},
+		{
+			file: "clients/format-events-publish.ts",
+			literal: "pilens:format:queued",
+		},
+		{
+			file: "clients/format-events-publish.ts",
+			literal: "pilens:format:start",
+		},
+		{
+			file: "clients/format-events-publish.ts",
+			literal: "pilens:autofix:start",
+		},
 		{ file: "clients/rpc-publish.ts", literal: "pilens:rpc:diagnostics" },
 		{ file: "clients/rpc-publish.ts", literal: "pilens:rpc:files-touched" },
 	];
@@ -561,10 +600,11 @@ function warnGitignoreShadow() {
 
 	let stdout = "";
 	try {
-		stdout = gitExecFileSync(
-			["check-ignore", "--no-index", "--stdin", "-z"],
-			{ cwd: repoRoot, encoding: "utf8", input: tracked },
-		);
+		stdout = gitExecFileSync(["check-ignore", "--no-index", "--stdin", "-z"], {
+			cwd: repoRoot,
+			encoding: "utf8",
+			input: tracked,
+		});
 	} catch (err) {
 		// git check-ignore exits 1 when NONE of the stdin paths are ignored —
 		// that's the clean case (no shadow). Any other exit still indicates

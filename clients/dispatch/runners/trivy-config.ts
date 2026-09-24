@@ -241,7 +241,10 @@ const trivyConfigRunner: RunnerDefinition = {
 				ctx.kind === "yaml"
 					? looksLikeKubernetesManifest(content) ||
 						looksLikeCloudFormationTemplate(content) ||
-						looksLikeDockerCompose(content, path.basename(absPath).toLowerCase())
+						looksLikeDockerCompose(
+							content,
+							path.basename(absPath).toLowerCase(),
+						)
 					: looksLikeCloudFormationTemplate(content);
 			if (!isManifest) {
 				return { status: "skipped", diagnostics: [], semantic: "none" };

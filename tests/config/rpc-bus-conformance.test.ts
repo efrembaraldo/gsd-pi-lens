@@ -139,16 +139,12 @@ function busSubscriberFiles(
 						specifier,
 					);
 				if (eventImport) {
-					bindings.add(
-						eventImport[1] ?? "BUS_RPC_REQUEST_DIAGNOSTICS_EVENT",
-					);
+					bindings.add(eventImport[1] ?? "BUS_RPC_REQUEST_DIAGNOSTICS_EVENT");
 				}
 			}
 		}
 		const eventArgument = `(?:["']${EVENT_DIAGNOSTICS}["']|["']${EVENT_FILES_TOUCHED}["']|${
-			[...bindings]
-				.map((binding) => escapeRegExp(binding))
-				.join("|") || "(?!)"
+			[...bindings].map((binding) => escapeRegExp(binding)).join("|") || "(?!)"
 		})`;
 		return new RegExp(`\\.on\\s*\\(\\s*${eventArgument}(?=\\s*[,)])`).test(
 			source,

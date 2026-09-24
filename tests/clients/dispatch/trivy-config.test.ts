@@ -324,7 +324,9 @@ describe("trivy-config run() — compose flag gate (S05)", () => {
 		const runner = (
 			await import("../../../clients/dispatch/runners/trivy-config.js")
 		).default;
-		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+		const result = await runner.run(
+			createCtx("yaml", file, composeCwd) as never,
+		);
 
 		expect(safeSpawnAsync).not.toHaveBeenCalled();
 		expect(result.status).toBe("skipped");
@@ -350,7 +352,9 @@ describe("trivy-config run() — compose flag gate (S05)", () => {
 		const runner = (
 			await import("../../../clients/dispatch/runners/trivy-config.js")
 		).default;
-		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+		const result = await runner.run(
+			createCtx("yaml", file, composeCwd) as never,
+		);
 
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 		expect(result.status).toBe("succeeded");
@@ -405,7 +409,9 @@ describe("trivy-config run() — compose flag gate (S05)", () => {
 		const runner = (
 			await import("../../../clients/dispatch/runners/trivy-config.js")
 		).default;
-		const result = await runner.run(createCtx("yaml", file, composeCwd) as never);
+		const result = await runner.run(
+			createCtx("yaml", file, composeCwd) as never,
+		);
 
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 		const [cmd, argv, opts] = safeSpawnAsync.mock.calls[0] as [
@@ -536,7 +542,7 @@ describe("looksLikeDockerCompose heuristic", () => {
 		).toBe(true);
 	});
 
-	it("matches a Compose v3 file with a quoted version \"3.8\"", () => {
+	it('matches a Compose v3 file with a quoted version "3.8"', () => {
 		expect(
 			looksLikeDockerCompose(
 				'version: "3.8"\nservices:\n  app:\n    image: myapp\n',
@@ -558,13 +564,15 @@ describe("looksLikeDockerCompose heuristic", () => {
 	});
 
 	it("matches a docker-compose.yml by filename even when content has no version key", () => {
-		expect(looksLikeDockerCompose("# just comments\n", "docker-compose.yml")).toBe(
-			true,
-		);
+		expect(
+			looksLikeDockerCompose("# just comments\n", "docker-compose.yml"),
+		).toBe(true);
 	});
 
 	it("matches compose.local.yaml by filename", () => {
-		expect(looksLikeDockerCompose("foo: bar\n", "compose.local.yaml")).toBe(true);
+		expect(looksLikeDockerCompose("foo: bar\n", "compose.local.yaml")).toBe(
+			true,
+		);
 	});
 
 	it("matches a Compose basename case-insensitively", () => {

@@ -69,10 +69,7 @@ interface ExtensionAPI {
 		},
 	) => void;
 	getFlag: (name: string) => boolean | string | undefined;
-	registerMessageRenderer: (
-		customType: string,
-		renderer: any,
-	) => void;
+	registerMessageRenderer: (customType: string, renderer: any) => void;
 	on(event: "resources_discover", listener: (...args: any[]) => any): void;
 	on(event: "session_start", listener: (...args: any[]) => any): void;
 	on(event: "tool_call", listener: (...args: any[]) => any): void;
@@ -90,10 +87,7 @@ interface ExtensionAPI {
 	hasUI?: boolean;
 	newSession?: (options?: any) => Promise<any>;
 	fork?: (entryId: string, options?: any) => Promise<any>;
-	switchSession?: (
-		sessionPath: string,
-		switchOpts?: any,
-	) => Promise<any>;
+	switchSession?: (sessionPath: string, switchOpts?: any) => Promise<any>;
 	reload?: () => Promise<void>;
 	getActiveTools?: () => string[];
 	setActiveTools?: (tools: string[]) => void;

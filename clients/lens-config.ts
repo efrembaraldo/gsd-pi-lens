@@ -404,8 +404,9 @@ export function loadPiLensGlobalConfig(
 					config.readGuard ??= {};
 					const guardSection = config.readGuard as Record<string, unknown>;
 					guardSection.markdown ??= {};
-					(guardSection.markdown as Record<string, unknown>)
-						.frontmatterAlwaysRead = undefined;
+					(
+						guardSection.markdown as Record<string, unknown>
+					).frontmatterAlwaysRead = undefined;
 				}
 			}
 		}

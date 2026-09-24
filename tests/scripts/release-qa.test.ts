@@ -1133,9 +1133,7 @@ describe("release-QA host-provided peer args (#2586 recombination)", () => {
 	// names.
 	it("keeps an OR-form range in one argv entry", () => {
 		expect(
-			parseSupplyArgs(
-				"typebox@^1.0.0\n@gsd/pi-tui@^0.84.1 || ^0.85.0\n",
-			),
+			parseSupplyArgs("typebox@^1.0.0\n@gsd/pi-tui@^0.84.1 || ^0.85.0\n"),
 		).toEqual(["typebox@^1.0.0", "@gsd/pi-tui@^0.84.1 || ^0.85.0"]);
 	});
 

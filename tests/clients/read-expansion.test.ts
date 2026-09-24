@@ -6,9 +6,7 @@ import {
 	EXPANSION_LIMIT_LINES,
 	tryExpandRead,
 } from "../../clients/read-expansion.js";
-import {
-	_resetMarkdownFrontmatterAlwaysReadCacheForTests,
-} from "../../clients/runtime-config.js";
+import { _resetMarkdownFrontmatterAlwaysReadCacheForTests } from "../../clients/runtime-config.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 function node(
@@ -325,7 +323,9 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		if (tmpHome !== null) {
 			removeTempDirSync(tmpHome);
 		}
-		tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-read-expansion-s06-"));
+		tmpHome = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-read-expansion-s06-"),
+		);
 		const configPath = path.join(tmpHome, "config.json");
 		if (config !== null) {
 			fs.writeFileSync(configPath, JSON.stringify(config), "utf-8");
@@ -368,24 +368,24 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		const env = setupTestEnvironment("pi-lens-read-expansion-s06-fm-");
 		try {
 			const content = [
-				"---",                                                          // 1
-				"title: Test markdown doc",                                       // 2
-				"author: tester",                                                // 3
-				"date: 2026-09-10",                                              // 4
-				"tags:",                                                         // 5
-				"  - markdown",                                                  // 6
-				"  - fixture",                                                   // 7
-				"---",                                                           // 8
-				"# Top heading",                                                 // 9
-				"intro here",                                                    // 10
-				"",                                                              // 11
-				"## Sezione target",                                             // 12
-				"Primo paragrafo della sezione target.",                         // 13
-				"Continua il testo.",                                            // 14
-				"",                                                              // 15
-				"## Sezione successiva",                                         // 16
-				"fine",                                                          // 17
-				"",                                                              // 18
+				"---", // 1
+				"title: Test markdown doc", // 2
+				"author: tester", // 3
+				"date: 2026-09-10", // 4
+				"tags:", // 5
+				"  - markdown", // 6
+				"  - fixture", // 7
+				"---", // 8
+				"# Top heading", // 9
+				"intro here", // 10
+				"", // 11
+				"## Sezione target", // 12
+				"Primo paragrafo della sezione target.", // 13
+				"Continua il testo.", // 14
+				"", // 15
+				"## Sezione successiva", // 16
+				"fine", // 17
+				"", // 18
 			].join("\n");
 			const filePath = path.join(env.tmpDir, "file.md");
 			fs.writeFileSync(filePath, content);
@@ -422,20 +422,20 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		const env = setupTestEnvironment("pi-lens-read-expansion-s06-tab-");
 		try {
 			const content = [
-				"# Title",                  // 1
-				"intro",                     // 2
-				"",                          // 3
-				"| H1 | H2 |",               // 4
-				"| - | - |",                 // 5
-				"| D1 | D2 |",               // 6
-				"| D2 | D2 |",               // 7
-				"| - | - |",                 // 8 (final separator — last table line, immediately above the section)
-				"## Sezione target",         // 9
-				"Primo paragrafo.",          // 10
-				"Continua il testo.",        // 11
-				"",                          // 12
-				"## Sezione successiva",     // 13
-				"fine",                      // 14
+				"# Title", // 1
+				"intro", // 2
+				"", // 3
+				"| H1 | H2 |", // 4
+				"| - | - |", // 5
+				"| D1 | D2 |", // 6
+				"| D2 | D2 |", // 7
+				"| - | - |", // 8 (final separator — last table line, immediately above the section)
+				"## Sezione target", // 9
+				"Primo paragrafo.", // 10
+				"Continua il testo.", // 11
+				"", // 12
+				"## Sezione successiva", // 13
+				"fine", // 14
 			].join("\n");
 			const filePath = path.join(env.tmpDir, "file.md");
 			fs.writeFileSync(filePath, content);
@@ -469,16 +469,16 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		const env = setupTestEnvironment("pi-lens-read-expansion-s06-off-");
 		try {
 			const content = [
-				"---",                                                          // 1
-				"title: Test",                                                  // 2
-				"---",                                                           // 3
-				"# Top heading",                                                // 4
-				"",                                                              // 5
-				"## Sezione target",                                            // 6
-				"contenuto",                                                     // 7
-				"",                                                              // 8
-				"## Sezione successiva",                                        // 9
-				"fine",                                                          // 10
+				"---", // 1
+				"title: Test", // 2
+				"---", // 3
+				"# Top heading", // 4
+				"", // 5
+				"## Sezione target", // 6
+				"contenuto", // 7
+				"", // 8
+				"## Sezione successiva", // 9
+				"fine", // 10
 			].join("\n");
 			const filePath = path.join(env.tmpDir, "file.md");
 			fs.writeFileSync(filePath, content);
@@ -510,13 +510,13 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		const env = setupTestEnvironment("pi-lens-read-expansion-s06-must3-");
 		try {
 			const content = [
-				"# Title",                  // 1
-				"",                          // 2
-				"## Section A",              // 3
-				"line of body",              // 4
-				"",                          // 5
-				"## Section B",              // 6
-				"line of body",              // 7
+				"# Title", // 1
+				"", // 2
+				"## Section A", // 3
+				"line of body", // 4
+				"", // 5
+				"## Section B", // 6
+				"line of body", // 7
 			].join("\n");
 			const filePath = path.join(env.tmpDir, "file.md");
 			fs.writeFileSync(filePath, content);
@@ -548,20 +548,20 @@ describe("S06 tryExpandRead — markdown frontmatter and adjacent table coverage
 		const env = setupTestEnvironment("pi-lens-read-expansion-s06-fmbound-");
 		try {
 			const content = [
-				"---",                                                          // 1
-				"title: T",                                                     // 2
-				"author: a",                                                    // 3
-				"tags: [x, y]",                                                 // 4
-				"---",                                                           // 5
-				"",                                                              // 6
-				"# Top heading",                                                // 7
-				"",                                                              // 8
-				"## Sezione target",                                            // 9
-				"Primo paragrafo.",                                             // 10
-				"Altro paragrafo.",                                             // 11
-				"",                                                              // 12
-				"## Sezione successiva",                                        // 13
-				"fine",                                                          // 14
+				"---", // 1
+				"title: T", // 2
+				"author: a", // 3
+				"tags: [x, y]", // 4
+				"---", // 5
+				"", // 6
+				"# Top heading", // 7
+				"", // 8
+				"## Sezione target", // 9
+				"Primo paragrafo.", // 10
+				"Altro paragrafo.", // 11
+				"", // 12
+				"## Sezione successiva", // 13
+				"fine", // 14
 			].join("\n");
 			const filePath = path.join(env.tmpDir, "file.md");
 			fs.writeFileSync(filePath, content);

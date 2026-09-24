@@ -45,7 +45,7 @@ async function runSessionStartWithBudget<T>(
 			SESSION_START_TEST_BUDGET_MS,
 		);
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith('Timeout after ')) {
+		if (error instanceof Error && error.message.startsWith("Timeout after ")) {
 			throw new Error(
 				`session_start handler exceeded test budget (${SESSION_START_TEST_BUDGET_MS}ms)`,
 			);

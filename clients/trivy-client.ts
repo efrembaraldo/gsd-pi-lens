@@ -199,9 +199,7 @@ export function isTrivyComposeEnabled(cwd: string): boolean {
 	try {
 		const config = loadPiLensProjectConfig(cwd);
 		const compose = (
-			config.raw as
-				| { trivy?: { compose?: { enabled?: unknown } } }
-				| undefined
+			config.raw as { trivy?: { compose?: { enabled?: unknown } } } | undefined
 		)?.trivy?.compose;
 		return compose?.enabled === true;
 	} catch {

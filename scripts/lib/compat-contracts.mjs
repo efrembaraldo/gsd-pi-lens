@@ -290,7 +290,10 @@ export const CONTRACTS = [
 			{
 				name: "source",
 				candidates: [
-					{ path: "dist/session/agent-session-extensions.js", observedAt: "0.80.6" },
+					{
+						path: "dist/session/agent-session-extensions.js",
+						observedAt: "0.80.6",
+					},
 				],
 			},
 		],
@@ -305,7 +308,10 @@ export const CONTRACTS = [
 			{
 				name: "source",
 				candidates: [
-					{ path: "dist/session/agent-session-events.js", observedAt: "0.80.6" },
+					{
+						path: "dist/session/agent-session-events.js",
+						observedAt: "0.80.6",
+					},
 				],
 			},
 		],

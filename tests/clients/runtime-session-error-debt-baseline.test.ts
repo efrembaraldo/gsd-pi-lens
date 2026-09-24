@@ -105,7 +105,11 @@ function makeRuntime(overrides: Partial<RuntimeMock> = {}): RuntimeMock {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeDeps(ctxCwd: string, runtime: RuntimeMock, getFlag: (name: string) => unknown) {
+function makeDeps(
+	ctxCwd: string,
+	runtime: RuntimeMock,
+	getFlag: (name: string) => unknown,
+) {
 	return withResidentBootstrap({
 		ctxCwd,
 		getFlag,

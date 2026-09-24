@@ -65,7 +65,9 @@ describe("workflow-disposition (S01 fork policy)", () => {
 				expect(on).toBeDefined();
 				if (typeof on === "object" && on !== null && !Array.isArray(on)) {
 					const triggers = Object.keys(on as Record<string, unknown>);
-					expect(triggers).toEqual(expect.arrayContaining(["workflow_dispatch"]));
+					expect(triggers).toEqual(
+						expect.arrayContaining(["workflow_dispatch"]),
+					);
 					// Ensure ONLY workflow_dispatch is present (no other triggers).
 					for (const key of triggers) {
 						expect(key).toBe("workflow_dispatch");

@@ -416,7 +416,12 @@ function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
  * `skipped` / 0-diagnostic read-as-clean bucket.
  */
 type WarmupOutcome = {
-	outcome: "warmed" | "warmup-timeout" | "warmup-failed" | "unsupported" | "no-lsp";
+	outcome:
+		| "warmed"
+		| "warmup-timeout"
+		| "warmup-failed"
+		| "unsupported"
+		| "no-lsp";
 	durationMs: number;
 };
 

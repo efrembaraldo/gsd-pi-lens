@@ -724,9 +724,7 @@ describe("analyzeFile", () => {
 		// because the hoisted `mockTouchFile` is typed `vi.fn(async () =>
 		// undefined)` — its return type is `Promise<undefined>`. `mockImplementation`
 		// is the untyped seam the production return type doesn't constrain.
-		mockTouchFile.mockImplementation(
-			async () => ({} as unknown as undefined),
-		);
+		mockTouchFile.mockImplementation(async () => ({}) as unknown as undefined);
 		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
 		vi.mocked(getLatencyReports).mockReset();
 		vi.mocked(getLatencyReports).mockReturnValue([]);

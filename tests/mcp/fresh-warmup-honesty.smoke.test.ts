@@ -27,80 +27,81 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { McpHarness, repoRoot } from "./harness.js";
 
-describe("MCP mode=fresh LSP warm-up honesty (real spawn)", { retry: 2 }, () => {
-	let harness: McpHarness;
-	let projectDir: string;
-	let targetFile: string;
+describe(
+	"MCP mode=fresh LSP warm-up honesty (real spawn)",
+	{ retry: 2 },
+	() => {
+		let harness: McpHarness;
+		let projectDir: string;
+		let targetFile: string;
 
-	beforeAll(() => {
-		projectDir = mkdtempSync(path.join(tmpdir(), "pi-lens-fresh-warmup-"));
-		// Minimal tsconfig so typescript-language-server has SOMETHING to read —
-		// even on a 50ms budget, the absence of a tsconfig would skip the index
-		// pass entirely and the warm-up might "succeed" by reporting no files
-		// rather than by timing out. We want the cold-spawn path, which requires
-		// a real tsconfig.
-		writeFileSync(
-			path.join(projectDir, "tsconfig.json"),
-			JSON.stringify({ compilerOptions: { strict: true } }, null, 2),
-		);
-		// Symlink the repo's installed node_modules so typescript-language-server
-		// can resolve its typescript dep inside the throwaway workspace. A symlink
-		// (not a copy) is the right primitive — copy would drift and not be
-		// updated when deps change.
-		symlinkSync(
-			path.join(repoRoot, "node_modules"),
-			path.join(projectDir, "node_modules"),
-		);
-		// Symlink the real `clients/mcp/host-shim.ts` (git-tracked source — see
-		// the test-fixture rule: never .gitignore/gitignored local paths). A
-		// `.ts` file is what `LSPService.supportsLSP` keys off to return true.
-		targetFile = path.join(projectDir, "host-shim.ts");
-		symlinkSync(
-			path.join(repoRoot, "clients", "mcp", "host-shim.ts"),
-			targetFile,
-		);
+		beforeAll(() => {
+			projectDir = mkdtempSync(path.join(tmpdir(), "pi-lens-fresh-warmup-"));
+			// Minimal tsconfig so typescript-language-server has SOMETHING to read —
+			// even on a 50ms budget, the absence of a tsconfig would skip the index
+			// pass entirely and the warm-up might "succeed" by reporting no files
+			// rather than by timing out. We want the cold-spawn path, which requires
+			// a real tsconfig.
+			writeFileSync(
+				path.join(projectDir, "tsconfig.json"),
+				JSON.stringify({ compilerOptions: { strict: true } }, null, 2),
+			);
+			// Symlink the repo's installed node_modules so typescript-language-server
+			// can resolve its typescript dep inside the throwaway workspace. A symlink
+			// (not a copy) is the right primitive — copy would drift and not be
+			// updated when deps change.
+			symlinkSync(
+				path.join(repoRoot, "node_modules"),
+				path.join(projectDir, "node_modules"),
+			);
+			// Symlink the real `clients/mcp/host-shim.ts` (git-tracked source — see
+			// the test-fixture rule: never .gitignore/gitignored local paths). A
+			// `.ts` file is what `LSPService.supportsLSP` keys off to return true.
+			targetFile = path.join(projectDir, "host-shim.ts");
+			symlinkSync(
+				path.join(repoRoot, "clients", "mcp", "host-shim.ts"),
+				targetFile,
+			);
 
-		harness = new McpHarness({
-			cwd: projectDir,
-			env: {
-				// Deliberately aggressive budget: a cold typescript-language-server
-				// index will take seconds, so any real warm-up call must breach it.
-				// The env var is read at call time on the fresh worker (see
-				// `mcpFreshWarmupTimeoutMs()` in clients/mcp/analyze.ts).
-				PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS: "50",
-			},
-		});
-	});
-
-	afterAll(() => {
-		harness.dispose();
-		try {
-			rmSync(projectDir, {
-				recursive: true,
-				force: true,
-				maxRetries: 5,
-				retryDelay: 200,
+			harness = new McpHarness({
+				cwd: projectDir,
+				env: {
+					// Deliberately aggressive budget: a cold typescript-language-server
+					// index will take seconds, so any real warm-up call must breach it.
+					// The env var is read at call time on the fresh worker (see
+					// `mcpFreshWarmupTimeoutMs()` in clients/mcp/analyze.ts).
+					PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS: "50",
+				},
 			});
-		} catch {
-			// OS reclaims the temp dir eventually.
-		}
-	});
-
-	it("completes the initialize handshake before the warm-up probe", async () => {
-		const res = await harness.request(1, "initialize", {
-			protocolVersion: "2025-06-18",
-			capabilities: {},
-			clientInfo: { name: "smoke-test", version: "0" },
 		});
-		expect(
-			(res.result as { serverInfo: { name: string } }).serverInfo.name,
-		).toBe("pi-lens-mcp");
-		harness.notify("notifications/initialized");
-	}, 25_000);
 
-	it(
-		"reports lsp.status: 'warmup-timeout' on mode=fresh when PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS elapses",
-		async () => {
+		afterAll(() => {
+			harness.dispose();
+			try {
+				rmSync(projectDir, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 200,
+				});
+			} catch {
+				// OS reclaims the temp dir eventually.
+			}
+		});
+
+		it("completes the initialize handshake before the warm-up probe", async () => {
+			const res = await harness.request(1, "initialize", {
+				protocolVersion: "2025-06-18",
+				capabilities: {},
+				clientInfo: { name: "smoke-test", version: "0" },
+			});
+			expect(
+				(res.result as { serverInfo: { name: string } }).serverInfo.name,
+			).toBe("pi-lens-mcp");
+			harness.notify("notifications/initialized");
+		}, 25_000);
+
+		it("reports lsp.status: 'warmup-timeout' on mode=fresh when PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS elapses", async () => {
 			// `mode: "fresh"` forks a fresh subprocess that reads the env we just
 			// set; the 50ms budget is well below a cold typescript-language-server
 			// index pass, so the `LSPService.touchFile` warm-up call MUST return
@@ -146,7 +147,6 @@ describe("MCP mode=fresh LSP warm-up honesty (real spawn)", { retry: 2 }, () => 
 			// outcome and fall back to the dispatch runner's verdict.
 			expect(text).not.toMatch(/lsp 0 \(skipped,/);
 			expect(text).not.toMatch(/lsp 0 \(clean,/);
-		},
-		60_000,
-	);
-});
+		}, 60_000);
+	},
+);

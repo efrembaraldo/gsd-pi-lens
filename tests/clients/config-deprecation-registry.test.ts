@@ -232,9 +232,7 @@ describe("deprecated config surface registry (#2418)", () => {
 		// sits in the `toMatch` regex guard above plus the structural invariant
 		// that the last-released heading is a literal `## [x.y.z]` form in
 		// CHANGELOG.md.
-		expect(
-			compareSemver(LAST_RELEASED_VERSION, PACKAGE_VERSION),
-		).toBe(0);
+		expect(compareSemver(LAST_RELEASED_VERSION, PACKAGE_VERSION)).toBe(0);
 	});
 
 	it("points every row at a registered diagnostic code", () => {

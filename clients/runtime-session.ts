@@ -84,7 +84,10 @@ import {
 import { scanProjectRules } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { resetRustAvailability } from "./rust-client.js";
-import { resetSafeSpawnWindowsCommandCache, safeSpawnAsync } from "./safe-spawn.js";
+import {
+	resetSafeSpawnWindowsCommandCache,
+	safeSpawnAsync,
+} from "./safe-spawn.js";
 import {
 	type BootstrapClients,
 	resetAnalyzerBootstrapSessionState,

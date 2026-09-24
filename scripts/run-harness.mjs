@@ -212,19 +212,13 @@ function runPi(args, cwd, piBinOverride) {
 	if (process.platform === "win32") {
 		attempts.push(
 			[path.join(appData, "npm", "pi.cmd"), args],
-			[
-				path.join(appData, "npm", "npx.cmd"),
-				["@gsd/pi-coding-agent", ...args],
-			],
+			[path.join(appData, "npm", "npx.cmd"), ["@gsd/pi-coding-agent", ...args]],
 			["pi.cmd", args],
 			["pi", args],
 			["npx.cmd", ["@gsd/pi-coding-agent", ...args]],
 		);
 	} else {
-		attempts.push(
-			["pi", args],
-			["npx", ["@gsd/pi-coding-agent", ...args]],
-		);
+		attempts.push(["pi", args], ["npx", ["@gsd/pi-coding-agent", ...args]]);
 	}
 
 	for (const [command, commandArgs] of attempts) {

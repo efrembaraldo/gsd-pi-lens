@@ -91,10 +91,7 @@ describe("isTrivyEnabled / shouldScanTrivy (#131 opt-in)", () => {
 
 describe("isTrivyComposeEnabled (S05)", () => {
 	function writeConfig(cfg: unknown) {
-		fs.writeFileSync(
-			path.join(tmp, ".pi-lens.json"),
-			JSON.stringify(cfg),
-		);
+		fs.writeFileSync(path.join(tmp, ".pi-lens.json"), JSON.stringify(cfg));
 		resetProjectLensConfigCache();
 	}
 

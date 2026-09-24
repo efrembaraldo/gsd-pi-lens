@@ -33,7 +33,11 @@ const repoRoot = path.resolve(
  * every blanket rule must carry a paired `dir/*` + `!dir/file` immediately
  * below it. Outside that documentation the test fails.
  */
-function findBlanketIgnoreRules(): { dir: string; line: number; context: string[] }[] {
+function findBlanketIgnoreRules(): {
+	dir: string;
+	line: number;
+	context: string[];
+}[] {
 	const text = readFileSync(path.join(repoRoot, ".gitignore"), "utf-8");
 	const lines = text.split("\n");
 	// Matches:

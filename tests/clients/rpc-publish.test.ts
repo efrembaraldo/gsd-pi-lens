@@ -24,12 +24,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as busEventsLoggerModule from "../../clients/bus-events-logger.js";
-import {
-	_resetForTests as _resetBusPublishForTests,
-} from "../../clients/bus-publish.js";
-import type {
-	PilensDiagnosticsFileEntry,
-} from "../../clients/diagnostics-publish.js";
+import { _resetForTests as _resetBusPublishForTests } from "../../clients/bus-publish.js";
+import type { PilensDiagnosticsFileEntry } from "../../clients/diagnostics-publish.js";
 import {
 	BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
 	BUS_RPC_REQUEST_FILES_TOUCHED_EVENT,
@@ -72,10 +68,7 @@ function setupRpcTestEnv(opts: SetupOpts = {}): RpcTestEnv {
 	const offFn = vi.fn();
 
 	const emitFn = vi.fn((channel: string, data: unknown) => {
-		if (
-			channel === BUS_RPC_REQUEST_DIAGNOSTICS_EVENT &&
-			diagnosticsHandler
-		) {
+		if (channel === BUS_RPC_REQUEST_DIAGNOSTICS_EVENT && diagnosticsHandler) {
 			diagnosticsHandler(data);
 		} else if (
 			channel === BUS_RPC_REQUEST_FILES_TOUCHED_EVENT &&
@@ -123,9 +116,7 @@ describe("rpc-publish behavioral contract (S07/T05)", () => {
 		const state: PilensDiagnosticsFileEntry[] = [
 			{
 				path: "/tmp/a.ts",
-				diagnostics: [
-					{ severity: "error", message: "boom", tool: "ts" },
-				],
+				diagnostics: [{ severity: "error", message: "boom", tool: "ts" }],
 			},
 		];
 		const env = setupRpcTestEnv({ state });
@@ -161,9 +152,7 @@ describe("rpc-publish behavioral contract (S07/T05)", () => {
 				files: [
 					{
 						path: "/tmp/a.ts",
-						diagnostics: [
-							{ severity: "error", message: "boom", tool: "ts" },
-						],
+						diagnostics: [{ severity: "error", message: "boom", tool: "ts" }],
 						// `truncated` is absent on a non-capped entry — `toEqual`
 						// ignores `undefined` properties, so a literal here would
 						// be redundant and brittle to future `truncated: false`
@@ -310,10 +299,7 @@ describe("rpc-publish behavioral contract (S07/T05)", () => {
 		// Spying on the namespace export — ESM named imports are LIVE
 		// bindings, so mutating `busEventsLoggerModule.logBusEvent` is
 		// visible to `rpc-publish.ts`'s static `import { logBusEvent }`.
-		const logBusEventSpy = vi.spyOn(
-			busEventsLoggerModule,
-			"logBusEvent",
-		);
+		const logBusEventSpy = vi.spyOn(busEventsLoggerModule, "logBusEvent");
 		const env = setupRpcTestEnv();
 		wireRpcBusSubscriber({
 			events: env.events,

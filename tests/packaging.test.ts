@@ -353,13 +353,7 @@ describe("host-provided packages are not vendored (#1926)", () => {
 		if (name.startsWith("@")) {
 			it(`${name} types resolve from the vendored fork`, () => {
 				const base = name.split("/").pop() ?? name;
-				const dts = path.join(
-					root,
-					"vendor",
-					base,
-					"dist",
-					"index.d.ts",
-				);
+				const dts = path.join(root, "vendor", base, "dist", "index.d.ts");
 				expect(
 					fs.existsSync(dts),
 					`${name} must be vendored: missing ${dts} — ` +
@@ -418,8 +412,7 @@ describe("pi-tui peer range covers every tested host version (#2586, superseded 
 	// as the version this repo has verified: the 7 fork-only test pins
 	// (R005/R006/R007/R008/R009/R010) all ran green against this exact
 	// vendored materialization in M003/S02/T03 and M003/S03/T01.
-	const lockVersion =
-		lock.packages?.["node_modules/@gsd/pi-tui"]?.version;
+	const lockVersion = lock.packages?.["node_modules/@gsd/pi-tui"]?.version;
 	const testedVersions = [
 		...new Set([lockVersion, "1.19.0"].filter(Boolean)),
 	] as string[];
@@ -431,10 +424,7 @@ describe("pi-tui peer range covers every tested host version (#2586, superseded 
 	});
 
 	it("declares a peer range", () => {
-		expect(
-			peerRange,
-			"peerDependencies must declare @gsd/pi-tui",
-		).toBeTruthy();
+		expect(peerRange, "peerDependencies must declare @gsd/pi-tui").toBeTruthy();
 	});
 
 	for (const version of testedVersions) {

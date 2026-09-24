@@ -55,8 +55,7 @@ afterEach(() => {
 	else process.env.PI_LENS_RUNNER_TIMEOUT_FLOOR_MS = previousFloor;
 	if (previousRpcMax === undefined)
 		delete process.env.PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE;
-	else
-		process.env.PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE = previousRpcMax;
+	else process.env.PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE = previousRpcMax;
 	if (previousRpcTtl === undefined)
 		delete process.env.PI_LENS_RPC_RESPONSE_TTL_MS;
 	else process.env.PI_LENS_RPC_RESPONSE_TTL_MS = previousRpcTtl;
@@ -165,10 +164,7 @@ describe("getMarkdownFrontmatterAlwaysRead", () => {
 
 	it("defaults to true when markdown is present without frontmatterAlwaysRead", () => {
 		const home = makeTempHome();
-		writeConfig(
-			home,
-			JSON.stringify({ readGuard: { markdown: {} } }),
-		);
+		writeConfig(home, JSON.stringify({ readGuard: { markdown: {} } }));
 		process.env.PI_LENS_CONFIG_PATH = getPiLensGlobalConfigPath(home);
 		expect(getMarkdownFrontmatterAlwaysRead()).toBe(true);
 	});

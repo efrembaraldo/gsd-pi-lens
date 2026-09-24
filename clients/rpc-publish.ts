@@ -574,8 +574,14 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 		return;
 	}
 	if (lastWired && typeof lastWired.events.off === "function") {
-		lastWired.events.off(BUS_RPC_REQUEST_DIAGNOSTICS_EVENT, lastWired.diagnosticsListener);
-		lastWired.events.off(BUS_RPC_REQUEST_FILES_TOUCHED_EVENT, lastWired.filesTouchedListener);
+		lastWired.events.off(
+			BUS_RPC_REQUEST_DIAGNOSTICS_EVENT,
+			lastWired.diagnosticsListener,
+		);
+		lastWired.events.off(
+			BUS_RPC_REQUEST_FILES_TOUCHED_EVENT,
+			lastWired.filesTouchedListener,
+		);
 	}
 
 	// Resolve which resolver the listener closures will use to emit
@@ -590,10 +596,7 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 	// `bus-producer-coverage.test.ts` "no bare emit-call" detector would
 	// otherwise flag as an unsanctioned caller.
 	const liveEmitter = args.liveEmitter ?? moduleLiveEmitter;
-	if (
-		args.liveEmitter === undefined &&
-		typeof events.emit === "function"
-	) {
+	if (args.liveEmitter === undefined && typeof events.emit === "function") {
 		moduleLiveEmitter.wire(events.emit);
 	}
 
@@ -623,7 +626,12 @@ export function wireRpcBusSubscriber(args: WireRpcBusSubscriberArgs): void {
 
 	events.on(BUS_RPC_REQUEST_DIAGNOSTICS_EVENT, diagnosticsListener);
 	events.on(BUS_RPC_REQUEST_FILES_TOUCHED_EVENT, filesTouchedListener);
-	lastWired = { events, liveEmitter, diagnosticsListener, filesTouchedListener };
+	lastWired = {
+		events,
+		liveEmitter,
+		diagnosticsListener,
+		filesTouchedListener,
+	};
 }
 
 /** Test-only: drop every piece of module state so a subsequent

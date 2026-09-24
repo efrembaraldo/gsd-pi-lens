@@ -92,7 +92,9 @@ function installPackages(dir) {
 	// registry (this fork's scope migration), so they are never npm-installed;
 	// they are symlinked from a built gsd-pi checkout instead (see below).
 	const specs = [
-		...new Set(CONTRACTS.map((c) => c.package).filter((p) => !p.startsWith("@gsd/"))),
+		...new Set(
+			CONTRACTS.map((c) => c.package).filter((p) => !p.startsWith("@gsd/")),
+		),
 	];
 	console.log(`installing ${specs.join(", ")} into ${dir} ...`);
 	// Windows `npm` is a `.cmd` shim that only runs under shell mode (same
@@ -108,7 +110,6 @@ function installPackages(dir) {
 		},
 	);
 }
-
 
 // The @gsd SDK packages are gsd-pi monorepo workspaces, not npm-installable.
 // When a built checkout is available (GSD_PI_CHECKOUT — set by the compat-smoke
@@ -129,7 +130,9 @@ function linkSdkPackages(dir) {
 		const src = path.join(checkout, pkg.rel);
 		const dst = path.join(dir, "node_modules", pkg.name);
 		if (!fs.existsSync(src)) {
-			console.warn(`  (GSD_PI_CHECKOUT set but ${pkg.rel} missing — SDK contract will be infra)`);
+			console.warn(
+				`  (GSD_PI_CHECKOUT set but ${pkg.rel} missing — SDK contract will be infra)`,
+			);
 			continue;
 		}
 		fs.mkdirSync(path.dirname(dst), { recursive: true });
@@ -198,9 +201,9 @@ async function main() {
 		}
 	}
 
-		linkSdkPackages(dir);
+	linkSdkPackages(dir);
 
-if (infraFailure) {
+	if (infraFailure) {
 		console.error(
 			`\nINFRA FAILURE — could not install packages: ${infraFailure}`,
 		);
