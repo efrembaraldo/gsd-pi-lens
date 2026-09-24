@@ -623,8 +623,25 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      # The @gsd host is not installable from a registry (workspace:* deps,
+      # 404) and no monorepo package ships a `pi` bin, so CI clones the
+      # open-gsd/gsd-pi checkout and builds its SDK sources. `build:pi` is the
+      # verified root script (same proven step as ci.yml's "Unit tests" job).
+      - name: Checkout + build gsd-pi SDK
+        run: |
+          set -uxo pipefail
+          git clone --depth 1 https://github.com/open-gsd/gsd-pi.git /tmp/gsd-pi
+          cd /tmp/gsd-pi
+          corepack enable
+          pnpm install
+          pnpm run build:pi
+          echo "GSD_PI_CHECKOUT=/tmp/gsd-pi" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: npm ci --ignore-scripts
+      # npm ci prunes extraneous packages from node_modules/@gsd/*, so the
+      # host-provided types must be restored AFTER the install, never before.
+      - name: Restore host-provided @gsd types
+        run: node scripts/setup-types.mjs
       - name: Download core tree-sitter grammars
         run: node scripts/download-grammars.js --core --dest grammars
       - run: npm run build
