@@ -83,9 +83,35 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * Packages` below mirrors that: install @opengsd/gsd-pi into a scratch dir,
  * then copy its nested @gsd/pi-tui into the target install, so a bare `node`
  * load resolves the specifier the same way pi's own runtime does.
+ *
+ * @gsd/pi-tui itself statically imports three more packages that a bare
+ * `node` load must therefore also resolve -- real pi supplies its WHOLE
+ * runtime tree, not just pi-tui, so nothing short of the full closure loads.
+ * This is the same closure scripts/setup-types.mjs's stage 2 already
+ * materializes for vitest, for the identical reason (see that file's own
+ * header comment): dist/utils.js imports "@gsd/native" and
+ * "get-east-asian-width"; dist/components/markdown.js imports "marked".
+ * All three are real dependencies of @opengsd/gsd-pi itself -- @gsd/native
+ * the same postinstall-created workspace symlink @gsd/pi-tui gets (confirmed
+ * via @opengsd/gsd-pi's scripts/link-workspace-packages.cjs), "marked" and
+ * "get-east-asian-width" ordinary declared npm dependencies that npm hoists
+ * to the scratch install's TOP-LEVEL node_modules rather than nesting under
+ * @opengsd/gsd-pi's own (confirmed empirically: absent from
+ * @opengsd/gsd-pi/node_modules, present at the scratch root) -- so each
+ * entry below records where under the scratch tree to look.
  */
-const EXTRACTED_VIA_OPENGSD_PI = "@gsd/pi-tui";
 const OPENGSD_GSD_PI = "@opengsd/gsd-pi";
+const EXTRACTED_VIA_OPENGSD_PI = "@gsd/pi-tui";
+const PI_TUI_PACKAGES = [
+	// { scope, name, nestedUnderOpengsd } — nestedUnderOpengsd:true looks under
+	// scratch/node_modules/@opengsd/gsd-pi/node_modules/<scope>/<name> (the
+	// workspace-internal symlinks); false looks under the scratch install's
+	// own top-level node_modules/<scope>/<name> (hoisted ordinary deps).
+	{ scope: "@gsd", name: "pi-tui", nestedUnderOpengsd: true },
+	{ scope: "@gsd", name: "native", nestedUnderOpengsd: true },
+	{ scope: "", name: "get-east-asian-width", nestedUnderOpengsd: false },
+	{ scope: "", name: "marked", nestedUnderOpengsd: false },
+];
 
 function readPeerRanges() {
 	const pkg = JSON.parse(
@@ -162,73 +188,87 @@ function installHostProvidedPackages(installDir) {
 			],
 			scratch,
 		);
-		const nested = path.join(
-			scratch,
-			"node_modules",
-			"@opengsd",
-			"gsd-pi",
-			"node_modules",
-			"@gsd",
-			"pi-tui",
-		);
-		if (!fs.existsSync(nested)) {
-			console.error(
-				`[supply] ${OPENGSD_GSD_PI}@${gsdPiRange} did not vendor ` +
-					`${EXTRACTED_VIA_OPENGSD_PI} at ${nested}`,
-			);
-			process.exit(1);
+		for (const pkg of PI_TUI_PACKAGES) {
+			extractFromScratch(scratch, installDir, pkg, gsdPiRange);
 		}
-		const dest = path.join(installDir, "node_modules", "@gsd", "pi-tui");
-		fs.mkdirSync(path.dirname(dest), { recursive: true });
-		fs.rmSync(dest, { recursive: true, force: true });
-		// dereference:true is load-bearing, not a defensive default: npm
-		// resolves @opengsd/gsd-pi's OWN internal dependency on @gsd/pi-tui as
-		// a `file:` reference into its own bundled packages/pi-tui source (the
-		// monorepo ships both), so node_modules/@gsd/pi-tui inside the scratch
-		// install is itself a SYMLINK, not a real directory. cpSync's default
-		// (dereference:false) copies that symlink as a symlink pointing back
-		// into `scratch` -- which the `finally` block below deletes moments
-		// later, leaving a dangling symlink at dest. The very next CI step
-		// (Verify extension entry loads) then throws ERR_MODULE_NOT_FOUND, not
-		// because @gsd/pi-tui failed to copy, but because what got copied was
-		// a pointer to a path that no longer exists by the time anything reads
-		// it. dereference:true copies the symlink's TARGET content instead, so
-		// dest is self-contained and survives the scratch cleanup.
-		fs.cpSync(nested, dest, { recursive: true, dereference: true });
-		// Verify immediately, in THIS process, rather than trusting cpSync's
-		// silent return: a later step (Verify extension entry loads) is a
-		// SEPARATE `node` invocation, so a copy that silently landed wrong
-		// (wrong permissions, an interrupted write, cpSync's dereference
-		// default missing a symlinked file) would otherwise only surface
-		// there, several steps and possibly several minutes later, with a
-		// generic ERR_MODULE_NOT_FOUND that gives no hint this step is the
-		// actual cause.
-		const destPkgJson = path.join(dest, "package.json");
-		if (!fs.existsSync(destPkgJson)) {
-			console.error(
-				`[supply] copied ${nested} -> ${dest} but ${destPkgJson} is ` +
-					"missing immediately after — cpSync silently produced an " +
-					"incomplete copy",
-			);
-			process.exit(1);
-		}
-		const destPkg = JSON.parse(fs.readFileSync(destPkgJson, "utf8"));
-		const destMain = path.join(dest, destPkg.main ?? "index.js");
-		if (!fs.existsSync(destMain)) {
-			console.error(
-				`[supply] copied ${dest} has package.json but its "main" ` +
-					`entry ${destMain} is missing — incomplete copy`,
-			);
-			process.exit(1);
-		}
-		console.log(
-			`[supply] extracted ${EXTRACTED_VIA_OPENGSD_PI}@${destPkg.version} ` +
-				`from ${OPENGSD_GSD_PI}@${gsdPiRange} -> ${dest} ` +
-				`(verified ${destPkgJson} and ${destMain} both present)`,
-		);
 	} finally {
 		fs.rmSync(scratch, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Copies one PI_TUI_PACKAGES entry from the scratch @opengsd/gsd-pi install
+ * into installDir/node_modules, dereferencing any symlink so the copy stays
+ * valid after `scratch` is deleted (see PI_TUI_PACKAGES' own comment above).
+ */
+function extractFromScratch(scratch, installDir, pkg, gsdPiRange) {
+	const scopeSegment = pkg.scope ? [pkg.scope, pkg.name] : [pkg.name];
+	const nested = pkg.nestedUnderOpengsd
+		? path.join(
+				scratch,
+				"node_modules",
+				"@opengsd",
+				"gsd-pi",
+				"node_modules",
+				...scopeSegment,
+			)
+		: path.join(scratch, "node_modules", ...scopeSegment);
+	const label = pkg.scope ? `${pkg.scope}/${pkg.name}` : pkg.name;
+	if (!fs.existsSync(nested)) {
+		console.error(
+			`[supply] ${OPENGSD_GSD_PI}@${gsdPiRange} did not vendor ${label} ` +
+				`at ${nested}`,
+		);
+		process.exit(1);
+	}
+	const dest = pkg.scope
+		? path.join(installDir, "node_modules", pkg.scope, pkg.name)
+		: path.join(installDir, "node_modules", pkg.name);
+	fs.mkdirSync(path.dirname(dest), { recursive: true });
+	fs.rmSync(dest, { recursive: true, force: true });
+	// dereference:true is load-bearing, not a defensive default: workspace
+	// packages (@gsd/pi-tui, @gsd/native) are postinstall-created symlinks
+	// into @opengsd/gsd-pi's own bundled packages/ source. cpSync's default
+	// (dereference:false) copies a symlink AS a symlink, still pointing back
+	// into `scratch` -- which installHostProvidedPackages' `finally` block
+	// deletes moments later, leaving a dangling link at dest. The very next
+	// CI step (Verify extension entry loads) then throws
+	// ERR_MODULE_NOT_FOUND, not because the copy step failed, but because
+	// what got copied was a pointer to a path that no longer exists by the
+	// time anything reads it. dereference:true copies the symlink's TARGET
+	// content instead, so dest is self-contained; it's a no-op (equivalent to
+	// a plain copy) for the two ordinary, non-symlinked hoisted deps.
+	fs.cpSync(nested, dest, { recursive: true, dereference: true });
+	// Verify immediately, in THIS process, rather than trusting cpSync's
+	// silent return: a later step (Verify extension entry loads) is a
+	// SEPARATE `node` invocation, so a copy that silently landed wrong (wrong
+	// permissions, an interrupted write, a missed nested symlink) would
+	// otherwise only surface there, several steps and possibly several
+	// minutes later, with a generic error that gives no hint which package
+	// or which step is the actual cause.
+	const destPkgJson = path.join(dest, "package.json");
+	if (!fs.existsSync(destPkgJson)) {
+		console.error(
+			`[supply] copied ${nested} -> ${dest} but ${destPkgJson} is ` +
+				"missing immediately after — cpSync silently produced an " +
+				"incomplete copy",
+		);
+		process.exit(1);
+	}
+	const destPkg = JSON.parse(fs.readFileSync(destPkgJson, "utf8"));
+	const destMain = path.join(dest, destPkg.main ?? "index.js");
+	if (!fs.existsSync(destMain)) {
+		console.error(
+			`[supply] copied ${dest} has package.json but its "main" entry ` +
+				`${destMain} is missing — incomplete copy`,
+		);
+		process.exit(1);
+	}
+	console.log(
+		`[supply] extracted ${label}@${destPkg.version} from ` +
+			`${OPENGSD_GSD_PI}@${gsdPiRange} -> ${dest} (verified ${destPkgJson} ` +
+			`and ${destMain} both present)`,
+	);
 }
 
 const mode = process.argv[2];
