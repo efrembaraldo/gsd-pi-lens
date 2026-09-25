@@ -712,18 +712,17 @@ jobs:
       # anything. Names and ranges come from scripts/lib/host-provided-deps.mjs,
       # never hardcoded here. The type-only host SDK is deliberately NOT
       # installed (Windows MAX_PATH, #1334 S6).
+      #
+      # @gsd/pi-tui is never installable directly -- it's a workspace-only
+      # package inside the gsd-pi monorepo (confirmed E404 against the public
+      # registry). The published @opengsd/gsd-pi package (pi itself) vendors
+      # the same copy nested under its own node_modules, so `--install`
+      # extracts it from there instead of trying a bare `npm install` of it.
       - name: Supply host-provided packages the way pi does (#1926)
         shell: bash
-        run: | # zizmor: ignore[adhoc-packages]
+        run: |
           INSTALL_DIR=$(npm root -g)/$PKG_NAME
-          SUPPLY=scripts/supply-host-provided-deps.mjs
-          HOST_PKGS=()
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] && HOST_PKGS+=("$pkg")
-          done < <(node "$SUPPLY" --install-args)
-          echo "Supplying: ${HOST_PKGS[*]}"
-          npm install --no-save --no-audit --no-fund \
-            --prefix "$INSTALL_DIR" "${HOST_PKGS[@]}"
+          node scripts/supply-host-provided-deps.mjs --install "$INSTALL_DIR"
 
       - name: Verify extension entry loads (catches missing node_modules deps)
         shell: bash

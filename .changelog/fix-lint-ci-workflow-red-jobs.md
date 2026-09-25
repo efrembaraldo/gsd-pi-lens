@@ -8,8 +8,15 @@ section: Fixed
   already got, so `npm run build` failed on `@gsd/pi-tui`/`@gsd/pi-coding-agent`
   type errors; `knip.jsonc` didn't exempt those same optional
   peerDependencies, so the standalone `knip (advisory)` job (which never
-  installs the gsd-pi SDK) reported them as unresolved every run; and
-  `ci.yml`'s `install-test` job still globbed `pi-lens-*.tgz` and referenced
+  installs the gsd-pi SDK) reported them as unresolved every run; `ci.yml`'s
+  `install-test` job still globbed `pi-lens-*.tgz` and referenced
   `$(npm root -g)/pi-lens` in five places, both stale filenames/paths `npm
   pack`/`npm install -g` stopped producing once the package was scoped to
-  `@efrembaraldo/gsd-pi-lens`.
+  `@efrembaraldo/gsd-pi-lens`; and, once those were fixed, `install-test`'s
+  "Supply host-provided packages" step turned out to have never actually
+  worked — it tried `npm install @gsd/pi-tui@^1.19.0` straight from the
+  public registry, but `@gsd/pi-tui` is a workspace-only package inside the
+  gsd-pi monorepo, never published standalone (confirmed E404). Fixed by
+  extracting it from a real `npm install @opengsd/gsd-pi` instead, which
+  vendors the same package nested under its own `node_modules`
+  (`scripts/supply-host-provided-deps.mjs`'s new `--install <dir>` mode).

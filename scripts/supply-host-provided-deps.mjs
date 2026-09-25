@@ -9,11 +9,17 @@
  * specifiers and the entry throws before it can prove anything. Such a step must
  * install them first, exactly as pi provides them.
  *
- * Two modes, both reading the same list so no workflow hardcodes a package name:
+ * Three modes, all reading the same list so no workflow hardcodes a package name:
  *
  *   --install-args   the runtime packages plus their required ranges, ready to
  *                    pass to `npm install`. Only the VALUE-imported ones: the
  *                    type-only host SDK must never be installed (MAX_PATH).
+ *                    Printed as-is even for @gsd/pi-tui, which a bare `npm
+ *                    install` of this output CANNOT actually satisfy (see
+ *                    --install below) -- kept unchanged because
+ *                    tests/scripts/supply-host-provided-deps.test.ts and
+ *                    scripts/release-qa.mjs both pin/consume this exact
+ *                    newline-delimited "name@range per package" contract.
  *   --allow-pattern  an ERE alternation of the TYPE-ONLY host packages, for the
  *                    smoke step's missing-module grep. Only the type-only ones,
  *                    deliberately: every caller supplies the runtime ones first,
@@ -24,8 +30,17 @@
  *                    allowlist would always match. The step's purpose is to fail
  *                    on an unresolved dependency; it caught the minimatch class
  *                    once.
+ *   --install <dir>  actually supplies every HOST_PROVIDED_RUNTIME_PACKAGES
+ *                    entry into <dir>/node_modules, choosing the right
+ *                    mechanism per package (see installHostProvidedPackages
+ *                    below). This is the mode a CI/QA step should call --
+ *                    --install-args exists for callers with their own reason
+ *                    to drive `npm install` themselves.
  *
- * USAGE
+ * USAGE (install everything, the way pi does)
+ *   node scripts/supply-host-provided-deps.mjs --install "$INSTALL_DIR"
+ *
+ * USAGE (raw args, for a caller with its own npm install step)
  *   HOST_PKGS=()
  *   while IFS= read -r pkg; do
  *     [ -n "$pkg" ] && HOST_PKGS+=("$pkg")
@@ -44,7 +59,9 @@
  * license cutoff), so `mapfile` on a macOS runner fails with
  * `mapfile: command not found` (#2586 review round 3).
  */
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -53,6 +70,127 @@ import {
 } from "./lib/host-provided-deps.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * @gsd/pi-tui is a workspace-only package inside the gsd-pi monorepo --
+ * confirmed via `npm view @gsd/pi-tui` returning a real E404 against the
+ * public registry, not a naming typo -- so `npm install @gsd/pi-tui@<range>`
+ * can never succeed on its own. pi supplies it from its OWN vendored copy at
+ * runtime; the published `@opengsd/gsd-pi` package (pi itself) ships that
+ * same copy nested under its own node_modules/@gsd/pi-tui (verified:
+ * @opengsd/gsd-pi@1.20.1 vendors node_modules/@gsd/pi-tui@1.20.1, which
+ * satisfies this repo's declared "^1.19.0" peer range). `installHostProvided
+ * Packages` below mirrors that: install @opengsd/gsd-pi into a scratch dir,
+ * then copy its nested @gsd/pi-tui into the target install, so a bare `node`
+ * load resolves the specifier the same way pi's own runtime does.
+ */
+const EXTRACTED_VIA_OPENGSD_PI = "@gsd/pi-tui";
+const OPENGSD_GSD_PI = "@opengsd/gsd-pi";
+
+function readPeerRanges() {
+	const pkg = JSON.parse(
+		fs.readFileSync(path.join(root, "package.json"), "utf8"),
+	);
+	return pkg.peerDependencies ?? {};
+}
+
+function requirePeerRanges(names, ranges) {
+	const missing = names.filter((name) => !Object.hasOwn(ranges, name));
+	if (missing.length > 0) {
+		// A required package with no peer range means the declaration drifted
+		// from its source list; installing an unpinned copy would hide that.
+		console.error(
+			`[supply] no peerDependencies range for: ${missing.join(", ")} — ` +
+				"declare each as an optional peer (#1926).",
+		);
+		process.exit(1);
+	}
+}
+
+function npmInstall(args, cwd) {
+	// Windows resolves `npm` through npm.cmd, which execFileSync cannot spawn
+	// directly without a shell (ENOENT) -- shell:true lets cmd.exe do that
+	// resolution, same requirement as every other cross-platform npm spawn in
+	// this repo's scripts.
+	execFileSync("npm", args, {
+		cwd,
+		stdio: "inherit",
+		shell: process.platform === "win32",
+	});
+}
+
+/** Installs every HOST_PROVIDED_RUNTIME_PACKAGES entry into installDir/node_modules. */
+function installHostProvidedPackages(installDir) {
+	const ranges = readPeerRanges();
+	requirePeerRanges(HOST_PROVIDED_RUNTIME_PACKAGES, ranges);
+
+	const direct = HOST_PROVIDED_RUNTIME_PACKAGES.filter(
+		(name) => name !== EXTRACTED_VIA_OPENGSD_PI,
+	);
+	if (direct.length > 0) {
+		npmInstall(
+			[
+				"install",
+				"--no-save",
+				"--no-audit",
+				"--no-fund",
+				"--prefix",
+				installDir,
+				...direct.map((name) => `${name}@${ranges[name]}`),
+			],
+			root,
+		);
+	}
+
+	if (!HOST_PROVIDED_RUNTIME_PACKAGES.includes(EXTRACTED_VIA_OPENGSD_PI)) {
+		return;
+	}
+	requirePeerRanges([OPENGSD_GSD_PI], ranges);
+	const gsdPiRange = ranges[OPENGSD_GSD_PI];
+
+	const scratch = fs.mkdtempSync(
+		path.join(fs.realpathSync(os.tmpdir()), "opengsd-gsd-pi-"),
+	);
+	try {
+		npmInstall(
+			[
+				"install",
+				"--no-save",
+				"--no-audit",
+				"--no-fund",
+				`${OPENGSD_GSD_PI}@${gsdPiRange}`,
+			],
+			scratch,
+		);
+		const nested = path.join(
+			scratch,
+			"node_modules",
+			"@opengsd",
+			"gsd-pi",
+			"node_modules",
+			"@gsd",
+			"pi-tui",
+		);
+		if (!fs.existsSync(nested)) {
+			console.error(
+				`[supply] ${OPENGSD_GSD_PI}@${gsdPiRange} did not vendor ` +
+					`${EXTRACTED_VIA_OPENGSD_PI} at ${nested}`,
+			);
+			process.exit(1);
+		}
+		const dest = path.join(installDir, "node_modules", "@gsd", "pi-tui");
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		fs.rmSync(dest, { recursive: true, force: true });
+		fs.cpSync(nested, dest, { recursive: true });
+		console.log(
+			`[supply] extracted ${EXTRACTED_VIA_OPENGSD_PI} from ` +
+				`${OPENGSD_GSD_PI}@${gsdPiRange} -> ${dest}`,
+		);
+	} finally {
+		fs.rmSync(scratch, { recursive: true, force: true });
+	}
+}
+
 const mode = process.argv[2];
 
 if (mode === "--allow-pattern") {
@@ -60,27 +198,25 @@ if (mode === "--allow-pattern") {
 	process.exit(0);
 }
 
+if (mode === "--install") {
+	const installDir = process.argv[3];
+	if (!installDir) {
+		console.error("[supply] --install requires a target directory argument");
+		process.exit(2);
+	}
+	installHostProvidedPackages(installDir);
+	process.exit(0);
+}
+
 if (mode !== "--install-args") {
 	console.error(
-		"[supply] usage: supply-host-provided-deps.mjs --install-args|--allow-pattern",
+		"[supply] usage: supply-host-provided-deps.mjs --install-args|--allow-pattern|--install <dir>",
 	);
 	process.exit(2);
 }
 
-const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-const ranges = pkg.peerDependencies ?? {};
-const missing = HOST_PROVIDED_RUNTIME_PACKAGES.filter(
-	(name) => !Object.hasOwn(ranges, name),
-);
-if (missing.length > 0) {
-	// A runtime host-provided package with no peer range means the declaration
-	// drifted from this list; installing an unpinned copy would hide that.
-	console.error(
-		`[supply] no peerDependencies range for: ${missing.join(", ")} — ` +
-			"declare each host-provided package as an optional peer (#1926).",
-	);
-	process.exit(1);
-}
+const ranges = readPeerRanges();
+requirePeerRanges(HOST_PROVIDED_RUNTIME_PACKAGES, ranges);
 
 // Newline-delimited, not space-joined: a peer range itself can contain a
 // space (e.g. an OR-form semver range like "^0.84.1 || ^0.85.0", #2586
