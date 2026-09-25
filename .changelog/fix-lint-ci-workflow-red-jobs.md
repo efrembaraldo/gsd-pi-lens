@@ -9,6 +9,7 @@ section: Fixed
   type errors; `knip.jsonc` didn't exempt those same optional
   peerDependencies, so the standalone `knip (advisory)` job (which never
   installs the gsd-pi SDK) reported them as unresolved every run; and
-  `ci.yml`'s `install-test` job still globbed `pi-lens-*.tgz`, a filename
-  `npm pack` stopped producing once the package was scoped to
+  `ci.yml`'s `install-test` job still globbed `pi-lens-*.tgz` and referenced
+  `$(npm root -g)/pi-lens` in five places, both stale filenames/paths `npm
+  pack`/`npm install -g` stopped producing once the package was scoped to
   `@efrembaraldo/gsd-pi-lens`.
