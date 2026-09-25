@@ -181,10 +181,50 @@ function installHostProvidedPackages(installDir) {
 		const dest = path.join(installDir, "node_modules", "@gsd", "pi-tui");
 		fs.mkdirSync(path.dirname(dest), { recursive: true });
 		fs.rmSync(dest, { recursive: true, force: true });
-		fs.cpSync(nested, dest, { recursive: true });
+		// dereference:true is load-bearing, not a defensive default: npm
+		// resolves @opengsd/gsd-pi's OWN internal dependency on @gsd/pi-tui as
+		// a `file:` reference into its own bundled packages/pi-tui source (the
+		// monorepo ships both), so node_modules/@gsd/pi-tui inside the scratch
+		// install is itself a SYMLINK, not a real directory. cpSync's default
+		// (dereference:false) copies that symlink as a symlink pointing back
+		// into `scratch` -- which the `finally` block below deletes moments
+		// later, leaving a dangling symlink at dest. The very next CI step
+		// (Verify extension entry loads) then throws ERR_MODULE_NOT_FOUND, not
+		// because @gsd/pi-tui failed to copy, but because what got copied was
+		// a pointer to a path that no longer exists by the time anything reads
+		// it. dereference:true copies the symlink's TARGET content instead, so
+		// dest is self-contained and survives the scratch cleanup.
+		fs.cpSync(nested, dest, { recursive: true, dereference: true });
+		// Verify immediately, in THIS process, rather than trusting cpSync's
+		// silent return: a later step (Verify extension entry loads) is a
+		// SEPARATE `node` invocation, so a copy that silently landed wrong
+		// (wrong permissions, an interrupted write, cpSync's dereference
+		// default missing a symlinked file) would otherwise only surface
+		// there, several steps and possibly several minutes later, with a
+		// generic ERR_MODULE_NOT_FOUND that gives no hint this step is the
+		// actual cause.
+		const destPkgJson = path.join(dest, "package.json");
+		if (!fs.existsSync(destPkgJson)) {
+			console.error(
+				`[supply] copied ${nested} -> ${dest} but ${destPkgJson} is ` +
+					"missing immediately after — cpSync silently produced an " +
+					"incomplete copy",
+			);
+			process.exit(1);
+		}
+		const destPkg = JSON.parse(fs.readFileSync(destPkgJson, "utf8"));
+		const destMain = path.join(dest, destPkg.main ?? "index.js");
+		if (!fs.existsSync(destMain)) {
+			console.error(
+				`[supply] copied ${dest} has package.json but its "main" ` +
+					`entry ${destMain} is missing — incomplete copy`,
+			);
+			process.exit(1);
+		}
 		console.log(
-			`[supply] extracted ${EXTRACTED_VIA_OPENGSD_PI} from ` +
-				`${OPENGSD_GSD_PI}@${gsdPiRange} -> ${dest}`,
+			`[supply] extracted ${EXTRACTED_VIA_OPENGSD_PI}@${destPkg.version} ` +
+				`from ${OPENGSD_GSD_PI}@${gsdPiRange} -> ${dest} ` +
+				`(verified ${destPkgJson} and ${destMain} both present)`,
 		);
 	} finally {
 		fs.rmSync(scratch, { recursive: true, force: true });
