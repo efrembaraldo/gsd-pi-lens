@@ -148,7 +148,20 @@
 		"typescript-language-server",
 		// The packaging workflow reads this pinned devDependency to install
 		// publint in its production-only job, then invokes its binary directly.
-		"publint"
+		"publint",
+		// Optional peerDependencies (package.json#peerDependenciesMeta) whose
+		// types the host provides. Every job that type-checks this repo
+		// (ci.yml's "Unit tests"/"Dependency boundaries"/"prod-install-build")
+		// resolves them via the "Checkout + build gsd-pi SDK" +
+		// "Restore host-provided @gsd types" steps, which copy .d.ts into
+		// vendor/ and runtime JS into node_modules/ directly — never through a
+		// devDependency entry, because gsd-pi isn't published to a registry
+		// npm can install from. lint.yml's "knip (advisory)" job installs only
+		// the pinned knip binary (no gsd-pi checkout, no full npm ci), so knip
+		// can never resolve these here regardless: without this entry it
+		// reports them as "Referenced optional peerDependencies" every run.
+		"@gsd/pi-coding-agent",
+		"@gsd/pi-tui"
 	],
 	"ignoreBinaries": [
 		// .github/workflows/lint.yml installs this with `--no-save`

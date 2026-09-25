@@ -558,12 +558,25 @@ jobs:
         run: npm run audit:rule-catalog
 
       - name: Pack tarball
-        run: npm pack
+        shell: bash
+        run: |
+          # `npm pack --silent` prints ONLY the tarball name to stdout (same
+          # pattern as install-smoke.yml). The package is scoped
+          # (@efrembaraldo/gsd-pi-lens), so npm names the tarball
+          # efrembaraldo-gsd-pi-lens-<version>.tgz, not pi-lens-*.tgz — a
+          # fixed glob here goes stale on the next rename.
+          TARBALL="$(npm pack --silent | tail -1)"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          # Read from package.json rather than hardcoding: `npm install -g`
+          # creates node_modules/<name>, and <name> is scoped
+          # (@efrembaraldo/gsd-pi-lens) since the fork rename -- a fixed
+          # "pi-lens" here goes stale the same way the tarball glob did.
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
 
       - name: Verify required files in tarball
         shell: bash
         run: |
-          TARBALL=$(ls pi-lens-*.tgz)
           echo "Checking tarball: $TARBALL"
           REQUIRED_RE="scripts/download-grammars\.js"
           REQUIRED_RE="${REQUIRED_RE}|dist/index\.js|package\.json"
@@ -596,7 +609,6 @@ jobs:
       - name: Verify package.json entry points exist in tarball
         shell: bash
         run: |
-          TARBALL=$(ls pi-lens-*.tgz)
           TMPDIR=$(mktemp -d)
           tar -xzf "$TARBALL" -C "$TMPDIR"
 
@@ -665,7 +677,6 @@ jobs:
       - name: Install from tarball (simulates pi install npm:pi-lens)
         shell: bash
         run: | # zizmor: ignore[adhoc-packages]
-          TARBALL=$(ls pi-lens-*.tgz)
           npm install -g "$TARBALL"
 
       - name: Verify bundled core grammars shipped in the tarball
@@ -674,7 +685,7 @@ jobs:
           # Core grammars ship bundled in pi-lens/grammars (via prepare + files[]);
           # the tail lazy-fetches at runtime. There is no postinstall now.
           GLOBAL_MODULES=$(npm root -g)
-          GRAMMARS_DIR="$GLOBAL_MODULES/pi-lens/grammars"
+          GRAMMARS_DIR="$GLOBAL_MODULES/$PKG_NAME/grammars"
           echo "Checking bundled core grammars at: $GRAMMARS_DIR"
           ls "$GRAMMARS_DIR"
           test -f "$GRAMMARS_DIR/tree-sitter-typescript.wasm" || \
@@ -684,7 +695,7 @@ jobs:
       - name: Load each extension entry point (catches missing files)
         shell: bash
         run: |
-          INSTALL_DIR=$(npm root -g)/pi-lens
+          INSTALL_DIR=$(npm root -g)/$PKG_NAME
           node scripts/check-extensions.mjs "$INSTALL_DIR"
 
       # #1926: the tarball must not vendor a package pi already supplies. This
@@ -692,7 +703,7 @@ jobs:
       # so it inspects what a real `pi install npm:pi-lens` produces.
       - name: Verify no host-provided package shipped in the tarball (#1926)
         shell: bash
-        run: node scripts/check-prod-install-shape.mjs "$(npm root -g)/pi-lens"
+        run: node scripts/check-prod-install-shape.mjs "$(npm root -g)/$PKG_NAME"
 
       # ...and having proved they are absent, put them there, because the next
       # step is a bare `node` and bare node is not pi. pi resolves these two
@@ -701,18 +712,17 @@ jobs:
       # anything. Names and ranges come from scripts/lib/host-provided-deps.mjs,
       # never hardcoded here. The type-only host SDK is deliberately NOT
       # installed (Windows MAX_PATH, #1334 S6).
+      #
+      # @gsd/pi-tui is never installable directly -- it's a workspace-only
+      # package inside the gsd-pi monorepo (confirmed E404 against the public
+      # registry). The published @opengsd/gsd-pi package (pi itself) vendors
+      # the same copy nested under its own node_modules, so `--install`
+      # extracts it from there instead of trying a bare `npm install` of it.
       - name: Supply host-provided packages the way pi does (#1926)
         shell: bash
-        run: | # zizmor: ignore[adhoc-packages]
-          INSTALL_DIR=$(npm root -g)/pi-lens
-          SUPPLY=scripts/supply-host-provided-deps.mjs
-          HOST_PKGS=()
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] && HOST_PKGS+=("$pkg")
-          done < <(node "$SUPPLY" --install-args)
-          echo "Supplying: ${HOST_PKGS[*]}"
-          npm install --no-save --no-audit --no-fund \
-            --prefix "$INSTALL_DIR" "${HOST_PKGS[@]}"
+        run: |
+          INSTALL_DIR=$(npm root -g)/$PKG_NAME
+          node scripts/supply-host-provided-deps.mjs --install "$INSTALL_DIR"
 
       - name: Verify extension entry loads (catches missing node_modules deps)
         shell: bash
@@ -720,7 +730,7 @@ jobs:
           # Build the allowlist BEFORE leaving the checkout: the global install
           # ships no scripts/, so the module is only reachable from here.
           ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
-          INSTALL_DIR=$(npm root -g)/pi-lens
+          INSTALL_DIR=$(npm root -g)/$PKG_NAME
           cd "$INSTALL_DIR"
           # Simulate how pi loads the extension: compiled entry, loaded by node.
           # ERR_MODULE_NOT_FOUND = missing dep (e.g. 'minimatch') → fail. That
