@@ -84,6 +84,7 @@ import {
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
+import { resolveBackstopStateDir } from "./instance-reaper-state.js";
 import {
 	type InstanceEntry,
 	isInstanceRegistryEnabled,
@@ -976,7 +977,7 @@ export async function sweepUntrackedOrphans(
 ): Promise<BackstopSweepOutcome> {
 	const startedAt = Date.now();
 	if (!isInstanceRegistryEnabled()) {
-		return logBackstopOutcome("disabled", startedAt, {});
+		return logBackstopOutcome("disabled", startedAt, {}, options.onComplete);
 	}
 	const cooldownMs = Math.max(0, options.cooldownMs ?? BACKSTOP_COOLDOWN_MS);
 	let release: (() => Promise<void>) | null = null;
@@ -994,14 +995,24 @@ export async function sweepUntrackedOrphans(
 			// Another process holds the sweep right now. Not an error, and not a
 			// cooldown either — a distinct record, because "somebody else is
 			// sweeping" and "we swept recently" have different causes.
-			return logBackstopOutcome("concurrent", startedAt, {});
+			return logBackstopOutcome(
+				"concurrent",
+				startedAt,
+				{},
+				options.onComplete,
+			);
 		}
 
 		const throttled = await isWithinCooldown(Date.now(), cooldownMs, options);
 		if (throttled !== undefined) {
-			return logBackstopOutcome("cooldown", startedAt, {
-				sinceLastMs: throttled,
-			});
+			return logBackstopOutcome(
+				"cooldown",
+				startedAt,
+				{
+					sinceLastMs: throttled,
+				},
+				options.onComplete,
+			);
 		}
 
 		// Claim the cooldown slot BEFORE the scan, not after: a sweep that dies
@@ -1025,11 +1036,16 @@ export async function sweepUntrackedOrphans(
 				subject: isWindows ? "win32-cim" : "posix-ps",
 				reason: `process enumeration ${scan.status}`,
 			});
-			return logBackstopOutcome("error", startedAt, {
-				scanStatus: scan.status,
-				scannerKill: scan.timeoutKill,
-				scanned: scan.processes.length,
-			});
+			return logBackstopOutcome(
+				"error",
+				startedAt,
+				{
+					scanStatus: scan.status,
+					scannerKill: scan.timeoutKill,
+					scanned: scan.processes.length,
+				},
+				options.onComplete,
+			);
 		}
 
 		const partition = partitionBackstopCandidates(
@@ -1088,6 +1104,7 @@ export async function sweepUntrackedOrphans(
 				unverifiedProcesses: unverified.slice(0, BACKSTOP_IDENTITY_LOG_LIMIT),
 				graceRetryInMs: retryAt,
 			},
+			options.onComplete,
 		);
 	} catch (error) {
 		// The sweep must never throw out of session_start — but "threw" is now
@@ -1097,7 +1114,12 @@ export async function sweepUntrackedOrphans(
 			subject: "sweep",
 			reason: `sweep threw: ${error instanceof Error ? error.message : String(error)}`,
 		});
-		return logBackstopOutcome("error", startedAt, { threw: true });
+		return logBackstopOutcome(
+			"error",
+			startedAt,
+			{ threw: true },
+			options.onComplete,
+		);
 	} finally {
 		if (release) {
 			await release().catch(() => {
@@ -1163,6 +1185,10 @@ export interface BackstopSweepOptions {
 	allowGraceRetry?: boolean;
 	/** Override the follow-up delay (tests). */
 	graceRetryDelayMs?: number;
+	/** Test seam: observe a completed sweep without polling or sleeping. */
+	onComplete?: (outcome: BackstopSweepOutcome) => void;
+	/** Test seam: observe each armed grace retry. */
+	onGraceRetryScheduled?: (delayMs: number) => void;
 }
 
 /**
@@ -1252,6 +1278,7 @@ function scheduleGraceRetryIfNeeded(
 		force: true,
 		allowGraceRetry: false,
 	});
+	options.onGraceRetryScheduled?.(delayMs);
 	return delayMs;
 }
 
@@ -1260,7 +1287,10 @@ function scheduleGraceRetryIfNeeded(
 async function acquireBackstopLock(): Promise<(() => Promise<void>) | null> {
 	try {
 		return await acquireQuarantinePidFileLock(
-			path.join(getGlobalPiLensDir(), "orphan-backstop.lock"),
+			path.join(
+				resolveBackstopStateDir(getGlobalPiLensDir()),
+				"orphan-backstop.lock",
+			),
 			{
 				waitMs: 0,
 				retryMs: 50,
@@ -1309,6 +1339,7 @@ function logBackstopOutcome(
 	outcome: BackstopSweepOutcome,
 	startedAt: number,
 	metadata: Record<string, unknown>,
+	onComplete?: (outcome: BackstopSweepOutcome) => void,
 ): BackstopSweepOutcome {
 	try {
 		logLatency({
@@ -1321,6 +1352,11 @@ function logBackstopOutcome(
 	} catch {
 		// best-effort logging only
 	}
+	try {
+		onComplete?.(outcome);
+	} catch {
+		// Test observers must not alter the best-effort sweep outcome.
+	}
 	return outcome;
 }
 
@@ -1328,7 +1364,10 @@ function logBackstopOutcome(
  *  machine-scoped (every pi-lens process shares one OS process table), and
  *  process-lifetime state cannot express "30 minutes have passed". */
 function backstopStampPath(): string {
-	return path.join(getGlobalPiLensDir(), "orphan-backstop.json");
+	return path.join(
+		resolveBackstopStateDir(getGlobalPiLensDir()),
+		"orphan-backstop.json",
+	);
 }
 
 async function readBackstopStamp(): Promise<number | undefined> {
@@ -1348,7 +1387,9 @@ async function readBackstopStamp(): Promise<number | undefined> {
 
 async function writeBackstopStamp(at: number): Promise<void> {
 	try {
-		await fs.promises.mkdir(getGlobalPiLensDir(), { recursive: true });
+		await fs.promises.mkdir(resolveBackstopStateDir(getGlobalPiLensDir()), {
+			recursive: true,
+		});
 		await writeFileAtomicAsync(
 			backstopStampPath(),
 			JSON.stringify({ lastSweepAt: at }),

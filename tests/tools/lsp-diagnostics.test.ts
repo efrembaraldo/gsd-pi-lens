@@ -53,6 +53,11 @@ vi.mock("../../clients/widget-state.js", () => ({
 
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
 
 describe("lsp_diagnostics tool", () => {
 	beforeEach(() => {
@@ -140,6 +145,83 @@ describe("lsp_diagnostics tool", () => {
 			);
 			expect(ensureWarmForSweep).not.toHaveBeenCalled();
 			expect(touchFile).not.toHaveBeenCalled();
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	// #3405: the explicit query reads the file from disk, so the bytes it pushes
+	// ARE the file's saved state — it declares the touch a save. Recurrence it
+	// prevents: for a save-triggered server (Expert publishes only after a
+	// project recompile, which only didSave schedules) this path returned zero
+	// diagnostics for every file and the tool reported them CLEAN.
+	it("declares the explicit query's touch a save", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-saved-"));
+		const file = path.join(tmpDir, "good.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+		try {
+			await createLspDiagnosticsTool().execute(
+				"diag-saved",
+				{ path: file, severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: "." },
+			);
+			expect(
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
+			).toHaveBeenCalledWith(
+				file,
+				"const value = 1;\n",
+				expect.objectContaining({ source: "lsp_diagnostics", saved: true }),
+			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("returns a bounded result instead of syncing an oversized file", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-too-large-"),
+		);
+		const file = path.join(tmpDir, "huge.ts");
+		const content = `${"x".repeat(RUNTIME_CONFIG.pipeline.lspMaxFileBytes + 1)}\n`;
+		fs.writeFileSync(file, content);
+		resetDegradationLedger();
+		try {
+			const tool = createLspDiagnosticsTool();
+			const single = (await tool.execute(
+				"diag-too-large",
+				{ path: file, severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(single.content[0].text).toBe(
+				`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+			);
+			expect(
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
+			).not.toHaveBeenCalled();
+
+			const batch = (await tool.execute(
+				"diag-too-large-batch",
+				{ paths: [file], severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(batch.content[0].text).toContain(
+				"Outcomes: clean=0, findings=0, unsupported=0, unavailable=0, failed=0, too_large=1, inconclusive=0",
+			);
+			expect(batch.content[0].text).toContain(
+				`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+			);
+			expect(batch.details.cleanFiles).toBe(0);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "lsp-diagnostics-file-too-large",
+				)?.count,
+			).toBe(1);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
@@ -289,6 +371,8 @@ describe("lsp_diagnostics tool", () => {
 	});
 
 	it("short-circuits the batch fan-out when the signal is already aborted (#343)", async () => {
+		// #2499 / PR #2957: the shared results overload must preserve the retired
+		// local pool's contract: unstarted files are absent, not undefined entries.
 		const tool = createLspDiagnosticsTool();
 		const controller = new AbortController();
 		controller.abort();
@@ -659,6 +743,40 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.cleanFiles).toBe(0);
 				expect(result.details?.unconfirmedFiles).toBe(2);
 				expect(String(result.content[0]?.text)).toContain("unconfirmed");
+				expect(String(result.content[0]?.text)).not.toContain(
+					"No diagnostics found.",
+				);
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("directory: preserves the bounded outcome for an oversized file (#3408)", async () => {
+			const tool = createLspDiagnosticsTool();
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-lsp-diag-dir-too-large-"),
+			);
+			const file = path.join(tmpDir, "huge.ts");
+			const content = `${"x".repeat(RUNTIME_CONFIG.pipeline.lspMaxFileBytes + 1)}\n`;
+			fs.writeFileSync(file, content);
+
+			try {
+				const result = (await tool.execute(
+					"diag-dir-too-large",
+					{ path: tmpDir, severity: "all" },
+					new AbortController().signal,
+					null,
+					{ cwd: tmpDir },
+				)) as any;
+
+				expect(result.details?.outcomeCounts?.too_large).toBe(1);
+				expect(result.details?.cleanFiles).toBe(0);
+				expect(String(result.content[0]?.text)).toContain(
+					"Files too large for LSP diagnostics:",
+				);
+				expect(String(result.content[0]?.text)).toContain(
+					`file too large for LSP diagnostics (${Buffer.byteLength(content)} bytes > ${RUNTIME_CONFIG.pipeline.lspMaxFileBytes} limit)`,
+				);
 				expect(String(result.content[0]?.text)).not.toContain(
 					"No diagnostics found.",
 				);
@@ -2346,5 +2464,66 @@ describe("lsp_diagnostics tool", () => {
 				removeTempDirSync(tmpDir);
 			}
 		});
+	});
+});
+
+/**
+ * #3041 recurrence: `lens_diagnostics({source:"lsp", …})` folds straight into
+ * this tool, and it reported ast-grep findings on paths the rule's OWN `ignores`
+ * globs carve out (#965) — the one suppression surface a rule author controls.
+ * ast-grep applies those globs in its `scan` walk but NOT to the per-document
+ * diagnostics its LSP publishes (measured against ast-grep 0.45.3), so this
+ * standalone query path has to apply them itself.
+ */
+describe("lsp_diagnostics per-rule ignores carve-out (#3041)", () => {
+	// The shipped catalog rule that carves out `scripts/**` (#965).
+	const RULE = "no-console-except-error";
+
+	async function check(relative: string) {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-ignores-"),
+		);
+		const file = path.join(tmpDir, relative);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "console.log('cli output');\n");
+		(mocked.service as any).getDiagnostics = vi.fn().mockResolvedValue([
+			{
+				severity: 2,
+				message: "Avoid console.log/debug/warn in production code",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 11 },
+				},
+				source: "ast-grep",
+				code: RULE,
+			},
+		]);
+		try {
+			const result = (await createLspDiagnosticsTool().execute(
+				"diag-rule-ignores",
+				{ paths: [file], severity: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			return {
+				total: result.details?.totalDiagnostics,
+				text: String(result.content[0]?.text),
+			};
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	}
+
+	it("omits a finding whose rule carves out the requested path", async () => {
+		const { total, text } = await check(path.join("scripts", "cli.ts"));
+		expect(total).toBe(0);
+		expect(text).not.toContain("Avoid console.log");
+	});
+
+	it("reports the same finding on a path the rule does not carve out", async () => {
+		const { total, text } = await check(path.join("src", "app.ts"));
+		expect(total).toBe(1);
+		expect(text).toContain("Avoid console.log");
 	});
 });

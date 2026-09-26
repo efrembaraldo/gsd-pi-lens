@@ -63,6 +63,9 @@
  *     --poll-cap-ms <n>    cap for polled async rows (default 120000)
  *     --git-ref <ref>      enable the git-install row against this pushed ref
  *     --keep               leave the scratch root on disk
+ *     --scratch-root <dir> use this directory as the scratch root instead of
+ *                          a fresh mkdtemp dir (created when missing; a
+ *                          pre-existing directory is never removed on exit)
  *
  * Node-only, no new dependency. Every spawn is shell-free (execFile/spawn with
  * an argv array) per AGENTS.md.
@@ -100,6 +103,16 @@ const MIN_SHIPPED_SKILLS = 4;
  * classification refuses the ship verdict instead of reading as green.
  */
 export const TOOL_SMOKE_INSTALL_ROW_ID = "tool-smoke-install";
+
+/**
+ * The baseline row that witnesses the RELEASE WORKFLOW's own publish
+ * toolchain (#2940): `release.yml`'s publish job runs npm through
+ * `npx -y "npm@<packageManager pin>"`, and until this row nothing ever ran
+ * that path before a real release. 9183f39c6 left `npm publish` bare, so the
+ * v4.1.6 run tagged, released, and then took an E404 from the registry
+ * because Node 22's bundled npm has no OIDC trusted-publishing support.
+ */
+export const PUBLISH_TOOLCHAIN_ROW_ID = "publish-toolchain-pinned";
 
 /**
  * Short, schema-stable marker for the baseline's matrix table. Deliberately the
@@ -649,6 +662,164 @@ export function classifyToolSmokeInstallReport(report, context = {}) {
 }
 
 /**
+ * A SKIPPED row refuses the run's ship verdict only when the lane it names
+ * was UNMEASURED (#2663) — not merely because the row was unreachable.
+ *
+ * The two are different states and were conflated: `main()` used to read any
+ * `"unreachable"` probe as the registry lane's network-blocked verdict, so
+ * `git-install-loads` without `--git-ref` turned every working-tree run
+ * INCONCLUSIVE, against this runner's own documented contract that such a run
+ * is the expected exit 2 (`docs/release-qa-baseline.md`, "Outcomes"; the skill
+ * says the same). #2940's publish-toolchain row is the second reachability
+ * skip, which is what made the conflation worth naming rather than living on
+ * as one `if` inside `main()`.
+ *
+ * @param {{ status?: string, unmeasured?: boolean } | null | undefined} probe
+ */
+export function isUnmeasured(probe) {
+	return probe?.status === "unreachable" && probe?.unmeasured === true;
+}
+
+/** Return the rows whose registry-dependent probe could not run. */
+export function unmeasuredRowIds(results) {
+	return (results ?? [])
+		.filter((row) => row.unmeasured === true || isUnmeasured(row))
+		.map((row) => row.id);
+}
+
+/**
+ * The publish job's toolchain → the release-QA row's verdict (#2940).
+ *
+ * Two things have to hold, in this order, and the FIRST is the one the
+ * v4.1.6 release found the hard way: the npm that answers the pinned
+ * invocation must BE the pin (a bare `npm`, a dropped `-y`, or an npx that
+ * fell back to the runner's bundled 10.x all answer something else), and the
+ * dry-run publish through it must exit 0.
+ *
+ * @param {{ pin?: string, reportedVersion?: string, dryRunExitCode?: number, dryRunTail?: string }} observed
+ */
+export function classifyPublishToolchain(observed) {
+	const pin = String(observed?.pin ?? "").trim();
+	if (!pin) {
+		const shows =
+			"package.json carries no `packageManager` npm pin, so the publish " +
+			"job's toolchain is undefined";
+		return { status: "error", detail: shows, shows };
+	}
+	const reported = String(observed?.reportedVersion ?? "").trim();
+	if (reported !== pin) {
+		const shows =
+			`the pinned invocation answered npm ${reported || "(nothing)"}, ` +
+			`expected the pin ${pin} — this is the 9183f39c6 shape: publish ran ` +
+			"a different npm than the one the workflow pins";
+		return { status: "fail", detail: shows, shows };
+	}
+	const exitCode = observed?.dryRunExitCode;
+	const lines = String(observed?.dryRunTail ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	if (exitCode !== 0) {
+		const conflict = lines.find((line) =>
+			/EPUBLISHCONFLICT|cannot publish over the previously published versions/i.test(
+				line,
+			),
+		);
+		if (conflict) {
+			const shows =
+				`npm ${pin} publish --dry-run reached the registry and packed the tarball; ` +
+				`the version is already published (${conflict})`;
+			return { status: "pass", detail: shows, shows };
+		}
+		const cause =
+			lines
+				.filter(
+					(line) =>
+						/^npm (?:error|ERR!)/i.test(line) &&
+						!/complete log can be found/i.test(line),
+				)
+				.slice(-1)[0] ?? lines.slice(-3).join(" | ");
+		const shows =
+			`npm ${pin} publish --dry-run exited ${exitCode ?? "(no exit code)"}` +
+			`${cause ? `: ${cause}` : ""}`;
+		return { status: "fail", detail: shows, shows };
+	}
+	const shows = `npx -y "npm@${pin}" reported ${pin} and its publish --dry-run exited 0`;
+	return { status: "pass", detail: shows, shows };
+}
+
+/**
+ * Drive the publish job's toolchain path over the exported candidate (#2940).
+ *
+ * Runs only in the scratch EXPORT: a dry-run publish fires this package's own
+ * `prepack`/`prepare`, so it may never run in the live checkout — the same
+ * reason `exportHeadForPack` exists.
+ *
+ * @param {{ exportRoot: string, exportedCommit?: string, env: NodeJS.ProcessEnv }} ctx
+ */
+export function runPublishToolchainProbe(ctx) {
+	if (!ctx.exportedCommit) {
+		return {
+			status: "unreachable",
+			unmeasured: false,
+			detail:
+				"no candidate tree was exported (--from npm:…): a dry-run publish " +
+				"runs this package's prepack/prepare, so it is driven only against " +
+				"the scratch export, never the live checkout",
+		};
+	}
+	let pin = "";
+	try {
+		const manifest = JSON.parse(
+			fs.readFileSync(path.join(ctx.exportRoot, "package.json"), "utf8"),
+		);
+		// The workflow's own derivation, character for character:
+		// `packageManager.replace(/^npm@/, '')`.
+		pin = String(manifest.packageManager ?? "").replace(/^npm@/, "");
+	} catch (err) {
+		return {
+			status: "error",
+			detail: `could not read the export's package.json: ${err?.message || err}`,
+		};
+	}
+	let reportedVersion = "";
+	try {
+		reportedVersion = pinnedNpm(pin, ["--version"], ctx.exportRoot, ctx.env);
+	} catch (err) {
+		const detail = `the pinned invocation did not run: ${(err?.stderr || err?.message || err).toString().slice(0, 300)}`;
+		return { status: "unreachable", unmeasured: true, detail, shows: detail };
+	}
+	let dryRunOutput = "";
+	let dryRunExitCode = 0;
+	try {
+		dryRunOutput = pinnedNpm(
+			pin,
+			["publish", "--dry-run"],
+			ctx.exportRoot,
+			ctx.env,
+		);
+	} catch (err) {
+		dryRunOutput = `${err?.stdout ?? ""}${err?.stderr ?? ""}`;
+		dryRunExitCode = typeof err?.status === "number" ? err.status : 1;
+	}
+	const classified = classifyPublishToolchain({
+		pin,
+		reportedVersion,
+		dryRunExitCode,
+		dryRunTail: dryRunOutput,
+	});
+	return {
+		...classified,
+		witness: {
+			ext: "txt",
+			content:
+				`$ npx -y "npm@${pin}" --version\n${reportedVersion}\n` +
+				`$ npx -y "npm@${pin}" publish --dry-run (exit ${dryRunExitCode})\n${dryRunOutput}`,
+		},
+	};
+}
+
+/**
  * Run the installed smoke boundary for the registry baseline row.
  * @param {{ exportRoot: string, installedPkgDir: string, projectDir: string, env: NodeJS.ProcessEnv }} ctx
  * @returns {{ status: string, detail: string, shows?: string, witness?: { ext: string, content: string } }}
@@ -708,6 +879,10 @@ export function runToolSmokeInstallProbe(ctx) {
 		status: classified.status,
 		detail: classified.detail,
 		shows: classified.shows,
+		// The lane's registry-unreachable verdict is what refuses the ship
+		// verdict (#2663) — carried explicitly so `main()` reads THIS state
+		// rather than "any skipped row" (see isUnmeasured).
+		unmeasured: classified.networkBlocked,
 		witness: { ext: "json", content: classified.witnessContent },
 	};
 }
@@ -904,6 +1079,7 @@ export function renderReport({
 
 const IS_WINDOWS = process.platform === "win32";
 const NPM_BIN = IS_WINDOWS ? "npm.cmd" : "npm";
+const NPX_BIN = IS_WINDOWS ? "npx.cmd" : "npx";
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"..",
@@ -922,6 +1098,7 @@ export function parseArgs(argv) {
 		pollCapMs: DEFAULT_POLL_CAP_MS,
 		gitRef: undefined,
 		keep: false,
+		scratchRoot: undefined,
 	};
 	// Every value-taking option reads its value through `value()`, which
 	// refuses a missing one. A trailing `--pi` used to leave `opts.pi`
@@ -950,6 +1127,7 @@ export function parseArgs(argv) {
 			}
 			opts.pollCapMs = parsed;
 		} else if (arg === "--keep") opts.keep = true;
+		else if (arg === "--scratch-root") opts.scratchRoot = value(++i, arg);
 		else throw new Error(`unknown option: ${arg}`);
 	}
 	return opts;
@@ -987,6 +1165,29 @@ export function npm(args, cwd, env) {
 		encoding: "utf8",
 		timeout: NPM_TIMEOUT_MS,
 		env,
+	});
+}
+
+/**
+ * npm through the PINNED invocation `release.yml` publishes with — the same
+ * `npx -y "npm@<pin>"` argv, so this row exercises the release's toolchain
+ * rather than whatever npm is on PATH (#2940). Shell-free, and `env` is
+ * required for the same reason {@link npm}'s is: this spawns our own
+ * `prepack`/`prepare`.
+ */
+export function pinnedNpm(pin, args, cwd, env) {
+	if (!env) {
+		throw new Error(
+			"pinnedNpm() requires the pinned scratch env: a dry-run publish runs " +
+				"pi-lens's own prepare/prepack (#2619 review F1/N1)",
+		);
+	}
+	return execFileSync(NPX_BIN, ["-y", `npm@${pin}`, ...args], {
+		cwd,
+		encoding: "utf8",
+		timeout: NPM_TIMEOUT_MS,
+		env,
+		maxBuffer: 10 * 1024 * 1024,
 	});
 }
 
@@ -1359,6 +1560,79 @@ export async function pollToTerminal(attempt, { capMs, intervalMs }) {
 	};
 }
 
+/**
+ * The installed MCP server entrypoint the `mcp-stdio` config rows drive.
+ */
+function installedServerJs(ctx) {
+	return path.join(ctx.installedPkgDir, "dist", "mcp", "server.js");
+}
+
+/**
+ * Write the agent-dir global config fixture (`PI_CODING_AGENT_DIR` resolution,
+ * refs #2457): `<agentDir>/extensions/pi-lens.json` carrying a distinguishable
+ * global setting. Returns the exact path the resolver reads, so a row asserts
+ * that path by name rather than re-deriving its spelling.
+ */
+function writeAgentDirGlobalConfig(agentDir, value) {
+	const extensions = path.join(agentDir, "extensions");
+	fs.mkdirSync(extensions, { recursive: true });
+	const file = path.join(extensions, "pi-lens.json");
+	fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+	return file;
+}
+
+/**
+ * A row-private HOME with every scratch pin re-pointed under it, derived from
+ * the runner's own `ctx.env`.
+ *
+ * The two global-config rows cannot share the fixture MCP session: the global
+ * config choice is memoized for the life of a server process, and one row needs
+ * the agent-dir file to WIN while the other needs BOTH files present. Each row
+ * therefore owns its process and a resolution context it controls.
+ */
+function rowHomeEnv(ctx, name, extra = {}) {
+	const home = path.join(ctx.scratchRoot, `${name}-home`);
+	fs.mkdirSync(path.join(home, ".pi-lens"), { recursive: true });
+	return {
+		home,
+		env: {
+			...ctx.env,
+			HOME: home,
+			USERPROFILE: home,
+			PI_LENS_HOME: path.join(home, ".pi-lens"),
+			PILENS_DATA_DIR: path.join(home, ".pilens-data"),
+			PI_LENS_INSTALL_LOG: path.join(home, ".pi-lens", "install.log"),
+			npm_config_cache: path.join(ctx.scratchRoot, `${name}-npm-cache`),
+			...extra,
+		},
+	};
+}
+
+/**
+ * Open and initialize a throwaway MCP stdio session against the installed
+ * candidate under a row-private environment; the caller closes it. Mirrors the
+ * shared session handshake in `main()`, and the initialize failure is thrown
+ * (never a PASS) so an unreachable server reads FAIL.
+ */
+async function openScopedMcpSession(serverJs, cwd, env) {
+	const session = new McpSession(serverJs, cwd, env);
+	const init = await session.request(
+		"initialize",
+		{
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "release-qa", version: "1" },
+		},
+		60_000,
+	);
+	if (init.error) {
+		await session.close();
+		throw new Error(`MCP initialize failed: ${init.error.message}`);
+	}
+	session.notify("notifications/initialized", {});
+	return session;
+}
+
 // --- Row probes ------------------------------------------------------------
 //
 // One entry per baseline row id. A row id present here but absent from
@@ -1619,6 +1893,108 @@ const ROW_PROBES = {
 		};
 	},
 
+	"global-config-location": async (ctx) => {
+		// #2457: with `PI_CODING_AGENT_DIR` set and the agent-dir file present
+		// while the legacy default is absent, the resolution must select
+		// `pi-coding-agent-dir` and load THAT file. The witness is the
+		// provenance document naming the path, which is only there if the file
+		// was collected.
+		const agentDir = path.join(ctx.scratchRoot, "global-config-location-agent");
+		const agentConfigPath = writeAgentDirGlobalConfig(agentDir, {
+			lsp: { enabled: true },
+		});
+		const { env } = rowHomeEnv(ctx, "global-config-location", {
+			PI_CODING_AGENT_DIR: agentDir,
+		});
+		let session;
+		try {
+			session = await openScopedMcpSession(
+				installedServerJs(ctx),
+				ctx.projectDir,
+				env,
+			);
+			const result = await session.callToolText("pilens_effective_config", {
+				file: "a.ts",
+			});
+			const named = result.text.includes(agentConfigPath);
+			const shows = named
+				? `effective config names the agent-dir global file ${agentConfigPath} as contributing`
+				: `agent-dir global file not named in the provenance: ${result.text.slice(0, 200)}`;
+			return {
+				status: result.ok && named ? "pass" : "fail",
+				detail: shows,
+				shows,
+				witness: { ext: "txt", content: result.text },
+			};
+		} finally {
+			if (session) await session.close();
+		}
+	},
+
+	"config-shadow-record": async (ctx) => {
+		// #3299: when BOTH global files exist the legacy default wins and the
+		// shadowed agent-dir file is recorded ONCE per session under
+		// `config-location-shadowed` (code PILENS_CFG_0010, `recordDegradationOnce`).
+		// Each config load re-fires the reporter, so two health reads after
+		// three loads prove the count stayed at 1.
+		const agentDir = path.join(ctx.scratchRoot, "config-shadow-record-agent");
+		const agentConfigPath = writeAgentDirGlobalConfig(agentDir, {
+			lsp: { enabled: true },
+		});
+		// Realpath the shadowed path the record carries: `canonicalPathIdentity`
+		// resolves aliases, so the raw spelling is not the identity to match.
+		const shadowedIdentity = fs.realpathSync(agentConfigPath);
+		const { home, env } = rowHomeEnv(ctx, "config-shadow-record", {
+			PI_CODING_AGENT_DIR: agentDir,
+		});
+		const legacyConfigPath = path.join(home, ".pi-lens", "config.json");
+		fs.writeFileSync(legacyConfigPath, "{}\n");
+		let session;
+		try {
+			session = await openScopedMcpSession(
+				installedServerJs(ctx),
+				ctx.projectDir,
+				env,
+			);
+			// A config query loads the global tier (and so fires the reporter);
+			// health then renders the ledger it recorded.
+			await session.callToolText("pilens_effective_config", { file: "a.ts" });
+			const first = await session.callToolText("pilens_health", {});
+			const second = await session.callToolText("pilens_health", {});
+			const shadowLine = (text) =>
+				text
+					.split(/\r?\n/)
+					.find((candidate) => candidate.includes("config-location-shadowed"));
+			const firstLine = shadowLine(first.text);
+			const secondLine = shadowLine(second.text);
+			const namesShadowed = (line) =>
+				Boolean(line) && line.includes(shadowedIdentity);
+			const single = (line) =>
+				Boolean(line) && /config-location-shadowed: 1\b/.test(line);
+			const witnessed =
+				first.ok &&
+				second.ok &&
+				namesShadowed(firstLine) &&
+				single(firstLine) &&
+				namesShadowed(secondLine) &&
+				single(secondLine);
+			const shows = witnessed
+				? `one config-location-shadowed record naming ${shadowedIdentity}, count 1 on two consecutive health reads`
+				: `shadow record not witnessed once-per-session: first=${(firstLine ?? "none").trim().slice(0, 200)} second=${(secondLine ?? "none").trim().slice(0, 200)}`;
+			return {
+				status: witnessed ? "pass" : "fail",
+				detail: shows,
+				shows,
+				witness: {
+					ext: "txt",
+					content: `--- health #1 ---\n${first.text}\n\n--- health #2 ---\n${second.text}`,
+				},
+			};
+		} finally {
+			if (session) await session.close();
+		}
+	},
+
 	"git-install-loads": async (ctx) => {
 		if (!ctx.gitRef) {
 			return {
@@ -1701,11 +2077,60 @@ const ROW_PROBES = {
 	[TOOL_SMOKE_INSTALL_ROW_ID]: async (ctx) => {
 		return runToolSmokeInstallProbe(ctx);
 	},
+
+	// #2940: the release workflow's publish job, driven once against the
+	// candidate before the tag exists. The static half of that gate reads
+	// release.yml (tests/config/release-npm-pin-gate.test.ts); this row runs
+	// the argv it pins.
+	[PUBLISH_TOOLCHAIN_ROW_ID]: async (ctx) => {
+		return runPublishToolchainProbe(ctx);
+	},
 };
 
 /** Row ids this runner can execute. Exported for the drift guard. */
 export function implementedRowIds() {
 	return Object.keys(ROW_PROBES).sort();
+}
+
+/** Best-effort scratch removal shared by the normal and crash exits. */
+export function removeScratchRoot(scratchRoot) {
+	try {
+		fs.rmSync(scratchRoot, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 200,
+		});
+	} catch (err) {
+		console.warn(`[release-qa] cleanup warning: ${err?.message || err}`);
+	}
+}
+
+// The crash exit at the bottom of this file cannot see main()'s locals, so
+// the active scratch root is published here when created and cleared after a
+// successful cleanup. A pre-existing --scratch-root directory is never
+// published: removing a directory the runner did not create would destroy
+// user state.
+let activeScratchRoot = null;
+
+export function noteActiveScratchRoot(scratchRoot) {
+	activeScratchRoot = scratchRoot;
+}
+
+export function cleanupActiveScratchRoot() {
+	if (!activeScratchRoot) return;
+	const root = activeScratchRoot;
+	activeScratchRoot = null;
+	removeScratchRoot(root);
+}
+
+function installScratchSignalCleanup() {
+	const onSignal = (signal) => {
+		cleanupActiveScratchRoot();
+		process.exit(signal === "SIGINT" ? 130 : 143);
+	};
+	process.once("SIGINT", onSignal);
+	process.once("SIGTERM", onSignal);
 }
 
 async function main() {
@@ -1737,9 +2162,18 @@ async function main() {
 		}
 	}
 
-	const scratchRoot = fs.mkdtempSync(
-		path.join(os.tmpdir(), "pi-lens-release-qa-"),
-	);
+	const scratchPreexisting = opts.scratchRoot
+		? fs.existsSync(opts.scratchRoot)
+		: false;
+	const scratchRoot = opts.scratchRoot
+		? path.resolve(opts.scratchRoot)
+		: fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-release-qa-"));
+	if (opts.scratchRoot) fs.mkdirSync(scratchRoot, { recursive: true });
+	// Owned unless the caller named a directory that already existed: the
+	// runner removes only scratch it created, and only when not kept.
+	const scratchOwned = !scratchPreexisting;
+	if (scratchOwned && !opts.keep) noteActiveScratchRoot(scratchRoot);
+	installScratchSignalCleanup();
 	const home = path.join(scratchRoot, "home");
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	fs.writeFileSync(
@@ -1944,6 +2378,7 @@ async function main() {
 		gitRef: opts.gitRef,
 		installedPkgDir,
 		exportRoot,
+		exportedCommit,
 		mcp,
 		mcpTools,
 		packListing,
@@ -1959,7 +2394,6 @@ async function main() {
 	// UNMEASURED, not green, so the run refuses a ship verdict. Carried beside
 	// `blocked`/`candidateFailure` for the same reason they are: the verdict is
 	// about the run, not any one row's outcome cell.
-	const unreachableRows = [];
 	for (const row of rows) {
 		const probe = ROW_PROBES[row.id];
 		let raw;
@@ -1981,7 +2415,6 @@ async function main() {
 			}
 		}
 		const probeOutcome = classifyRowOutcome(raw);
-		if (raw.status === "unreachable") unreachableRows.push(row.id);
 		let witnessPath = "";
 		if (raw.witness) {
 			const file = path.join(evidenceDir, `${row.id}.${raw.witness.ext}`);
@@ -1998,6 +2431,7 @@ async function main() {
 		);
 		results.push({
 			id: row.id,
+			unmeasured: isUnmeasured(raw),
 			outcome: classified.outcome,
 			detail: classified.detail,
 			implemented: attempted,
@@ -2006,6 +2440,7 @@ async function main() {
 		});
 		log(`  → ${formatOutcome(classified)}`);
 	}
+	const unreachableRows = unmeasuredRowIds(results);
 
 	if (mcp) await mcp.close();
 
@@ -2043,17 +2478,9 @@ async function main() {
 	console.log(`report: ${reportPath}`);
 	console.log(`evidence: ${evidenceDir}`);
 
-	if (!opts.keep) {
-		try {
-			fs.rmSync(scratchRoot, {
-				recursive: true,
-				force: true,
-				maxRetries: 5,
-				retryDelay: 200,
-			});
-		} catch (err) {
-			console.warn(`[release-qa] cleanup warning: ${err?.message || err}`);
-		}
+	if (scratchOwned && !opts.keep) {
+		activeScratchRoot = null;
+		removeScratchRoot(scratchRoot);
 	}
 
 	process.exit(coverage.balanced ? verdictExitCode(verdict.verdict) : 4);
@@ -2094,6 +2521,7 @@ const invokedDirectly =
 if (invokedDirectly) {
 	main().catch((err) => {
 		console.error("[release-qa] crashed:", err);
+		cleanupActiveScratchRoot();
 		process.exit(4);
 	});
 }

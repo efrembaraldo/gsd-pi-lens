@@ -67,9 +67,14 @@ const _installerRequire = createRequire(import.meta.url);
 
 import { createGunzip } from "node:zlib";
 import { TRANSIENT_MAX_COOLDOWN_MS } from "../dispatch/runners/utils/availability-policy.js";
-import { recordDegradationOnce } from "../degradation-ledger.js";
+import {
+	getDegradationLedgerGeneration,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
+import { createGenerationMap } from "../generation-guard.js";
+import { resolveToolCwd } from "../tool-cwd.js";
 import {
 	allAvailableGlobalBinDirs,
 	installArgs,
@@ -80,8 +85,14 @@ import {
 	resetSafeSpawnWindowsCommandCache,
 	safeSpawnAsync,
 } from "../safe-spawn.js";
+import {
+	type BoundedOutputSink,
+	createBoundedOutputSink,
+	DEFAULT_MAX_OUTPUT_BYTES,
+} from "../spawn-output-cap.js";
 import { probeToolAsync } from "../tool-probe.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { resolveGitHubToken } from "../zizmor-config.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
@@ -306,8 +317,8 @@ export interface ArchiveSpec {
 	 *   arch:     "x64" | "arm64" | ...
 	 */
 	url: string | ((platform: string, arch: string) => string | undefined);
-	/** Archive kind — both extracted via `tar` (Windows bsdtar handles zip too). */
-	kind: "tgz" | "zip";
+	/** Archive kind, or a platform/arch resolver for releases that vary by OS. */
+	kind: "tgz" | "zip" | ((platform: string, arch: string) => "tgz" | "zip");
 	/**
 	 * Launcher path relative to the archive's top-level dir (which is stripped on
 	 * extraction), e.g. "bin/spotbugs". On win32 the installer resolves the
@@ -356,6 +367,18 @@ export interface ToolDefinition {
 	 * mechanism for any npm/pnpm/bun-distributed platform-CLI tool.
 	 */
 	platformPackage?: PlatformPackageSpec;
+	/**
+	 * Extra requirement specifiers that bound what pip may resolve for a
+	 * `"pip"`-strategy entry, applied through pip's own `PIP_CONSTRAINT` (#3311).
+	 * For a package whose published metadata under-constrains a dependency that
+	 * then breaks it: `cmake-language-server` 0.1.11 declares `pygls>=1.1.1`,
+	 * pip resolves pygls 2.x, and pygls 2 removed `pygls.server.LanguageServer`
+	 * — so every invocation of the installed launcher, `--version` included, dies
+	 * in an ImportError. A constraint, not a `packageName` pin: the app version
+	 * is fine, its dependency floor is what is wrong, and `packageName` is a
+	 * single argv token that cannot say anything about a dependency.
+	 */
+	pipConstraints?: string[];
 	/**
 	 * How the managed binary is verified. Absent (the default) spawns
 	 * `checkArgs`. `"package-entry"` verifies SPAWN-FREE — see
@@ -432,7 +455,15 @@ const MANAGED_PACKAGE_FORMATTERS = [
 		id: "cmake-format",
 		name: "cmake-format",
 		installStrategy: "pip",
-		packageName: "cmakelang",
+		// The `yaml` EXTRA, never the bare distribution (#3312). cmakelang reads a
+		// `.cmake-format.yaml` project config through `import yaml`, and upstream
+		// puts PyYAML behind an extra: cmakelang 0.6.13's PyPI metadata declares
+		// `pyyaml (>=5.3) ; extra == 'yaml'`. A bare install still answers
+		// `cmake-format --version` with status 0 and then dies with
+		// `ModuleNotFoundError: No module named 'yaml'` on the first YAML config —
+		// the nightly's red cmake row. Every rung of the pip ladder passes this
+		// string verbatim to pip/pipx, which both accept the `pkg[extra]` spec.
+		packageName: "cmakelang[yaml]",
 	},
 	{ id: "oxfmt", name: "oxfmt", installStrategy: "npm", packageName: "oxfmt" },
 ] satisfies ManagedPackageFormatterSpec[];
@@ -468,6 +499,27 @@ function managedGitHubFormatterTool(
 }
 
 const MANAGED_GITHUB_FORMATTERS = [
+	{
+		id: "typstyle",
+		name: "typstyle",
+		owner: "typstyle-rs",
+		repo: "typstyle",
+		assetPattern: archAssetMatch({
+			linux: {
+				x64: "typstyle-x86_64-unknown-linux-gnu",
+				arm64: "typstyle-aarch64-unknown-linux-gnu",
+			},
+			darwin: {
+				x64: "typstyle-x86_64-apple-darwin",
+				arm64: "typstyle-aarch64-apple-darwin",
+			},
+			win32: {
+				x64: "typstyle-x86_64-pc-windows-msvc.exe",
+				arm64: "typstyle-aarch64-pc-windows-msvc.exe",
+			},
+		}),
+		kind: "binary",
+	},
 	{
 		id: "stylua",
 		name: "StyLua",
@@ -647,7 +699,7 @@ export const TOOLS: ToolDefinition[] = [
 		checkCommand: "jscpd",
 		checkArgs: ["--version"],
 		installStrategy: "npm",
-		packageName: "jscpd@5.0.12", // v4's packaging bug (reprism dep missing lib/languages/) is gone in v5's ground-up Rust rewrite — verified: real per-platform native binary (jscpd-windows-x64-msvc etc. via optionalDependencies, no missing-dir regression), --min-lines/--min-tokens/--reporters/--output/--ignore all unchanged, JSON schema fields read by clients/jscpd-client.ts's parseReport() (statistics.total.*, duplicates[].firstFile/secondFile.name+start, .lines, .tokens) are identical, and it's ~50x faster on this repo (4.1s -> 76ms detection time) — closes #582
+		packageName: "jscpd@5.3.0", // v5.3.0 is the repository's exact devDependency; the v4 packaging defect that required the older v5.0.12 pin is gone, and parseReport() reads the unchanged clone-report fields.
 		binaryName: "jscpd",
 	},
 	// Structural search and dead code detection
@@ -731,6 +783,15 @@ export const TOOLS: ToolDefinition[] = [
 		installStrategy: "pip",
 		packageName: "cmake-language-server",
 		binaryName: "cmake-language-server",
+		// Upstream 0.1.11 (the latest release) imports `LanguageServer` from
+		// `pygls.server`, a symbol pygls 2 removed, while declaring only
+		// `pygls>=1.1.1` — so an unconstrained install resolves pygls 2.1.1 and
+		// produces a launcher that cannot start. Measured against PyPI for the
+		// nightly's interpreter (#3311): `pip download --python-version 3.12
+		// cmake-language-server` → `pygls-2.1.1`; with this constraint →
+		// `pygls-1.3.1` + `lsprotocol-2023.0.1`, and `cmake-language-server
+		// --version` then prints `cmake-language-server 0.1.11` and exits 0.
+		pipConstraints: ["pygls<2"],
 	},
 	{
 		id: "yaml-language-server",
@@ -1247,7 +1308,7 @@ export const TOOLS: ToolDefinition[] = [
 						: `${base}/lua-language-server-${version}-win32-x64.zip`;
 				return undefined;
 			},
-			kind: "zip",
+			kind: (platform) => (platform === "win32" ? "zip" : "tgz"),
 			stripComponents: 0,
 			treeMarker: "bin",
 		},
@@ -1618,6 +1679,34 @@ export const TOOLS: ToolDefinition[] = [
 				return undefined;
 			},
 			binaryInArchive: "gleam",
+		},
+	},
+	{
+		// Tinymist publishes cargo-dist archives containing the `tinymist` binary
+		// for the supported desktop targets. The LSP server uses `tinymist lsp`.
+		id: "tinymist",
+		name: "Tinymist",
+		checkCommand: "tinymist",
+		checkArgs: ["--version"],
+		installStrategy: "github",
+		binaryName: "tinymist",
+		github: {
+			repo: "Myriad-Dreamin/tinymist",
+			assetMatch: archAssetMatch({
+				linux: {
+					x64: "tinymist-x86_64-unknown-linux-gnu.tar.gz",
+					arm64: "tinymist-aarch64-unknown-linux-gnu.tar.gz",
+				},
+				darwin: {
+					x64: "tinymist-x86_64-apple-darwin.tar.gz",
+					arm64: "tinymist-aarch64-apple-darwin.tar.gz",
+				},
+				win32: {
+					x64: "tinymist-x86_64-pc-windows-msvc.zip",
+					arm64: "tinymist-aarch64-pc-windows-msvc.zip",
+				},
+			}),
+			binaryInArchive: "tinymist",
 		},
 	},
 	{
@@ -3060,9 +3149,66 @@ async function getToolPathResolved(
 		if (githubPath) return githubPath;
 	}
 
-	// Check if global
-	if (await isCommandAvailable(tool.checkCommand, tool.checkArgs)) {
-		return tool.checkCommand;
+	// Check if global. `isCommandAvailable` is a PATH walk plus a stat — it
+	// ignores its `_args` parameter by construction — so it answers "a file with
+	// that name is on PATH", never "that command runs". Every OTHER rung of this
+	// ladder spawn-verifies its candidate with the entry's own `checkArgs` before
+	// resolving to it; this rung did not, and a PATH entry that is a file but
+	// cannot run then SHADOWED the managed install that would have worked
+	// (#3311 lane C):
+	//   - rust-analyzer: rustup's `DUP_TOOLS` proxy (rustup 1.29.1 src/lib.rs:32)
+	//     sits in ~/.cargo/bin on every rustup box whether or not the
+	//     `rust-analyzer` COMPONENT is installed. Where it is not, the proxy
+	//     errors out instead of speaking LSP — and the github-release install
+	//     pi-lens would have downloaded was never attempted.
+	//   - cmake-language-server: `pipx install` exits 0 and drops a launcher on
+	//     PATH whose venv resolved pygls 2.x, which removed the symbol the 0.1.11
+	//     server imports. This rung returned it ahead of the pip-user rung, whose
+	//     verification would have caught it.
+	// A VERDICT — the binary ran and rejected its own check (nonzero exit) —
+	// falls through to the rungs below and, for an installable strategy, to the
+	// managed install. A STALL (timeout/signal, or a spawn-boundary refusal the
+	// binary never saw) and an INCONCLUSIVE probe are not verdicts (#1569/#2722
+	// semantics), so those keep the pre-#3311 behaviour and resolve to PATH —
+	// dropping a working-but-slow tool on a kill would be a worse lie than the
+	// one this fixes. `recordVersion` is deliberately NOT passed: version-pin
+	// drift (#589) is about pi-lens's own managed installs, and feeding a
+	// system-installed version into it would turn every PATH tool at another
+	// version into a forced reinstall.
+	if (await isCommandAvailable(tool.checkCommand)) {
+		// A `verification: "package-entry"` entry (#2722) is verified from the
+		// installed tree BESIDE its shim — `verifyNpmPackageEntry` derives the
+		// package dir from `<…>/node_modules/.bin/<shim>`. A bare PATH name has no
+		// such tree to read, so that evidence is unavailable here and its absence
+		// says nothing about the command: this rung keeps the pre-#3311 behaviour
+		// for those entries rather than inventing a verdict from a failed lookup.
+		if (packageEntryVerification(tool) !== undefined) return tool.checkCommand;
+		let probeStalled = false;
+		const verified = await verifyToolBinary(
+			tool.checkCommand,
+			undefined,
+			() => {
+				probeStalled = true;
+				onTransient();
+			},
+			getToolVerificationTimeout(tool),
+			tool.checkArgs,
+			undefined,
+			() => {
+				probeStalled = true;
+			},
+		);
+		if (verified || probeStalled) return tool.checkCommand;
+		// One record per tool per session: the rejected candidate and the check
+		// that rejected it. verifyToolBinary already logged the kind/exit code.
+		recordDegradationOnce({
+			kind: "installer-path-candidate-unrunnable",
+			subject: toolId,
+			reason: `${tool.checkCommand} on PATH failed its own check (${tool.checkArgs.join(" ")}); ignoring PATH for this tool`,
+		});
+		logSessionStart(
+			`auto-install ${toolId}: PATH candidate ${tool.checkCommand} failed ${tool.checkArgs.join(" ")} — ignoring PATH, trying managed install`,
+		);
 	}
 
 	if (tool.installStrategy === "npm") {
@@ -3254,13 +3400,15 @@ async function findPipUserToolPath(
 	verificationArgs: string[] = ["--version"],
 	verificationTimeoutMs = 10_000,
 ): Promise<string | undefined> {
-	const isWindows = process.platform === "win32";
-	const userBaseCandidates = await getPythonUserBaseCandidates();
+	const isWindows = installerPlatform() === "win32";
+	const userBaseCandidates = [
+		path.join(getGlobalPiLensDir(), "pip-tools"),
+		path.join(getGlobalPiLensDir(), "pip-user"),
+		...(await getPythonUserBaseCandidates()),
+	];
 
 	for (const userBase of userBaseCandidates) {
-		const scriptDirs: string[] = [
-			path.join(userBase, isWindows ? "Scripts" : "bin"),
-		];
+		const scriptDirs: string[] = [pipScriptsDir(userBase, installerPlatform())];
 
 		if (isWindows) {
 			try {
@@ -3306,6 +3454,44 @@ async function findPipUserToolPath(
 	}
 
 	return undefined;
+}
+
+/**
+ * The verdict of one `<interpreter> -m site --user-base` probe (#3383).
+ *
+ * Both probes accumulate through {@link createBoundedOutputSink} instead of
+ * `stdout += data`: the concatenation ran inside a `data` handler, where V8's
+ * `RangeError: Invalid string length` is an uncaught exception rather than this
+ * promise's value, and nothing bounded an interpreter that decides to write
+ * forever. A TRUNCATED probe resolves EMPTY rather than trimming a prefix,
+ * because the prefix of a path is a different path: `addBinToPath` would put a
+ * plausible-looking wrong directory on PATH. Empty is the value both probes
+ * already resolve when an interpreter is missing, and every caller handles it.
+ *
+ * Exported for `tests/clients/off-seam-output-bounds.test.ts`: both `data`
+ * handlers that feed it sit inside module-private probe loops that only a real
+ * `python3` on PATH can drive, so this is the seam the bound is pinned at.
+ */
+export function userBaseProbeResult(
+	command: string,
+	code: number | null,
+	stdout: BoundedOutputSink,
+): string {
+	if (stdout.truncated) {
+		recordDegradationOnce({
+			kind: "spawn-output-cap-truncated",
+			subject: `user-base-probe:${command}`,
+			reason: `\`${command} -m site --user-base\` reached the ${DEFAULT_MAX_OUTPUT_BYTES}-byte default cap after ${stdout.observedBytes} bytes; the probed user base is unusable`,
+			metadata: {
+				capBytes: DEFAULT_MAX_OUTPUT_BYTES,
+				capSource: "default",
+				observedBytes: stdout.observedBytes,
+				killed: false,
+			},
+		});
+		return "";
+	}
+	return code === 0 ? stdout.text.trim() : "";
 }
 
 async function getPythonUserBaseCandidates(): Promise<string[]> {
@@ -3356,9 +3542,11 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
 				return;
 			}
 
-			let stdout = "";
-			proc.stdout?.on("data", (data: Buffer | string) => (stdout += data));
-			proc.on("exit", (code) => resolve(code === 0 ? stdout.trim() : ""));
+			const stdout = createBoundedOutputSink();
+			proc.stdout?.on("data", (data: Buffer | string) => stdout.append(data));
+			proc.on("exit", (code) =>
+				resolve(userBaseProbeResult(probe.command, code, stdout)),
+			);
 			proc.on("error", () => resolve(""));
 		});
 		add(userBase);
@@ -3377,9 +3565,57 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
  * call, never the asset download (see installGitHubTool) — the release CDN must
  * not receive the token.
  */
-function githubApiAuthHeaders(): Record<string, string> {
-	const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+async function githubApiAuthHeaders(): Promise<Record<string, string>> {
+	const token = await resolveGitHubToken();
 	return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+class HttpStatusError extends Error {
+	readonly statusCode: number;
+
+	constructor(statusCode: number, url?: string) {
+		super(url ? `HTTP ${statusCode} for ${url}` : `HTTP ${statusCode}`);
+		this.name = "HttpStatusError";
+		this.statusCode = statusCode;
+	}
+}
+
+class GitHubHttpError extends HttpStatusError {
+	readonly anonymousRateLimitExhausted: boolean;
+
+	constructor(
+		statusCode: number,
+		requestHeaders: Record<string, string>,
+		responseHeaders: Record<string, string | string[] | undefined>,
+	) {
+		super(statusCode);
+		this.name = "GitHubHttpError";
+		this.message = `GitHub API HTTP ${statusCode}`;
+		this.anonymousRateLimitExhausted =
+			statusCode === 403 &&
+			!Object.keys(requestHeaders).some(
+				(key) => key.toLowerCase() === "authorization",
+			) &&
+			readHeader(responseHeaders, "x-ratelimit-remaining") === "0";
+	}
+}
+
+function readHeader(
+	headers: Record<string, string | string[] | undefined>,
+	name: string,
+): string | undefined {
+	const entry = Object.entries(headers).find(
+		([key]) => key.toLowerCase() === name.toLowerCase(),
+	)?.[1];
+	return Array.isArray(entry) ? entry[0]?.trim() : entry?.trim();
+}
+
+function isGitHubApiUrl(url: string): boolean {
+	try {
+		return new URL(url).host.toLowerCase() === "api.github.com";
+	} catch {
+		return false;
+	}
 }
 
 function sameHost(a: string, b: string): boolean {
@@ -3449,7 +3685,11 @@ function httpsGetWithMeta(
 					}
 					if (res.statusCode !== 200) {
 						res.resume();
-						return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+						return reject(
+							isGitHubApiUrl(url)
+								? new GitHubHttpError(res.statusCode ?? 0, headers, res.headers)
+								: new HttpStatusError(res.statusCode ?? 0, url),
+						);
 					}
 					const chunks: Buffer[] = [];
 					res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -3549,13 +3789,22 @@ async function installGitHubTool(
 			const body = await httpsGet(
 				`https://api.github.com/repos/${spec.repo}/releases/latest`,
 				5,
-				githubApiAuthHeaders(),
+				await githubApiAuthHeaders(),
 			);
 			releaseJson = JSON.parse(body.toString("utf8"));
 		} catch (err) {
-			logSessionStart(
-				`github-install ${tool.id}: release fetch failed: ${(err as Error).message}`,
-			);
+			const reason =
+				err instanceof GitHubHttpError && err.anonymousRateLimitExhausted
+					? "GitHub API rate limit exhausted; authenticate with `gh auth login` or set GITHUB_TOKEN/GH_TOKEN and retry"
+					: `release fetch failed: ${(err as Error).message}`;
+			if (err instanceof GitHubHttpError && err.anonymousRateLimitExhausted) {
+				recordDegradationOnce({
+					kind: "github-api-rate-limit",
+					subject: tool.id,
+					reason,
+				});
+			}
+			logSessionStart(`github-install ${tool.id}: ${reason}`);
 			return undefined;
 		}
 	}
@@ -4287,15 +4536,26 @@ async function refreshGitHubManagedTool(
 			`https://api.github.com/repos/${spec.repo}/releases/latest`,
 			5,
 			{
-				...githubApiAuthHeaders(),
+				...(await githubApiAuthHeaders()),
 				...(known.etag ? { "If-None-Match": known.etag } : {}),
 			},
 		);
 	} catch (err) {
+		const reason =
+			err instanceof GitHubHttpError && err.anonymousRateLimitExhausted
+				? "GitHub API rate limit exhausted; authenticate with `gh auth login` or set GITHUB_TOKEN/GH_TOKEN and retry"
+				: `release query failed: ${(err as Error).message}`;
+		if (err instanceof GitHubHttpError && err.anonymousRateLimitExhausted) {
+			recordDegradationOnce({
+				kind: "github-api-rate-limit",
+				subject: tool.id,
+				reason,
+			});
+		}
 		return {
 			ok: false,
 			unchanged: true,
-			reason: `release query failed: ${(err as Error).message}`,
+			reason,
 		};
 	}
 
@@ -4436,7 +4696,14 @@ async function refreshPackageManagerManagedTool(
 		tool.installStrategy === "pip"
 			? // `-U` is the whole fix: without it pip treats the installed copy as
 				// satisfying the requirement and the day-one version never moves.
-				await installPipTool(tool.id, tool.packageName, { upgrade: true })
+				await installPipTool(
+					tool.id,
+					tool.packageName,
+					tool.binaryName ?? tool.id,
+					{
+						upgrade: true,
+					},
+				)
 			: // `gem install` always fetches the newest version that satisfies the
 				// requirement, so the install command IS the upgrade command.
 				await installGemTool(tool.id, tool.packageName);
@@ -4667,10 +4934,49 @@ async function installMavenTool(
  */
 export function resolveArchiveUrl(
 	spec: ArchiveSpec,
-	platform: string = process.platform,
+	platform: string = installerPlatform(),
 	arch: string = process.arch,
 ): string | undefined {
 	return typeof spec.url === "function" ? spec.url(platform, arch) : spec.url;
+}
+
+/** Resolve the archive format independently from the extractor implementation. */
+export function resolveArchiveKind(
+	spec: ArchiveSpec,
+	platform: string = installerPlatform(),
+	arch: string = process.arch,
+): "tgz" | "zip" {
+	return typeof spec.kind === "function"
+		? spec.kind(platform, arch)
+		: spec.kind;
+}
+
+function recordArchiveExtractionDegradation(
+	toolId: string,
+	format: "tgz" | "zip",
+	reason: string,
+): void {
+	recordDegradationOnce({
+		kind: "managed-tool-install",
+		subject: `${toolId}:${format}`,
+		reason: `archive extraction ${reason}`,
+	});
+}
+
+async function stripExtractedArchiveRoot(
+	dir: string,
+	components: number,
+): Promise<boolean> {
+	for (let i = 0; i < components; i++) {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		const [entry] = entries;
+		if (entries.length !== 1 || !entry?.isDirectory()) return false;
+		const root = path.join(dir, entry.name);
+		for (const child of await fs.readdir(root))
+			await fs.rename(path.join(root, child), path.join(dir, child));
+		await fs.rm(root, { recursive: true, force: true });
+	}
+	return true;
 }
 
 /**
@@ -4752,9 +5058,11 @@ async function installArchiveTool(
 	const spec = tool.archive;
 	if (!spec) return undefined;
 	const binaryName = tool.binaryName ?? tool.id;
-	const isWindows = process.platform === "win32";
+	const platform = installerPlatform();
+	const isWindows = platform === "win32";
+	const archiveKind = resolveArchiveKind(spec, platform, process.arch);
 
-	const url = resolveArchiveUrl(spec);
+	const url = resolveArchiveUrl(spec, platform, process.arch);
 	if (!url) {
 		logSessionStart(
 			`archive-install ${tool.id}: no archive for ${process.platform}/${process.arch} — unsupported, skipping`,
@@ -4790,7 +5098,7 @@ async function installArchiveTool(
 	// installed copy is now untouched until the replacement is proven good.
 	const extractName = tool.id;
 	const tmpExtractName = `${extractName}.refresh-tmp`;
-	const archiveName = `${tool.id}.download.${spec.kind === "zip" ? "zip" : "tgz"}`;
+	const archiveName = `${tool.id}.download.${archiveKind === "zip" ? "zip" : "tgz"}`;
 	const extractDir = path.join(TOOLS_DIR, extractName);
 	const tmpExtractDir = path.join(TOOLS_DIR, tmpExtractName);
 	const tmpArchive = path.join(TOOLS_DIR, archiveName);
@@ -4809,35 +5117,78 @@ async function installArchiveTool(
 		// dir — stripping would flatten/merge its sibling module folders — so the
 		// flag is omitted. bsdtar handles both .tgz and .zip with -xf.
 		const stripComponents = spec.stripComponents ?? 1;
-		const tarArgs = [
-			spec.kind === "tgz" ? "-xzf" : "-xf",
-			archiveName,
-			"-C",
-			tmpExtractName,
-			...(stripComponents > 0 ? [`--strip-components=${stripComponents}`] : []),
-		];
+		const extractionArgs =
+			archiveKind === "zip" && isWindows
+				? [
+						"-NoProfile",
+						"-Command",
+						`Expand-Archive -LiteralPath '${archiveName}' -DestinationPath '${tmpExtractName}' -Force`,
+					]
+				: archiveKind === "zip"
+					? ["-q", "-o", archiveName, "-d", tmpExtractName]
+					: [
+							"-xzf",
+							archiveName,
+							"-C",
+							tmpExtractName,
+							...(stripComponents > 0
+								? [`--strip-components=${stripComponents}`]
+								: []),
+						];
 		// Resolve `tar` to an absolute path on Windows (System32\tar.exe is the
 		// bsdtar shipped with Windows 10+) so extraction can't be hijacked via a
 		// writable PATH entry — same hardening as the taskkill spawn. On POSIX `tar`
 		// is a trusted coreutil whose absolute path varies by distro, so it stays
 		// bare (consistent with every other tool spawn).
-		const tarBin = isWindows
-			? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe`
-			: "tar";
-		const extractResult = await safeSpawnAsync(tarBin, tarArgs, {
+		const extractor =
+			archiveKind === "zip" && isWindows
+				? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+				: archiveKind === "zip"
+					? "unzip"
+					: isWindows
+						? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe`
+						: "tar";
+		const extractionResult = await safeSpawnAsync(extractor, extractionArgs, {
 			cwd: TOOLS_DIR,
 			timeout: 120_000,
 			ignoreAmbientSignal: true,
 			lifetimeCoupled: true,
 		});
 		const extracted = {
-			ok: extractResult.status === 0,
-			stderr: extractResult.error?.message ?? extractResult.stderr,
+			ok: extractionResult.status === 0,
+			reason:
+				extractionResult.spawnFailure?.kind === "tool-not-found"
+					? "extractor-unavailable"
+					: extractionResult.spawnFailure
+						? "extractor-error"
+						: "extractor-exit",
 		};
 		await fs.rm(tmpArchive, { force: true });
 		if (!extracted.ok) {
+			recordArchiveExtractionDegradation(
+				tool.id,
+				archiveKind,
+				extracted.reason,
+			);
 			logSessionStart(
-				`archive-install ${tool.id}: extraction failed: ${extracted.stderr} — keeping installed version`,
+				`archive-install ${tool.id}: ${archiveKind} extraction failed (${extracted.reason}) — keeping installed version`,
+			);
+			await fs
+				.rm(tmpExtractDir, { recursive: true, force: true })
+				.catch(() => {});
+			return undefined;
+		}
+		if (
+			archiveKind === "zip" &&
+			!(await stripExtractedArchiveRoot(tmpExtractDir, stripComponents))
+		) {
+			recordArchiveExtractionDegradation(
+				tool.id,
+				archiveKind,
+				"layout-invalid",
+			);
+			logSessionStart(
+				`archive-install ${tool.id}: ${archiveKind} layout invalid — keeping installed version`,
 			);
 			await fs
 				.rm(tmpExtractDir, { recursive: true, force: true })
@@ -4856,8 +5207,13 @@ async function installArchiveTool(
 			try {
 				await fs.access(tmpMarker);
 			} catch {
+				recordArchiveExtractionDegradation(
+					tool.id,
+					archiveKind,
+					"marker-missing",
+				);
 				logSessionStart(
-					`archive-install ${tool.id}: tree marker not found at ${tmpMarker} after extraction — keeping installed version`,
+					`archive-install ${tool.id}: ${archiveKind} marker missing after extraction — keeping installed version`,
 				);
 				await fs
 					.rm(tmpExtractDir, { recursive: true, force: true })
@@ -4882,8 +5238,13 @@ async function installArchiveTool(
 		try {
 			await fs.access(tmpResolvedInner);
 		} catch {
+			recordArchiveExtractionDegradation(
+				tool.id,
+				archiveKind,
+				"launcher-missing",
+			);
 			logSessionStart(
-				`archive-install ${tool.id}: launcher not found at ${tmpResolvedInner} after extraction — keeping installed version`,
+				`archive-install ${tool.id}: ${archiveKind} launcher missing after extraction — keeping installed version`,
 			);
 			await fs
 				.rm(tmpExtractDir, { recursive: true, force: true })
@@ -5200,27 +5561,110 @@ export function pipCommandCandidates(): string[] {
 		: ["pip3", "pip", "python3", "python"];
 }
 
+/** Resolve the script directory used by a Python installation on each OS. */
+export function pipScriptsDir(
+	base: string,
+	platform: NodeJS.Platform = installerPlatform(),
+): string {
+	return path.join(base, platform === "win32" ? "Scripts" : "bin");
+}
+
+const pipPep668LoggedRefusals = createGenerationMap("installer-pep668-log");
+
+/**
+ * The constraints environment for `toolId` — `PIP_CONSTRAINT` **and**
+ * `UV_CONSTRAINT`, both naming the same written file — or `{}` when its registry
+ * entry declares no `pipConstraints` (#3311).
+ *
+ * Each resolver's own mechanism, not a pi-lens one, and BOTH are needed because
+ * `installPipTool`'s first rung is pipx, which chooses its own resolver:
+ * - `PIP_CONSTRAINT` is pip's environment form of `-c/--constraint`, and covers
+ *   pipx's pip backend, the pi-lens venv rung, `pip --user` and the
+ *   private-prefix rung.
+ * - `UV_CONSTRAINT` is uv's ("Equivalent to the `--constraints` command-line
+ *   argument", uv 0.12.10 `crates/uv-static/src/env_vars.rs`, added in uv
+ *   0.1.36) and covers pipx's uv backend — which pipx 1.17.6 makes the DEFAULT
+ *   "when uv is available … else 'pip'" (`pipx install --help`). That backend
+ *   ignores `PIP_CONSTRAINT` entirely, and its `--pip-args` translation covers
+ *   an allowlist (`--index-url`, `--extra-index-url`, `--find-links`,
+ *   `--trusted-host`, `--no-binary`, `--only-binary`, `--pre`, `--upgrade`,
+ *   `--no-cache-dir`) that does not include constraints — so neither the pip env
+ *   var nor a pip argv flag can reach it. Measured on pipx 1.17.6 + uv 0.12.10;
+ *   the transcripts are in the PR body (#3396 round 2).
+ *
+ * Both variables carry a WHITESPACE-SEPARATED LIST of files, so a path with a
+ * space in it is not a path to either resolver: uv fails the install outright
+ * (`error: File not found: …/space`, measured). The file therefore goes to the
+ * first whitespace-free directory, and without one the install proceeds
+ * unconstrained rather than broken — which the ladder's PATH verification then
+ * judges on its merits.
+ *
+ * The file is (re)written from the registry on every install, so a constraint
+ * that is edited or removed in the registry cannot be served from a stale file.
+ * A write failure is recorded and the install proceeds unconstrained — the same
+ * resolution as before this field existed.
+ */
+async function pipConstraintEnvFor(toolId: string): Promise<NodeJS.ProcessEnv> {
+	const constraints = TOOLS.find((t) => t.id === toolId)?.pipConstraints;
+	if (!constraints || constraints.length === 0) return {};
+	const directories = [
+		path.join(getGlobalPiLensDir(), "pip-constraints"),
+		path.join(os.tmpdir(), "pi-lens-pip-constraints"),
+	];
+	const directory = directories.find((candidate) => !/\s/.test(candidate));
+	if (!directory) {
+		recordDegradationOnce({
+			kind: "pip-constraint-path-unusable",
+			subject: toolId,
+			reason: `no whitespace-free directory for the constraints file (tried ${directories.join(", ")}); installing unconstrained`,
+		});
+		return {};
+	}
+	const file = path.join(directory, `${toolId}.txt`);
+	try {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		// The shared atomic seam (#1609), not a raw write: a second pi-lens process
+		// may be reading this file as pip's `PIP_CONSTRAINT` while this one
+		// rewrites it, and a torn read would silently under-constrain the install.
+		await writeFileAtomicAsync(file, `${constraints.join("\n")}\n`, {
+			bestEffort: false,
+		});
+	} catch (err) {
+		recordDegradationOnce({
+			kind: "pip-constraint-file-unwritable",
+			subject: toolId,
+			reason: `${file}: ${err instanceof Error ? err.message : String(err)}`,
+		});
+		return {};
+	}
+	logSessionStart(
+		`auto-install pip ${toolId}: constraining resolution with ${constraints.join(", ")} (${file})`,
+	);
+	return { PIP_CONSTRAINT: file, UV_CONSTRAINT: file };
+}
+
 /**
  * Install a pip package tool
  */
 async function installPipTool(
 	toolId: string,
 	packageName: string,
+	binaryName: string,
 	/**
 	 * Add `-U`, turning the install into an upgrade. Without it `pip install`
 	 * treats an already-present package as satisfied and leaves the day-one
 	 * version in place forever — the freeze #1747 is about. The flag is the ONLY
-	 * difference between install and refresh: same command ladder, same
-	 * `--user` target, so a refresh can never write somewhere the install would
-	 * not have.
+	 * difference between install and refresh within each selected environment.
 	 */
 	options: { upgrade?: boolean } = {},
 ): Promise<string | undefined> {
 	try {
-		const isWindows = process.platform === "win32";
-		const verb = options.upgrade
-			? ["install", "-U", "--user"]
-			: ["install", "--user"];
+		const isWindows = installerPlatform() === "win32";
+		const verb = options.upgrade ? ["install", "-U"] : ["install"];
+		// Read from the registry entry rather than added to this function's
+		// signature: every pip rung below, and pipx's OWN internal pip, is bounded
+		// by one env var, so there is nothing per-call to thread through.
+		const pipConstraintEnv = await pipConstraintEnvFor(toolId);
 		// Built from `pipCommandCandidates()` — the single source of truth this
 		// module and any other caller (the tool-smoke lane's toolchain-presence
 		// probe, #2661 review) share, rather than a second, independently
@@ -5233,26 +5677,181 @@ async function installPipTool(
 					: ["-m", "pip", ...verb, packageName],
 		}));
 
-		const errors: string[] = [];
-		for (const candidate of pipCandidates) {
-			const pipResult = await safeSpawnAsync(
-				candidate.command,
-				candidate.args,
-				{
-					timeout: 120_000,
-					ignoreAmbientSignal: true,
-					lifetimeCoupled: true,
-				},
-			);
-			const outcome = {
-				ok: pipResult.status === 0,
-				error: (pipResult.error?.message ?? pipResult.stderr).trim(),
-			};
+		const pep668 = /externally-managed-environment/i;
+		const refuse = (strategy: string, reason: string): void => {
+			if (!pep668.test(reason)) return;
+			const subject = `${toolId}:${strategy}`;
+			recordDegradationOnce({
+				kind: "pip-pep668-strategy-refused",
+				subject,
+				reason,
+			});
+			const logKey = `${getDegradationLedgerGeneration()}:${subject}`;
+			if (pipPep668LoggedRefusals.current(logKey) === 0) {
+				pipPep668LoggedRefusals.bump(logKey);
+				logSessionStart(
+					`auto-install pip ${packageName}: ${strategy} refused by PEP 668 (${boundInstallError(reason)})`,
+				);
+			}
+		};
+		const succeeded = (strategy: string, binaryPath: string): string => {
+			recordDegradationOnce({
+				kind: "pip-install-strategy-succeeded",
+				subject: `${toolId}:${strategy}`,
+				reason: binaryPath,
+			});
+			return binaryPath;
+		};
+		const run = (command: string, args: string[], env?: NodeJS.ProcessEnv) => {
+			// `pipConstraintEnv` is empty unless the entry declares
+			// `pipConstraints`, and it is applied HERE — the single spawn seam every
+			// rung of the ladder (pipx, venv, --user, private-prefix) goes through —
+			// so no rung can be reached with the constraint missing. pipx forwards
+			// it: its `run_subprocess` starts from `dict(os.environ)` and blocklists
+			// only PYTHONPATH/__PYVENV_LAUNCHER__ (pipx 1.16.7 src/pipx/util.py
+			// `_fix_subprocess_env`), so PIP_CONSTRAINT reaches the pip it drives.
+			const spawnEnv =
+				Object.keys(pipConstraintEnv).length > 0
+					? { ...(env ?? process.env), ...pipConstraintEnv }
+					: env;
+			return safeSpawnAsync(command, args, {
+				timeout: 120_000,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
+				cwd: resolveToolCwd("runner", toolId, getGlobalPiLensDir(), {
+					cwd: getGlobalPiLensDir(),
+					suppressTelemetry: true,
+				}).cwd,
+				...(spawnEnv ? { env: spawnEnv } : {}),
+			});
+		};
+		const addBinToPath = async (
+			binDir: string,
+		): Promise<string | undefined> => {
+			try {
+				await fs.access(binDir);
+			} catch {
+				return undefined;
+			}
+			const currentPath = process.env.PATH || process.env.Path || "";
+			const separator = isWindows ? ";" : path.delimiter;
+			if (
+				!currentPath
+					.toLowerCase()
+					.split(separator)
+					.includes(binDir.toLowerCase())
+			) {
+				const updatedPath = `${binDir}${separator}${currentPath}`;
+				process.env.PATH = updatedPath;
+				if (isWindows) process.env.Path = updatedPath;
+			}
+			const names = isWindows
+				? [`${binaryName}.exe`, `${binaryName}.cmd`, binaryName]
+				: [binaryName];
+			for (const name of names) {
+				const candidate = path.join(binDir, name);
+				try {
+					await fs.access(candidate);
+					return candidate;
+				} catch {
+					// continue
+				}
+			}
+			return undefined;
+		};
 
-			if (outcome.ok) {
-				// Ensure user-level scripts directory is available in current process PATH.
-				// This helps tools installed via `pip install --user` become immediately callable.
-				const userBaseResult = await new Promise<string>((resolve) => {
+		if (await isCommandAvailable("pipx")) {
+			// `--force` on the install verb (#3312): this function runs ONLY when the
+			// tool was not resolvable, yet plain `pipx install <pkg>` over an
+			// existing venv exits 0 while printing "not modifying existing
+			// installation. Pass '--force' …" — so an install that changes nothing
+			// reports success and hands back the same unusable launcher. That is the
+			// #2638/#2661 shape (an install that installs nothing reporting like a
+			// real one) and it also swallows a changed package spec, e.g. a venv
+			// created before `cmakelang` grew its `[yaml]` extra above.
+			const result = await run(
+				"pipx",
+				options.upgrade
+					? ["upgrade", packageName]
+					: ["install", "--force", packageName],
+			);
+			const error = (result.error?.message ?? result.stderr).trim();
+			if (result.status === 0) {
+				const location = await run("pipx", [
+					"environment",
+					"--value",
+					"PIPX_BIN_DIR",
+				]);
+				const binDir =
+					location.status === 0 && location.stdout.trim()
+						? location.stdout.trim()
+						: path.join(os.homedir(), ".local", "bin");
+				const binaryPath = await addBinToPath(binDir);
+				if (binaryPath) return succeeded("pipx", binaryPath);
+				throw new Error(
+					`pipx installed ${packageName} but ${binaryName} is not resolvable`,
+				);
+			}
+			refuse("pipx", error);
+		}
+
+		const pythonCandidates = pipCandidates.filter(
+			({ command }) =>
+				command === "python3" || command === "python" || command === "py",
+		);
+		const pythonAvailability = await Promise.all(
+			pythonCandidates.map(({ command }) => isCommandAvailable(command)),
+		);
+		const availablePythonCandidates = pythonCandidates.filter(
+			(_, index) => pythonAvailability[index],
+		);
+		const venvRoot = path.join(getGlobalPiLensDir(), "pip-tools");
+		for (const candidate of availablePythonCandidates) {
+			const venvBin = pipScriptsDir(venvRoot, installerPlatform());
+			let venvPip = path.join(venvBin, isWindows ? "pip.exe" : "pip");
+			try {
+				await fs.access(venvPip);
+			} catch {
+				const created = await run(candidate.command, ["-m", "venv", venvRoot]);
+				const error = (created.error?.message ?? created.stderr).trim();
+				if (created.status !== 0) {
+					refuse("venv", error || "python venv module unavailable");
+					continue;
+				}
+			}
+			try {
+				await fs.access(venvPip);
+			} catch {
+				venvPip = path.join(venvBin, isWindows ? "pip.cmd" : "pip3");
+				try {
+					await fs.access(venvPip);
+				} catch {
+					continue;
+				}
+			}
+			const result = await run(venvPip, [...verb, packageName]);
+			const error = (result.error?.message ?? result.stderr).trim();
+			if (result.status === 0) {
+				const binaryPath = await addBinToPath(venvBin);
+				if (binaryPath) return succeeded("venv", binaryPath);
+				throw new Error(
+					`venv installed ${packageName} but ${binaryName} is not resolvable`,
+				);
+			}
+			refuse("venv", error);
+		}
+
+		const candidateErrors: string[] = [];
+		let userRefused = false;
+		for (const candidate of pipCandidates) {
+			const args =
+				candidate.command === "pip" || candidate.command === "pip3"
+					? [...verb, "--user", packageName]
+					: ["-m", "pip", ...verb, "--user", packageName];
+			const result = await run(candidate.command, args);
+			const error = (result.error?.message ?? result.stderr).trim();
+			if (result.status === 0) {
+				const base = await new Promise<string>((resolve) => {
 					let probe: ReturnType<typeof spawn>;
 					try {
 						probe = spawn(candidate.command, ["-m", "site", "--user-base"], {
@@ -5260,84 +5859,68 @@ async function installPipTool(
 							shell: isWindows,
 						});
 					} catch {
-						// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
-						// pidusage bug class, #533) — best-effort probe, resolve empty.
 						resolve("");
 						return;
 					}
-					let stdout = "";
-					probe.stdout?.on("data", (data) => (stdout += data));
-					probe.on("exit", (code) => {
-						if (code === 0) resolve(stdout.trim());
-						else resolve("");
-					});
+					const stdout = createBoundedOutputSink();
+					probe.stdout?.on("data", (data) => stdout.append(data));
+					probe.on("exit", (code) =>
+						resolve(userBaseProbeResult(candidate.command, code, stdout)),
+					);
 					probe.on("error", () => resolve(""));
 				});
-
-				if (userBaseResult) {
-					const candidateScriptDirs: string[] = [
-						path.join(userBaseResult, isWindows ? "Scripts" : "bin"),
-					];
-
-					if (isWindows) {
-						// Some Python setups report USER_BASE as ...\Roaming\Python,
-						// while scripts live in ...\Roaming\Python\PythonXY\Scripts.
-						try {
-							const children = await fs.readdir(userBaseResult, {
-								withFileTypes: true,
-							});
-							for (const entry of children) {
-								if (!entry.isDirectory()) continue;
-								if (!/^python\d+$/i.test(entry.name)) continue;
-								candidateScriptDirs.push(
-									path.join(userBaseResult, entry.name, "Scripts"),
-								);
-							}
-						} catch {
-							// ignore
-						}
-					}
-
-					const currentPath =
-						process.env.PATH || process.env.Path || process.env.path || "";
-					const separator = isWindows ? ";" : ":";
-					const normalizedPath = currentPath
-						.toLowerCase()
-						.split(separator)
-						.map((p) => p.trim());
-
-					for (const scriptsDir of candidateScriptDirs) {
-						try {
-							await fs.access(scriptsDir);
-							if (!normalizedPath.includes(scriptsDir.toLowerCase())) {
-								const existingPath =
-									process.env.PATH ||
-									process.env.Path ||
-									process.env.path ||
-									"";
-								const updatedPath = `${scriptsDir}${separator}${existingPath}`;
-								process.env.PATH = updatedPath;
-								if (isWindows) {
-									process.env.Path = updatedPath;
-								}
-								debugLog(`Added pip user scripts dir to PATH: ${scriptsDir}`);
-							}
-						} catch {
-							debugLog(`pip user scripts dir not accessible: ${scriptsDir}`);
-						}
-					}
-				}
-
-				return packageName;
+				const binaryPath = base
+					? await addBinToPath(pipScriptsDir(base, installerPlatform()))
+					: undefined;
+				// Keep the historical normal-user result even when the interpreter's
+				// user-base probe is unavailable. The next availability probe owns
+				// resolution through PATH and its user-base candidates.
+				return succeeded("user", binaryPath ?? packageName);
 			}
+			const candidateError = `${candidate.command} ${args.join(" ")}: ${boundInstallError(error, INSTALL_CANDIDATE_ERROR_LIMIT)}`;
+			candidateErrors.push(candidateError);
+			if (pep668.test(error)) {
+				userRefused = true;
+				refuse("user", error);
+			}
+		}
+		if (!userRefused)
+			throw new Error(
+				`pip install failed: ${candidateErrors.join(" | ") || "unknown error"}`,
+			);
 
-			const candidateError = `${candidate.command} ${candidate.args.join(" ")}: ${boundInstallError(outcome.error, INSTALL_CANDIDATE_ERROR_LIMIT)}`;
-			errors.push(candidateError);
-			debugLog(`[pip-fallback] ${candidateError}`);
+		const privateBase = path.join(getGlobalPiLensDir(), "pip-user");
+		const privateEnv = { ...process.env, PYTHONUSERBASE: privateBase };
+		for (const candidate of pipCandidates) {
+			const args =
+				candidate.command === "pip" || candidate.command === "pip3"
+					? [...verb, "--user", "--break-system-packages", packageName]
+					: [
+							"-m",
+							"pip",
+							...verb,
+							"--user",
+							"--break-system-packages",
+							packageName,
+						];
+			const result = await run(candidate.command, args, privateEnv);
+			const error = (result.error?.message ?? result.stderr).trim();
+			if (result.status !== 0) {
+				const candidateError = `${candidate.command} ${args.join(" ")}: ${boundInstallError(error, INSTALL_CANDIDATE_ERROR_LIMIT)}`;
+				candidateErrors.push(candidateError);
+				continue;
+			}
+			const binaryPath = await addBinToPath(
+				pipScriptsDir(privateBase, installerPlatform()),
+			);
+			if (binaryPath) return succeeded("private-prefix", binaryPath);
+			throw new Error(
+				`private-prefix pip installed ${packageName} but ${binaryName} is not resolvable`,
+			);
 		}
 
 		throw new Error(
-			`Failed to install ${packageName}: no usable pip command found (${errors.join(" | ") || "unknown error"})`,
+			`pip install failed: ${candidateErrors.join(" | ") || "unknown error"}`,
 		);
 	} catch (err) {
 		return recordPackageManagerInstallException(
@@ -5531,7 +6114,11 @@ export async function installTool(toolId: string): Promise<boolean> {
 
 			case "pip": {
 				if (!tool.packageName) return false;
-				const pipPath = await installPipTool(tool.id, tool.packageName);
+				const pipPath = await installPipTool(
+					tool.id,
+					tool.packageName,
+					tool.binaryName ?? tool.id,
+				);
 				return finishInstallAttempt(tool.id, pipPath !== undefined, startedAt);
 			}
 
@@ -6016,6 +6603,8 @@ export const GITHUB_TOOLS = [
 	"clojure-lsp",
 	"cue",
 	"gleam",
+	"typstyle",
+	"tinymist",
 	"marksman",
 	"expert",
 ] as const;

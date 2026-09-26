@@ -47,7 +47,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	checkCleanSignalDrift,
 	classifyCleanBehavior,
+	classifyFirstPublish,
+	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
+	createPublishTraceDrainer,
+	strategyKeyForLang,
 } from "./lib/clean-signal.mjs";
 import {
 	bootstrapFixtureWorkspace,
@@ -86,7 +90,9 @@ const { LSP_FIXTURES } = await imp("scripts/smoke-tools.mjs");
 const { getLSPService, resetLSPService } = await imp(
 	"dist/clients/lsp/index.js",
 );
-const { initLSPConfig } = await imp("dist/clients/lsp/config.js");
+const { getServersForFileWithConfig, initLSPConfig } = await imp(
+	"dist/clients/lsp/config.js",
+);
 const { SERVER_DIAGNOSTIC_STRATEGIES } = await imp(
 	"dist/clients/lsp/wait-policy/strategies.js",
 );
@@ -96,13 +102,10 @@ if (install) ({ ensureTool } = await imp("dist/clients/installer/index.js"));
 // #529/#541/#558 drift check: wait-policy/strategies.ts keys its table by SERVER
 // ID, which usually equals the fixture's `lang`, but a few fixtures use a
 // different key (a language alias fixture, e.g. `jedi` → the "python-jedi"
-// strategy entry). Explicit map for the known deviations; anything absent
-// here falls back to identity (fixture lang === strategy key), which covers
-// the core set (typescript, python, ast-grep, opengrep, yaml, …) without
-// upkeep.
-const LANG_TO_STRATEGY_KEY = {
-	jedi: "python-jedi",
-};
+// strategy entry). #3310 moved that map into scripts/lib/clean-signal.mjs
+// (`strategyKeyForLang`) so this script and the first-publish census key
+// identically; anything absent there falls back to identity (fixture lang ===
+// strategy key), which covers the core set without upkeep.
 
 // #524/#529/#541/#558: typescript7[-clean] shares the "typescript" server id
 // with classic, but that id's `silentOnClean: true` marker is measured
@@ -128,8 +131,7 @@ const NATIVE_TS7_LANGS = new Set(["typescript7", "typescript7-clean"]);
 
 function lookupSilentOnClean(lang) {
 	if (NATIVE_TS7_LANGS.has(lang)) return false;
-	const key = LANG_TO_STRATEGY_KEY[lang] ?? lang;
-	return SERVER_DIAGNOSTIC_STRATEGIES[key]?.silentOnClean;
+	return SERVER_DIAGNOSTIC_STRATEGIES[strategyKeyForLang(lang)]?.silentOnClean;
 }
 
 // Budgets (reuse the original probe's generosity — this is off the hot path).
@@ -144,28 +146,54 @@ const PER_SERVER_TIMEOUT_MS = 45000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const src = process.env.CI ? "ci" : "dev";
 
-// ---- in-process publish capture -------------------------------------------
-// The [lsp-pub] trace runs in THIS process (dist is imported), so we intercept
-// console.error, count matching lines per step, and (when PILENS_PUB_DEBUG was
-// already set by the user) still echo them.
-const PUB_RE =
-	/^\[lsp-pub\] server=(\S+) pubVersion=(\S+) docVersion=(\S+) diags=(\d+)/;
-let pubSink = null;
-const realErr = console.error.bind(console);
-console.error = (...args) => {
-	const line =
-		args.length === 1 && typeof args[0] === "string" ? args[0] : args.join(" ");
-	const m = typeof line === "string" ? line.match(PUB_RE) : null;
-	if (m && pubSink) {
-		pubSink.push({
-			server: m[1],
-			pubVersion: m[2],
-			diags: Number(m[4]),
-			versioned: m[2] !== "undefined",
-		});
+// ---- publish capture ------------------------------------------------------
+// The client's `[lsp-pub]` trace is written by `logExtension` to
+// PI_LENS_HOME/extension.log (subsystem `lsp-pub`), NOT to console.error —
+// #1333 moved the sink and this probe kept intercepting console.error, so every
+// phase counted ZERO publishes and every server came back `unknown`. The merge
+// guard then preserved the July 2026 values, which is why the column looked
+// alive while the instrument was dead (#3310). Read the sink the client
+// actually writes: the log is append-only, so a byte offset taken at each phase
+// boundary attributes every publish to exactly one phase.
+const PUB_LOG_PATH = path.join(
+	process.env.PI_LENS_HOME ?? os.tmpdir(),
+	"extension.log",
+);
+function pubLogSize() {
+	try {
+		return fs.statSync(PUB_LOG_PATH).size;
+	} catch {
+		return 0;
 	}
-	if (!m || ECHO_TRACE) realErr(...args);
-};
+}
+
+const drainPublishTrace = createPublishTraceDrainer({
+	echoTrace: ECHO_TRACE,
+	readLog(offset) {
+		const size = pubLogSize();
+		if (size === offset) return { size, read: () => null };
+		return {
+			size,
+			read(start) {
+				try {
+					const fd = fs.openSync(PUB_LOG_PATH, "r");
+					try {
+						const buf = Buffer.alloc(size - start);
+						const bytesRead = fs.readSync(fd, buf, 0, buf.length, start);
+						return {
+							chunk: buf.subarray(0, bytesRead).toString("utf8"),
+							bytesRead,
+						};
+					} finally {
+						fs.closeSync(fd);
+					}
+				} catch {
+					return null;
+				}
+			},
+		};
+	},
+});
 
 // A byte-changing, diagnostic-neutral edit: append a trailing comment line in the
 // file's comment syntax (falls back to a blank line). Keeps the diagnostic SET
@@ -210,11 +238,14 @@ for (const fx of fixtures) {
 	const row = {
 		lang: fx.lang,
 		server: fx.serverHint,
+		serverId: undefined,
 		behavior: "unknown",
 		tier: 0,
 		tierLabel: "",
 		mode: "?",
 		detail: "",
+		// #3310: the second axis measured from the SAME dirty-phase trace.
+		firstPublish: "unknown",
 		cleanFixture: Boolean(fx.clean),
 	};
 	const dst = fs.mkdtempSync(path.join(os.tmpdir(), "clean-probe-"));
@@ -244,6 +275,9 @@ async function probeFixture(fx, dst, row) {
 		repoRoot,
 		workspace: dst,
 	});
+	row.serverId = getServersForFileWithConfig(absFile).find(
+		(server) => server.role !== "auxiliary",
+	)?.id;
 	if (install && ensureTool) {
 		for (const t of fx.tools ?? []) await ensureTool(t).catch(() => undefined);
 	}
@@ -284,13 +318,14 @@ async function probeFixture(fx, dst, row) {
 	let dirtyResult;
 	let support;
 	try {
-		pubSink = dirtyPubs;
+		drainPublishTrace.reset(pubLogSize());
 		dirtyResult = await touch(dirtyContent, PROVE_LIVE_WAIT_MS);
 		await sleep(SETTLE_MS);
 		support = await lsp.getWorkspaceDiagnosticsSupport(absFile);
 		await sleep(SETTLE_MS);
+		// Phase boundary: every publish written so far is the dirty touch's.
+		drainPublishTrace(dirtyPubs, row.serverId);
 
-		pubSink = cleanPubs;
 		fs.writeFileSync(
 			absFile,
 			`${dirtyContent}\n${commentFor(fx.file)} clean-probe edit\n`,
@@ -299,7 +334,7 @@ async function probeFixture(fx, dst, row) {
 		await touch(fs.readFileSync(absFile, "utf8"), STEP_WAIT_MS);
 		await sleep(SETTLE_MS);
 	} finally {
-		pubSink = null;
+		drainPublishTrace(cleanPubs, row.serverId);
 	}
 
 	row.mode = support?.mode ?? "unknown";
@@ -319,10 +354,14 @@ async function probeFixture(fx, dst, row) {
 	};
 	const dirtyDiagCount = Array.isArray(dirtyResult) ? dirtyResult.length : 0;
 	const verdict = classifyCleanBehavior(obs);
+	// #3310: the first-publish class comes from the dirty phase's publish ORDER,
+	// which this trace already holds — no extra touch, no extra server time.
+	const firstPublishVerdict = classifyFirstPublish(dirtyPubs);
+	row.firstPublish = firstPublishVerdict.firstPublish;
 	row.behavior = verdict.behavior;
 	row.tier = verdict.tier;
 	row.tierLabel = verdict.tierLabel;
-	row.detail = `dirtyPubs=${obs.dirtyPublishes}(v:${obs.dirtyVersioned}) cleanPubs=${obs.cleanTransitionPublishes}(v:${obs.cleanTransitionVersioned}) dirtyDiags=${dirtyDiagCount} — ${verdict.reason}`;
+	row.detail = `dirtyPubs=${obs.dirtyPublishes}(v:${obs.dirtyVersioned}) cleanPubs=${obs.cleanTransitionPublishes}(v:${obs.cleanTransitionVersioned}) dirtyDiags=${dirtyDiagCount} first-publish=${row.firstPublish} — ${verdict.reason}; ${firstPublishVerdict.reason}`;
 }
 
 function withTimeout(promise, ms, row) {
@@ -341,7 +380,7 @@ console.log(
 	"\nClean-signal matrix (4-way: 2 versioned / 2* unversioned / 3 silent / unknown, among push servers)\n",
 );
 console.log(
-	`  ${"LANG".padEnd(18)} ${"MODE".padEnd(11)} ${"CLEAN-BEHAVIOR".padEnd(22)} ${"TIER".padEnd(5)} ${"SRC".padEnd(4)} SERVER`,
+	`  ${"LANG".padEnd(18)} ${"MODE".padEnd(11)} ${"CLEAN-BEHAVIOR".padEnd(22)} ${"FIRST-PUBLISH".padEnd(13)} ${"TIER".padEnd(5)} ${"SRC".padEnd(4)} SERVER`,
 );
 for (const r of rows.sort(
 	(a, b) =>
@@ -349,7 +388,7 @@ for (const r of rows.sort(
 		a.lang.localeCompare(b.lang),
 )) {
 	console.log(
-		`  ${r.lang.padEnd(18)} ${String(r.mode).padEnd(11)} ${String(r.behavior).padEnd(22)} ${String(r.tierLabel || "").padEnd(5)} ${src.padEnd(4)} ${r.server}`,
+		`  ${r.lang.padEnd(18)} ${String(r.mode).padEnd(11)} ${String(r.behavior).padEnd(22)} ${String(r.firstPublish).padEnd(13)} ${String(r.tierLabel || "").padEnd(5)} ${src.padEnd(4)} ${r.server}`,
 	);
 }
 const t2v = rows.filter((r) => r.behavior === "publishes-versioned").length;
@@ -430,6 +469,23 @@ console.log(
 	`  unknown (slow/absent/ambiguous — conservative, not guessed):          ${unk}`,
 );
 console.log("  n/a (pull) rows are Tier 1 by protocol (#240), not probed.\n");
+// #3310 first-publish census: which push servers answer didOpen with an EMPTY
+// set before their real one. `emptyFirstPublish: "indexing"` in
+// wait-policy/strategies.ts is derived from THIS measurement, and
+// tests/config/lsp-first-publish-census.test.ts reds when the column below and
+// that marker disagree.
+const emptyFirst = rows.filter((r) => r.firstPublish === "empty-first");
+const directFirst = rows.filter((r) => r.firstPublish === "direct");
+const emptyOnly = rows.filter((r) => r.firstPublish === "empty-only");
+console.log(
+	`  first-publish empty-first (#3310 class — hold the first publish):     ${emptyFirst.length}${emptyFirst.length ? ` (${emptyFirst.map((r) => r.lang).join(", ")})` : ""}`,
+);
+console.log(
+	`  first-publish direct (the first publish IS the answer):                ${directFirst.length}`,
+);
+console.log(
+	`  first-publish empty-only/unknown (not classifiable on this axis):      ${emptyOnly.length + rows.filter((r) => r.firstPublish === "unknown" && r.mode !== "pull").length}\n`,
+);
 
 // Merge classifications into docs/lsp-capability-matrix.md — MERGE, don't
 // overwrite: a server this run couldn't probe (unavailable/unknown on an
@@ -443,7 +499,6 @@ try {
 	console.error(`matrix update skipped: ${e?.message ?? e}`);
 }
 
-console.error = realErr;
 try {
 	await resetLSPService?.({ fast: true });
 } catch {}
@@ -455,11 +510,17 @@ process.exit(0);
 // console drift report and the matrix merge, so they never disagree. Only rows
 // with a comparable classification are kept (mirrors `measurable` below).
 function resolveTargetLangRows(measuredRows) {
+	// #3310: the two axes are independently measurable — a server can produce a
+	// classifiable first-publish class while its clean-behavior comes back
+	// `unknown` (and vice versa). A row is in the population when EITHER axis
+	// says something; each column below is written only when its OWN axis is
+	// comparable, so an unmeasured axis never blanks a prior good value.
 	const measurable = measuredRows.filter(
 		(r) =>
 			r.behavior === "publishes-versioned" ||
 			r.behavior === "publishes-unversioned" ||
-			r.behavior === "silent",
+			r.behavior === "silent" ||
+			COMPARABLE_FIRST_PUBLISH.has(r.firstPublish),
 	);
 	const byTargetLang = new Map();
 	for (const r of measurable) {
@@ -487,7 +548,7 @@ function updateMatrix(measuredRows) {
 		return;
 	}
 	// Only classifications we're confident in are authoritative — resolveTargetLangRows
-	// already filters to publishes-versioned/publishes-unversioned/silent and applies
+	// already filters to rows with at least one comparable axis (#3310) and applies
 	// the clean-fixture-wins rule (a `clean: true` fixture like typescript-clean writes
 	// to its BASE lang's row (typescript): a genuinely clean file is the authoritative
 	// clean→clean observation, and typescript measurably re-publishes while dirty but
@@ -500,10 +561,24 @@ function updateMatrix(measuredRows) {
 	const targetLangRows = resolveTargetLangRows(measuredRows);
 	const measured = targetLangRows.map((r) => {
 		const prior = existingByLang.get(r.targetLang);
+		const behaviorComparable =
+			r.behavior === "publishes-versioned" ||
+			r.behavior === "publishes-unversioned" ||
+			r.behavior === "silent";
 		return {
 			lang: r.targetLang,
-			"clean-behavior": r.behavior,
-			tier: r.tierLabel || String(r.tier),
+			...(behaviorComparable
+				? {
+						"clean-behavior": r.behavior,
+						tier: r.tierLabel || String(r.tier),
+					}
+				: {}),
+			// #3310: only a CLASSIFIABLE first-publish observation is written, so an
+			// `empty-only`/`unknown` run never blanks a prior measured class (the
+			// same merge-guard rule the clean-behavior column follows, #390).
+			...(COMPARABLE_FIRST_PUBLISH.has(r.firstPublish)
+				? { "first-publish": r.firstPublish }
+				: {}),
 			src: mergeSrc(prior ? prior[srcIdx] : "", src),
 		};
 	});
@@ -512,7 +587,7 @@ function updateMatrix(measuredRows) {
 		tbl.header,
 		measured,
 		"lang",
-		["clean-behavior", "tier", "src"],
+		["clean-behavior", "first-publish", "tier", "src"],
 		{ updateOnly: true },
 	);
 	let out = replaceTable(text, marker, tbl.header, tbl.sep, merged);

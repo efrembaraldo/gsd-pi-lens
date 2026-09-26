@@ -30,12 +30,35 @@ config JSON) and how they interact, see [Settings](settings.md).
 
 ### `PI_LENS_CONFIG_PATH`
 
-Override the path of the global config file. **Default:** `~/.pi-lens/config.json`
-(`%USERPROFILE%\.pi-lens\config.json` on Windows). When set, the value is
-resolved to an absolute path and used verbatim.
+Override the path of the global config file. **Default:** the resolution order
+below. When set, the value is resolved to an absolute path and used verbatim;
+it wins over every other location. See the [winning-location table](configuration.md#global-config-location).
 
 **When to set it:** keeping the config under version control or a dotfiles
 manager at a non-default location, or pointing CI at a fixture config.
+
+### `PI_CODING_AGENT_DIR`
+
+Host-relative global config location, honored by pi-lens when pi sets it.
+**Resolved path:** `$PI_CODING_AGENT_DIR/extensions/pi-lens.json`. The tier is
+opt-in by creation: the file is read when it EXISTS and the legacy default
+does not. Absent, nothing changes.
+
+The full resolution order for the global config file, highest first:
+
+1. `PI_LENS_CONFIG_PATH` — an explicit file override, used verbatim.
+2. `~/.pi-lens/config.json` — **only when it already exists**; current users
+   never move.
+3. `$PI_CODING_AGENT_DIR/extensions/pi-lens.json` — **only when it exists**
+   and step 2 missed.
+4. `~/.pi-lens/config.json` — the canonical default (unchanged).
+
+pi-lens does not write the global config; there is no settings writer in this
+repository. Create or edit the selected file by hand. `effective_config` shows
+which file supplies the global tier. If an existence probe errors (a file where
+a directory belongs, permission errors, or a symlink loop), the errored tier is
+retained and the read failure is reported under `PILENS_CFG_0001`; it is not
+treated as absent. See the [XDG-like recipe](configuration.md#global-config-location).
 
 ## Data directory
 
@@ -47,9 +70,9 @@ review-graph, install-choices, etc.).
 
 **Default resolution order:**
 
-1. `$PILENS_DATA_DIR/<sanitized-cwd-slug>/` (if `PILENS_DATA_DIR` is set)
+1. `$PILENS_DATA_DIR/<sanitized-cwd-slug>-<8-hex-hash>/` (if `PILENS_DATA_DIR` is set)
 2. `<cwd>/.pi-lens/` (legacy — only if it already exists in the project)
-3. `~/.pi-lens/projects/<sanitized-cwd-slug>/` (current default)
+3. `~/.pi-lens/projects/<sanitized-cwd-slug>-<8-hex-hash>/` (current default)
 
 **When to set it:** running pi with a local model server (llama.cpp,
 Ollama, etc.) that monitors the project directory — cache-file churn
@@ -307,12 +330,46 @@ Days to keep rotated logs before cleanup. **Default:** `7`.
 
 Maximum log size (MB) before rotation. **Default:** `10`.
 
+## Diagnostic-only knobs
+
+These use the `PILENS_` (no underscore after `PI`) prefix, so they are
+invisible to a `grep PI_LENS_` sweep — use the wider `grep -E 'PI_?LENS_'`
+below to find them and anything like them. Not part of the supported surface;
+each exists for a narrow diagnostic or escape-hatch purpose, not everyday
+tuning.
+
+### `PILENS_PROBE`
+
+Set to `1` to force an ad-hoc probe (a bare `node -e` or throwaway script
+against built `clients/*.js`, run outside a test harness and without
+`PI_LENS_HOME` set) to redirect its home/log directory away from the real
+`~/.pi-lens`, the same way running from an agent worktree or `os.tmpdir()`
+already does automatically (`clients/probe-home-state.ts`). Prefer setting
+`PI_LENS_HOME` explicitly; this is the forced opt-in for a probe run from an
+ordinary project checkout, where the automatic detection would not fire.
+
+### `PILENS_UNSAFE_FORCE_GRAMMAR_LOAD`
+
+Diagnostic escape hatch for the grammar-health probe only (`clients/grammar-source.ts`).
+Set to `1` to force-load a tree-sitter grammar this runtime has blocklisted,
+to test whether a newer build/runtime lifts the block. Disables the crash
+protection the blocklist provides and can abort the process. Never set in
+normal operation.
+
+### `PILENS_PUB_DEBUG`
+
+Set to `1` to trace each LSP server's `publishDiagnostics` behavior (version +
+diagnostic count) to diagnose the clean-file affirmative-signal question:
+which servers publish an empty-with-version set on a clean scan vs. go silent
+(`clients/lsp/client.ts`). Off by default.
+
 ## Advanced tuning knobs
 
 pi-lens also has many advanced/internal tuning variables — LSP timeouts and
 memory budgets, debounce intervals (`PI_LENS_LSP_*`, and others). These are for
 edge-case tuning, are not part of the supported surface above, and are documented
-in the source; enumerate them with `grep PI_LENS_ clients/`.
+in the source; enumerate them with `grep -E 'PI_?LENS_' clients/` (the wider
+pattern catches the `PILENS_` diagnostic-only knobs above too).
 
 ## Related
 

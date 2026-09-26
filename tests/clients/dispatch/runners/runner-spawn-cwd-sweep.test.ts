@@ -91,6 +91,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { lineContentHash } from "../../../../clients/read-guard.js";
 import {
+	holdsAScannableSpawn,
 	NODE_SPAWN_NAMES,
 	type SpawnCwdSite,
 	scanSpawnCwd,
@@ -306,10 +307,6 @@ const NO_CWD_EXEMPTION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/installer/index.ts#installGitHubTool:bd7b7ee6~5ede8ca9",
 		"`unzip -q -o <archive> -d <tmpDir>` extraction inside the global pi-lens bin directory",
-	],
-	[
-		"clients/installer/index.ts#installPipTool:ba749b5d",
-		"`pip install <package>` into the user/managed site, not into the project",
 	],
 	[
 		"clients/installer/index.ts#installPipTool:3042a73f",
@@ -618,7 +615,7 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"cwd is runCommand's own `cwd` parameter; its three call sites in this file are the checked ones",
 	],
 	[
-		"clients/installer/index.ts#installArchiveTool:ba060684~a938e107",
+		"clients/installer/index.ts#installArchiveTool:fb1fa312~a938e107",
 		"cwd is TOOLS_DIR, the managed-tool install directory this archive is being extracted into",
 	],
 	[
@@ -658,8 +655,8 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 		"cwd is recoverOpaqueChangesViaGit's own `root` parameter — `git status --porcelain` reports the worktree at that root, which is the query's subject, not a config-resolution start (#2894)",
 	],
 	[
-		"clients/opengrep-client.ts#OpengrepClient.scan:c23b1b18~4bd5cc03",
-		"passes `targetDir` = path.resolve(cwd) from the scan API's own argument",
+		"clients/opengrep-client.ts#OpengrepClient.scan:c23b1b18~74b63300",
+		"passes the realpath-canonicalized `targetDir` from the scan API's own argument",
 	],
 	[
 		"clients/opengrep-client.ts#OpengrepClient.runScan:93a73c72~353ea442",
@@ -713,40 +710,16 @@ const WORKLIST_CEILING = 0;
 const SCAN_HOOK_TIMEOUT_MS = 30_000;
 
 /**
- * Whether a file can hold a site the scan recognises: one of the seam wrappers
- * by name, or a binding to `spawn`/`execFile`/`exec`/`fork` from
- * `child_process` or `node:child_process`. It mirrors
- * `spawn-cwd-scan.ts`'s own site rule deliberately — round 4's population
- * filter listed only the five seam names while the scanner also counted child
- * process calls, so a file whose only child spawn was a bare `spawn(` could
- * never move a pin (round-5 v4-N3).
+ * The population predicate lives in `tests/support/spawn-cwd-scan.ts` beside
+ * the two name tuples it derives from (one vocabulary, #2927): one of the
+ * seam wrappers by name, or a binding of a `NODE_SPAWN_NAMES` name from
+ * `child_process` or `node:child_process`. It mirrors the scan's own site
+ * rule deliberately — round 4's population filter listed only the five seam
+ * names while the scanner also counted child process calls, so a file whose
+ * only child spawn was a bare `spawn(` could never move a pin (round-5
+ * v4-N3). Unbound spellings (`promisify(exec)`, a re-exported wrapper) stay
+ * outside both, tracked by #2888.
  */
-function holdsAScannableSpawn(source: string): boolean {
-	const nodeSpawnPattern = NODE_SPAWN_NAMES.join("|");
-	const hasChildProcessImport = [
-		...source.matchAll(
-			/import\s+([\s\S]*?)\s+from\s*["'](?:node:)?child_process["']/g,
-		),
-	].some((match) => {
-		const clause = match[1].trim();
-		return (
-			/^[A-Za-z_$][\w$]*\s*(?:,|$)/.test(clause) ||
-			/^\*\s+as\s+[A-Za-z_$][\w$]*/.test(clause) ||
-			new RegExp(`\\{[^}]*\\b(?:${nodeSpawnPattern})\\b`).test(clause)
-		);
-	});
-	const hasDynamicOrRequiredBinding =
-		/\b(?:import|require)\s*\(\s*["'](?:node:)?child_process["']\s*\)/.test(
-			source,
-		);
-	const hasChildProcessBinding =
-		hasChildProcessImport || hasDynamicOrRequiredBinding;
-	return (
-		/\b(?:safeSpawnAsync|safeSpawnSync|safeSpawn|spawnSupervised|execa)\s*\(/.test(
-			source,
-		) || hasChildProcessBinding
-	);
-}
 const NO_CWD_EXEMPTIONS = Object.fromEntries(NO_CWD_EXEMPTION_ROWS);
 const ORIGIN_ADMISSIONS = Object.fromEntries([
 	...ORIGIN_ADMISSION_ROWS,

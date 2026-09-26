@@ -27,7 +27,8 @@ const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
 	logLatencySpy: vi.fn(),
 }));
 
-vi.mock("../../clients/latency-logger.js", () => ({
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal()),
 	logLatency: logLatencySpy,
 	getLastLoggedPhase: () => undefined,
 }));
@@ -193,6 +194,32 @@ describe("the installer records what its attempt did (#1500)", () => {
 		expect(reason).toContain("ENOENT");
 		expect(reason).not.toContain("\n");
 		expect(reason.length).toBeLessThan(1000);
+	});
+
+	it("does not spawn an unavailable Python interpreter", async () => {
+		const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-no-python-"));
+		fs.writeFileSync(path.join(binDir, "pip3"), "pip3", { mode: 0o755 });
+		const calls: string[] = [];
+		safeSpawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				calls.push(`${command} ${args.join(" ")}`);
+				return { stdout: "", stderr: "no pip", status: 1 };
+			},
+		);
+		const restorePath = withEnv({ PATH: binDir });
+		try {
+			const { ensureTool } = await installer();
+			await ensureTool("cmake-language-server");
+		} finally {
+			restorePath();
+			fs.rmSync(binDir, { recursive: true, force: true });
+		}
+		expect(calls.some((call) => call.startsWith("python3 -m venv "))).toBe(
+			false,
+		);
+		expect(calls.some((call) => call.startsWith("python -m venv "))).toBe(
+			false,
+		);
 	});
 
 	it("preserves a PEP 668 pip refusal for downstream classification", async () => {

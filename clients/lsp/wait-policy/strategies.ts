@@ -130,6 +130,37 @@ export interface DiagnosticStrategy {
 	 */
 	silentOnClean?: boolean;
 	/**
+	 * #3310 — the MEASURED first-publish class of a push server, the
+	 * `first-publish` column of docs/lsp-capability-matrix.md.
+	 *
+	 * `"indexing"` means: this server answers `didOpen` with an EMPTY diagnostic
+	 * set while its one-time whole-workspace index builds, and publishes again
+	 * once indexing ends. Its first publish is therefore not an answer at all,
+	 * and the publish handler holds it (see `setupIncomingHandlers` in
+	 * clients/lsp/client.ts) instead of letting it resolve the push wait — the
+	 * #3310 false clean, where `lsp_diagnostics` reported a php file with an
+	 * undefined-variable error as "confirmed clean" because intelephense's
+	 * empty pre-index publish ended the wait seconds before the real set
+	 * arrived.
+	 *
+	 * Absent (the default, and every Tier 2/2\* server) means the first publish
+	 * IS an answer: a server that publishes `[]` once for a genuinely clean file
+	 * keeps resolving the wait on it with no added latency. That distinction is
+	 * the whole difficulty of #3310's AC2, and it is why this is a measured
+	 * class rather than a blanket "empty publishes are provisional" rule.
+	 *
+	 * Measured, never assumed: `scripts/probe-clean-signal.mjs` classifies the
+	 * dirty-phase publish trace per server and writes the `first-publish`
+	 * column; `tests/config/lsp-first-publish-census.test.ts` reds when that
+	 * column and this marker disagree, which is the expiry check that keeps the
+	 * class from going stale when a server's behavior changes.
+	 *
+	 * Mutually exclusive with `seedFirstPush` by construction — "the first push
+	 * is complete" and "the first push is provisional" cannot both hold; the
+	 * census pins that too.
+	 */
+	emptyFirstPublish?: "indexing";
+	/**
 	 * True for a push-only server whose value depends on a ONE-TIME whole-
 	 * workspace index build rather than a per-file cost — e.g. marksman's
 	 * cross-file link/anchor graph (#645). A full-tree sweep
@@ -320,8 +351,8 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			// once the index has already had a full aggregateWaitMs window.
 			workspaceIndexing: true,
 			workspaceIndexingWarmWaitMs: 250,
-			// #799: marksman is push-only and publishes NOTHING on a clean file —
-			// there is no pull fallback and no sync-confirm protocol (unlike
+			// #799 / run 35914033696: marksman is push-only and publishes NOTHING on
+			// a clean transition — there is no pull fallback and no sync-confirm protocol (unlike
 			// typescript's tsserver commands), so a clean markdown file's touch
 			// waits its full budget with zero signal either way. Marking it
 			// `silentOnClean` lets the generic push-only clean-confirm gate
@@ -343,20 +374,9 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// diagnostics this strategy governs are a REAL but PARTIAL signal, not
 		// full CUE validation.
 		//
-		// silentOnClean: true — the load-bearing finding. A cold `didOpen` on an
-		// already-CLEAN file publishes NOTHING inside the wait budget (measured:
-		// `touchFile` returns `inconclusive: true, inconclusiveReason:
-		// "diagnostics-wait"` after the full budget, never an affirmative empty
-		// array). This reproduces the #1520 review's original "reports
-		// conclusively clean while still waiting" concern for the clean-cold-open
-		// case specifically. It is NOT silent on every transition, though: once a
-		// document is open and a `didChange` lands, the server DOES publish —
-		// both the error (edit clean→broken: confirmed, ~930ms warm) and an
-		// explicit empty array clearing it (edit broken→clean: confirmed,
-		// ~320ms warm, `contentHash`-bound). That edit-triggered empty publish is
-		// exactly what the shared push-only clean-confirm gate needs
-		// `silentOnClean` for — it only ever governs the "no publish, notify
-		// succeeded" case, never a case that already got a real publish.
+		// The repaired clean-signal probe measured cue as publishing a versioned
+		// clean-transition set (run 35914033696), so this marker stays absent:
+		// the cascade must retain its normal early-publish path.
 		//
 		// seedFirstPush: true — the one cold-open case that DOES publish (a
 		// file that is already broken) sends the complete single diagnostic on
@@ -367,6 +387,96 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// (~930ms, syntax reparse) with margin; a cold spawn's first push (~2.1s
 		// end-to-end including process start) is bounded separately by
 		// maxClientWaitMs, not this per-diagnostics budget.
+		// intelephense (php, #3310). Measured directly against the real v1.18.5
+		// binary over a raw JSON-RPC session answering `workspace/configuration`
+		// the way pi-lens does (2026-09-23, linux):
+		//
+		//   +284ms  initialize response — NO diagnosticProvider (push-only)
+		//   +295ms  publishDiagnostics diags=0  version=undefined   <- pre-index
+		//   +301ms  indexingStarted
+		//   +689ms  indexingEnded
+		//   +696ms  publishDiagnostics diags=2  version=undefined   <- the answer
+		//
+		// so `emptyFirstPublish: "indexing"`: the first publish is an artifact of
+		// the cold index, not an answer. The same session on a genuinely CLEAN
+		// file publishes `[]` at +304ms and `[]` AGAIN at +663ms (right after
+		// `indexingEnded`), which is what lets the held publish be released by
+		// the server's own second publish instead of by a timer — and a WARM
+		// touch (a second file, index already built) publishes the real set
+		// FIRST at +5ms, so the hold costs nothing once the session is warm.
+		//
+		// seedFirstPush: false — the measurement above is the direct refutation
+		// of "the first push is complete" for this server.
+		// pullRetryBudgetMs: 0 — no pull provider is advertised at all.
+		// aggregateWaitMs: 8000 — the budget must cover the cold index window,
+		// which is what the second (real) publish waits on: ~0.4s for a 139-file
+		// index on the dev box, ~5s on the nightly ubuntu runner (#3217's
+		// transcript). Per-edit callers cap this as a CEILING (#242), so an
+		// interactive edit still waits only its own cap; the uncapped paths (the
+		// tool-smoke LSP gate, which itself caps at 8000ms) get the full budget,
+		// and the cold index is paid once per session, not once per touch.
+		php: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 8000,
+			expectSemanticSecondPush: false,
+			emptyFirstPublish: "indexing",
+		},
+		// Svelte's pull diagnostics settle after the default 1500ms budget on a
+		// cold server. The tool-smoke gate caps waits at 8000ms, so give this
+		// server enough aggregate budget to return its seeded findings (#3311).
+		svelte: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 4000,
+			expectSemanticSecondPush: false,
+		},
+		// csharp-ls loads (design-time-builds) the restored project AFTER
+		// `initialize` returns, so the publish for a seeded CS0029 lands inside
+		// `waitForDiagnostics`, not inside the client wait. MEASURED A/B over two
+		// nightly Tool-smoke runs of the same fixture with `dotnet restore` already
+		// done — the ONLY difference between them was this budget:
+		//   * `aggregateWaitMs` 1500 (the default): run 36054901266 →
+		//     `[csharp] touched=0`, 4.05s after `Restored …/toolsmoke.csproj`.
+		//     A real compiler error read as clean.
+		//   * 8000: run 36058292424 → `[csharp] touched=1`, 6.49s after the same
+		//     line; gate run 36059988117 → `lsp_diagnostics returned 1 primary
+		//     finding`, 4.86s after it.
+		// Both windows INCLUDE workspace bootstrap + spawn + initialize, so they
+		// bound the wait from above: the required budget is in (1500, 4860] ms.
+		// 6000 covers the measured gate window with margin and stays under the
+		// tool-smoke gate's own 8000ms ceiling (that relation is pinned by
+		// tests/config/lsp-gate-population.test.ts), so the gate can still witness
+		// this budget. CONFIRMED at 6000 by run 36064829436: `✓ csharp csharp-ls 1
+		// lsp_diagnostics returned 1 primary finding`, 4.78s after `Restored
+		// …csproj`, census unchanged at gated 31 / handshake-only 8 / unavailable 6
+		// — so 6000 is measured as sufficient, not merely inferred from the 8000
+		// runs above. It is deliberately NOT the ceiling: an `lsp_diagnostics` call
+		// that passes no `waitMs` pays this budget in full on a file the server never
+		// publishes for (`tools/lsp-diagnostics.ts` leaves `maxClientWaitMs`
+		// undefined → `perServerTimeout` has no caller cap), so every 1000ms here
+		// is 1000ms of turn latency on the no-publication path (#3402 review r2).
+		// Every other field is DEFAULT_STRATEGY's value on purpose: csharp-ls is
+		// `mode=pull`/tier-1 authoritative-clean (#3311 investigator table), and
+		// nothing has measured its pull retry, so this entry moves the one field
+		// that was measured and no other (pinned in
+		// tests/clients/lsp/server-strategies.test.ts).
+		// fsharp/expert/vue deliberately have NO entry: the same two runs show
+		// `touched=0` at BOTH 1500 and 8000, so the budget is not what stops them
+		// publishing and an 8000 entry would buy nothing while costing every
+		// uncapped production call 6.5 extra seconds. Their fixture rows carry the
+		// observed-behavior exemption instead (`scripts/smoke-tools.mjs`), and a
+		// probe that wants a long window sets `PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS`
+		// — a flat harness override that needs no production budget.
+		csharp: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 250,
+			debounceMs: 150,
+			aggregateWaitMs: 6000,
+			expectSemanticSecondPush: false,
+		},
 		cue: {
 			seedFirstPush: true,
 			pullRetryBudgetMs: 0,
@@ -374,6 +484,16 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 2000,
 			expectSemanticSecondPush: false,
 			reopenOnResync: false,
+		},
+		// lua-language-server is push-only and was silent on clean transitions in
+		// the repaired probe (run 35914033696). Keep the marker on the measured
+		// server id so the cascade can skip its in-lane wait safely.
+		lua: {
+			seedFirstPush: true,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 2000,
+			expectSemanticSecondPush: false,
 			silentOnClean: true,
 		},
 	};

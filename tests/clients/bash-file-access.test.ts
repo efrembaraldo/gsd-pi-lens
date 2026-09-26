@@ -7,6 +7,7 @@ import {
 	extractGrepSearchReadsFromOutput,
 	extractReadPathsFromCommand,
 	extractWrittenPathsFromCommand,
+	isEditClassToolResult,
 	parseGrepContextLines,
 	tokenizeShellCommand,
 	type ReadSpan,
@@ -515,6 +516,46 @@ describe("parseGrepContextLines", () => {
 // ── writes: agent authored the file (mirrors the Write tool) ────────────────
 
 describe("extractWrittenPathsFromCommand — bash writes", () => {
+	it("classifies a third-party shell result from its written paths", () => {
+		const f = pathIn("third-party.ts");
+		expect(
+			isEditClassToolResult(
+				{
+					toolName: "mcp__acme__shell",
+					input: { command: `echo x > ${f}` },
+				},
+				tmp,
+			),
+		).toBe(true);
+		expect(
+			isEditClassToolResult(
+				{
+					toolName: "mcp__acme__shell",
+					input: { command: `cat ${f}` },
+				},
+				tmp,
+			),
+		).toBe(false);
+	});
+
+	/**
+	 * #2939 W4, classify half. The command half above is pinned; the
+	 * `classifyMutatingTool(...) !== undefined` early return that precedes it
+	 * was not, and PR #2897's verify measured deleting it green on 115 files.
+	 * Recurrence it prevents: a recognised edit tool carries no `input.command`,
+	 * so without that early return every `edit`/`write`/third-party edit result
+	 * is classified read-only — and `index.ts` then gives it the 500 ms read-only
+	 * budget and skips the analyzer-bootstrap load the edit path needs.
+	 */
+	it("classifies a recognised edit tool that carries no shell command (#2939 W4)", () => {
+		expect(isEditClassToolResult({ toolName: "edit", input: {} }, tmp)).toBe(
+			true,
+		);
+		expect(isEditClassToolResult({ toolName: "read", input: {} }, tmp)).toBe(
+			false,
+		);
+	});
+
 	const cases: Array<[string, (f: string) => string]> = [
 		["redirect (>)", (f) => `echo "x" > ${f}`],
 		["redirect no space (>file)", (f) => `echo "x" >${f}`],

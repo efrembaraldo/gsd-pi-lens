@@ -143,10 +143,6 @@ const ALREADY_REACHED: Readonly<Record<string, string>> = {
 		"already reached through tests/scripts/merge-train-warden.test.ts's " +
 		"import — knip's own 'redundant entry pattern' hint caught this " +
 		"when it was added as an explicit entry",
-	"scripts/lib/win32-gate-population.mjs":
-		"already reached through tests/config/win32-gate-lane.test.ts's " +
-		"import — knip's own 'redundant entry pattern' hint caught this " +
-		"when it was added as an explicit entry",
 };
 
 const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
@@ -165,7 +161,18 @@ const LANE_ALREADY_REACHED: Readonly<Record<string, string>> = {
 	"tests/support/git-fixture-env.test.ts":
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
-	"tests/mcp/session-end.smoke.test.ts":
+	// #3082: verified, not assumed — `npm run knip` with
+	// "tests/support/tests-tree-write-guard.test.ts" added to knip.jsonc's
+	// entry list reported "Remove redundant entry pattern" for exactly that
+	// line, and without it knip reports no unused file.
+	// #3179: verified the same way as its sibling below — `npm run knip` with
+	// "tests/support/tests-tree-write-guard-race.test.ts" added to
+	// knip.jsonc's entry list reported "Remove redundant entry pattern" for
+	// exactly that line.
+	"tests/support/tests-tree-write-guard-race.test.ts":
+		"already reached through the Vitest config's default project graph; " +
+		"Knip reports an explicit entry as redundant",
+	"tests/support/tests-tree-write-guard.test.ts":
 		"already reached through the Vitest config's default project graph; " +
 		"Knip reports an explicit entry as redundant",
 };
@@ -240,5 +247,9 @@ describe("knip entry coverage (#2698)", () => {
 			audit.problems.concat(missing),
 			"every real-harness, Windows, and wall-clock Vitest member must be a knip entry",
 		).toEqual([]);
-	});
+		// #3104 review F4: this case walks the whole tests/ tree through
+		// `windowsVitestFiles()` and measured 8.0 s under Stryker's dry run,
+		// which times out at vitest's 5 s default and reds the mutation lane.
+		// The work is a directory walk, not a wait, so the budget is explicit.
+	}, 60_000);
 });

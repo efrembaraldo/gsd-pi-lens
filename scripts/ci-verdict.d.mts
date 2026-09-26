@@ -15,6 +15,7 @@ export declare function isPrNumber(arg: unknown): boolean;
 export interface VerdictRow {
 	name: string;
 	present: boolean;
+	id: number | null;
 	status: string | null;
 	conclusion: string | null;
 	url: string | null;
@@ -26,7 +27,6 @@ export interface Verdict {
 	rows: VerdictRow[];
 	reason: string;
 	mergeState: string;
-	truncated: boolean;
 }
 
 export declare function computeVerdict(
@@ -48,6 +48,11 @@ export declare function computeVerdict(
 ): Verdict;
 
 export declare function formatVerdictTable(rows: VerdictRow[]): string;
+
+export declare function formatRerunHint(row: {
+	name?: string;
+	details_url?: string;
+}): string;
 
 export declare function resolveWaitCapSeconds(
 	waitSecondsArg: number | null,

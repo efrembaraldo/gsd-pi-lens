@@ -35,6 +35,13 @@ import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import { displayProjectDataPath, getProjectDataDir } from "./file-utils.js";
 import { commitDurableStore } from "./durable-store.js";
+import { establishToolAgreement } from "./tool-agreement.js";
+import { resolveLensToolName, type LensToolHost } from "./tool-config.js";
+
+export interface ActionableWarningsAdvisoryFilterResult {
+	files: ActionableWarningsReportFile[];
+	suppressed: number;
+}
 
 export interface ActionableWarningAction {
 	title: string;
@@ -115,6 +122,20 @@ export interface ActionableWarningsReportFile {
 	 * only the report-level stamp, and every reader must tolerate that.
 	 */
 	generatedAt?: string;
+	/**
+	 * #3170: set by the bounded persistent-reverify pass — the runtime just
+	 * re-observed this file against the live server, so this entry's warnings
+	 * are a FRESH observation and the merge must SUPERSEDE (not union with)
+	 * the carried entry they replace: a converged finding would otherwise
+	 * survive its own supersession via the id-union in `mergeWarnings`.
+	 */
+	reVerified?: boolean;
+	/**
+	 * #3170: the re-observation could not complete inside the budget — the
+	 * carried warnings are kept verbatim and the render marks the gap
+	 * ("re-verify incomplete"), never a false clean.
+	 */
+	reVerifyIncomplete?: boolean;
 	/**
 	 * Set only on an entry a DEFERRED publish contributed to (#2504 review
 	 * round 5, F1). Distinct from {@link ActionableWarningRecord.origin}, which
@@ -484,18 +505,23 @@ function lineInModifiedRanges(
 	);
 }
 
-function recordFromLspDiagnostic(
+export function recordFromLspDiagnostic(
 	diag: LSPDiagnostic,
 	filePath: string,
 	cwd: string,
 ): ActionableWarningRecord {
 	const line = diag.range.start.line + 1;
 	const column = diag.range.start.character + 1;
+	// Keep agreement keyed to the producer that supplied the diagnostic. The
+	// generic `lsp` label is only a last-resort identity: treating it as a
+	// registered writer would establish every LSP quickfix without evidence.
+	const producer =
+		diag.source && diag.source !== "lsp" ? diag.source : diag.serverId;
 	const source = diag.source ?? "lsp";
 	const code = diag.code === undefined ? undefined : String(diag.code);
 	const identityArgs = {
 		filePath,
-		tool: "lsp",
+		tool: producer ?? "lsp",
 		source,
 		code,
 		message: diag.message,
@@ -510,7 +536,7 @@ function recordFromLspDiagnostic(
 		line,
 		column,
 		severity: "warning",
-		tool: "lsp",
+		tool: producer ?? "lsp",
 		source,
 		code,
 		rule: code ? `${source}:${code}` : source,
@@ -1129,7 +1155,7 @@ export async function buildActionableWarningsReport(
  * off-hook loop run byte-identical logic — the deferral must not become a
  * second, drifting copy of the enrichment.
  */
-async function enrichFileFromLsp(
+export async function enrichFileFromLsp(
 	cwd: string,
 	args: BuildActionableWarningsArgs,
 	target: LspEnrichmentTarget,
@@ -1583,15 +1609,30 @@ export function mergeActionableWarningsReports(args: {
 		}
 		mergedFiles++;
 		const merged: ActionableWarningsReportFile = incumbent
-			? {
-					...incumbent,
-					fileSeq: incumbent.fileSeq ?? entry.fileSeq,
-					generatedAt: olderStamp(
-						incumbent.generatedAt ?? newerReport?.generatedAt,
-						entry.generatedAt ?? olderReport?.generatedAt,
-					),
-					warnings: mergeWarnings([...incumbent.warnings, ...entry.warnings]),
-				}
+			? incumbent.reVerified || incumbent.reVerifyIncomplete
+				? // #3170: the runtime just RE-OBSERVED this file (the bounded
+					// persistent-reverify pass) — the fresh observation supersedes
+					// the carried entry instead of unioning with it: a converged
+					// finding would otherwise survive its own supersession via the
+					// id-union in `mergeWarnings`.
+					{
+						...incumbent,
+						fileSeq: incumbent.fileSeq ?? entry.fileSeq,
+						generatedAt: olderStamp(
+							incumbent.generatedAt ?? newerReport?.generatedAt,
+							entry.generatedAt ?? olderReport?.generatedAt,
+						),
+						warnings: incumbent.warnings,
+					}
+				: {
+						...incumbent,
+						fileSeq: incumbent.fileSeq ?? entry.fileSeq,
+						generatedAt: olderStamp(
+							incumbent.generatedAt ?? newerReport?.generatedAt,
+							entry.generatedAt ?? olderReport?.generatedAt,
+						),
+						warnings: mergeWarnings([...incumbent.warnings, ...entry.warnings]),
+					}
 			: { ...entry };
 		if (deferredPublish) {
 			// Mark it, so the next in-band publish carries it forward across the
@@ -2016,6 +2057,19 @@ export async function applyConservativeActionableWarningFixes(args: {
 				continue;
 			}
 			summary.considered++;
+			const agreement = establishToolAgreement(warning.tool, args.cwd);
+			if (agreement.decision === "decline") {
+				recordDegradationOnce({
+					kind: "autofix-agreement-unavailable",
+					subject: agreement.subject,
+					reason: agreement.reason,
+				});
+				summary.skipped.push({
+					id: warning.id,
+					reason: "tool_agreement_unavailable",
+				});
+				continue;
+			}
 			if (!warning.line || !warning.column) {
 				summary.skipped.push({ id: warning.id, reason: "missing_position" });
 				continue;
@@ -2126,28 +2180,45 @@ export async function applyConservativeActionableWarningFixes(args: {
 export function formatActionableWarningsAdvisory(
 	report: ActionableWarningsReport,
 	cwd: string,
+	host: LensToolHost = "pi",
+	filterBuiltReport?: (
+		report: ActionableWarningsReport,
+	) => ActionableWarningsAdvisoryFilterResult,
 ): string | undefined {
-	if (report.summary.unsuppressed === 0) return undefined;
-	const files = report.files.filter((file) =>
+	// The cache record is deliberately kept raw: lens_diagnostics mode=delta
+	// applies dispositions on read. The turn-end advisory is a separate
+	// delivery surface, so filter the report AFTER its builder and after the
+	// deferred merge (which is where LSP-enriched rows enter), then derive the
+	// summary from the same per-file rows before rendering.
+	const filtered = filterBuiltReport?.(report);
+	const advisoryReport = filtered
+		? {
+				...report,
+				files: filtered.files,
+				summary: summarizeReportFiles(filtered.files),
+			}
+		: report;
+	if (advisoryReport.summary.unsuppressed === 0) return undefined;
+	const files = advisoryReport.files.filter((file) =>
 		file.warnings.some((warning) => !warning.suppressed),
 	);
 	const fileList = files
 		.slice(0, 5)
 		.map(
 			(file) =>
-				`  ${file.displayPath}: ${file.warnings.filter((warning) => !warning.suppressed).length}`,
+				`  ${file.displayPath}: ${file.warnings.filter((warning) => !warning.suppressed).length}${file.reVerifyIncomplete ? " (re-verify incomplete)" : ""}`,
 		)
 		.join("\n");
 	const more =
 		files.length > 5 ? `\n  ... and ${files.length - 5} more file(s)` : "";
 	const safe =
-		report.summary.autoFixEligible > 0
-			? ` ${report.summary.autoFixEligible} appear to have conservative preferred quickfixes.`
+		advisoryReport.summary.autoFixEligible > 0
+			? ` ${advisoryReport.summary.autoFixEligible} appear to have conservative preferred quickfixes.`
 			: "";
 	// #1777: hint and info are style opinions, so say how much of the count is
 	// opinion. The line appears only when a quiet tier is actually present —
 	// an all-warning turn already says everything in the count above.
-	const byTier = report.summary.byTier;
+	const byTier = advisoryReport.summary.byTier;
 	const quiet = byTier ? byTier.hint + byTier.info : 0;
 	const tierLine =
 		quiet > 0
@@ -2164,10 +2235,20 @@ export function formatActionableWarningsAdvisory(
 		"cache",
 		"actionable-warnings.json",
 	);
+	// #2535 F3: a known tool with no mapping on this host resolves to
+	// undefined — omit the instruction rather than naming a dead tool.
+	// `lens_diagnostics` is pinned available on both hosts, so this is
+	// defensive only.
+	const diagnosticsTool = resolveLensToolName("lens_diagnostics", host);
 	return [
-		`🟡 Fixable warnings introduced this turn: ${report.summary.unsuppressed}.${safe}`,
+		`🟡 Fixable warnings introduced this turn: ${advisoryReport.summary.unsuppressed}.${safe}`,
+		filtered && filtered.suppressed > 0
+			? `suppressed by disposition: ${filtered.suppressed} finding(s).`
+			: undefined,
 		tierLine,
-		"Use lens_diagnostics with mode=delta to inspect these warnings.",
+		diagnosticsTool
+			? `Use ${diagnosticsTool} with mode=delta to inspect these warnings.`
+			: undefined,
 		fileList ? `Files:\n${fileList}${more}` : undefined,
 		"If continuing in these files, resolve warnings that are safe and relevant. Do not apply broad refactors unless requested.",
 		`Raw report (only if you need the JSON): ${reportPath}`,

@@ -7,6 +7,7 @@ import {
 
 // Applies to globalSetup as well as workers: ordinary tests never install tools.
 process.env.PI_LENS_DISABLE_TOOL_INSTALL ??= "1";
+process.env.PI_LENS_TMP_HYGIENE_RUN_ID ??= `${Date.now()}-${process.pid}`;
 
 // Background coding agents get worktrees under .claude/worktrees/ — vitest's
 // default exclude covers node_modules/.git/dist but NOT those, so a "full
@@ -47,12 +48,22 @@ const integrationInclude = [
 const unitOnlyExclude =
 	process.env.npm_lifecycle_event === "test:unit" ? integrationInclude : [];
 
-const sharedGlobalSetup = [
+/**
+ * The run-level setup arms. EXPORTED (#3104 review F2) so
+ * tests/support/tests-tree-write-guard.test.ts can assert membership: every
+ * arm here is a guard whose absence is silent — delete a row and the guard's
+ * own unit tests stay green while the guard stops running for the whole suite.
+ */
+export const sharedGlobalSetup = [
 	"./tests/support/check-build-freshness.ts",
 	"./tests/support/prewarm-grammars.ts",
 	// After check-build-freshness: the seed analyze runs the in-place build.
 	"./tests/support/prewarm-tool-home.ts",
 	"./tests/support/git-config-guard-setup.ts",
+	// Last: every earlier step (the in-place build, the grammar prewarm, the
+	// tool-home seed) has finished, so the baseline this guard snapshots is the
+	// tree the test files will actually walk (#3082).
+	"./tests/support/tests-tree-write-guard-setup.ts",
 ];
 
 const sharedSetupFiles = ["./tests/support/vitest-setup.ts"];
@@ -200,8 +211,11 @@ const timingSensitiveInclude = [
 	// to import measureMaxSyncBlockMs from tests/support/perf-harness.ts:
 	//   - lens-diagnostics-occupancy: diagnostics-run loop occupancy.
 	//   - workspace-diagnostics-occupancy: workspace-wide diagnostics fan-out.
-	//   - performance-report-occupancy / pipeline-snapshot-occupancy: report and
-	//     snapshot assembly walks.
+	//   - pipeline-snapshot-occupancy: snapshot assembly walks.
+	//   (performance-report-occupancy sat here until #2886 round 2; its
+	//   occupancy row is a real-clock sampler assertion, so it now runs in
+	//   the fully serialized wall-clock-budget lane instead, beside its
+	//   deterministic yield-count row.)
 	//   - word-index-async-build: the async word-index build's yield behaviour.
 	//   - ruby-drive-dirs: not named "-occupancy", but runs two sampler-based
 	//     fail-then-pass screens over the Ruby drive-dir walk (#902 pattern).
@@ -211,7 +225,6 @@ const timingSensitiveInclude = [
 	//     admission alone (#1329) does not make that window contention-proof.
 	"tests/clients/lsp/ruby-drive-dirs.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-occupancy.test.ts",
-	"tests/clients/performance-report-occupancy.test.ts",
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/review-graph-retention.test.ts",
 	"tests/clients/review-graph-superseded-persist.test.ts",
@@ -234,7 +247,7 @@ const timingSensitiveInclude = [
 	// membership from the process.cpuUsage marker and fails if it is absent.
 	//
 	// Read the `maxWorkers: 2` note below together with this entry. That note
-	// says the lane's heavy neighbour is gone; this file is a NEW one — three
+	// rests the cap on the remaining members' own measurements; this file is a NEW one — three
 	// cases that busy-spin a core for ~4.8s in total, which is exactly the
 	// shape that starved a sibling's sampler at cap 2 before. Measured rather
 	// than assumed when this landed: the full lane ran clean 4/4 at cap 2 with
@@ -274,6 +287,11 @@ const timingSensitiveInclude = [
 const lspSpawnHeavyInclude = [
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
 	"tests/clients/dispatch/runners/lsp-real-runner.test.ts",
+	// #3405: its last describe spawns two real fake-server children through
+	// `spawnFakeLspServer` and waits on a real initialize handshake before
+	// asserting which notifications reached the server — the same #1022/#2332
+	// contention class as its lane siblings.
+	"tests/clients/lsp/did-save-notification.test.ts",
 	"tests/clients/lsp/fake-lsp-server-parent-watchdog.test.ts",
 	"tests/clients/lsp/integration.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-language-neutral.test.ts",
@@ -299,11 +317,19 @@ const lspSpawnHeavyInclude = [
 	// kill — same process-death-timing budget and contention class as the
 	// watchdog test above.
 	"tests/tools/lsp-diagnostics-2776.test.ts",
+	// #3310: launches the fake server THROUGH the production `PHPServer` entry
+	// (an executable node_modules/.bin/intelephense shim) and waits on a real
+	// initialize handshake plus a two-publish diagnostics sequence per case —
+	// the same #1022/#2332 contention class as its lane siblings.
+	"tests/tools/lsp-diagnostics-empty-first-publish-3310.test.ts",
 ];
 
 // Real pi RPC sessions execute the built extension and a real host tool. Keep
 // this admission outside the default fork storm: each scenario has a 60 s
-// wall budget and one child process owns the fixture project.
+// wall budget, and a child owns its fixture project unless the test supplied
+// one (`withRealPi({ project })`, #2154) — the two-live-sessions case, where
+// two children deliberately share one project root and one PI_LENS_HOME and
+// the TEST owns the tree's lifetime.
 export const realHarnessInclude = [
 	"tests/real-harness/fixture-shape.test.ts",
 	"tests/real-harness/scenario-1.test.ts",
@@ -336,6 +362,7 @@ export const wallClockBudgetInclude = [
 	"tests/clients/git-tracked-ignore.test.ts",
 	// #2557 review round 3: a real 30s deadline margin is the subject of an abort-vs-deadline precedence assertion (flake-shape admission).
 	"tests/clients/hook-await-fold-bounds.test.ts",
+	"tests/clients/installer/pip-pep668.test.ts",
 	"tests/clients/installer/posix-group-kill.test.ts",
 	"tests/clients/installer/verify-binary-semantics.test.ts",
 	// #2507: a real headless child whose own exit decision is the subject — it
@@ -344,6 +371,10 @@ export const wallClockBudgetInclude = [
 	// real LSP child inside itself, so it wants the same quiet, serialized phase
 	// its lsp-spawn-heavy siblings get.
 	"tests/clients/lsp/headless-tool-call-keepalive.test.ts",
+	// #2042/#3091 F2: a real, live direct child is the only pid whose /proc PPid
+	// is this process, so the Linux ownership arm of the kill-by-pid predicate
+	// cannot be observed through any double (flake-shape admission).
+	"tests/clients/lsp/kill-process-tree-real-child.test.ts",
 	// #2703 review r1: the push-wait settle guard drains one real setImmediate tick so Node can deliver `unhandledRejection` (flake-shape admission).
 	"tests/clients/lsp/push-wait-settle-rejection.test.ts",
 	// #2765 round 3: fake timers exercise the live hook remainder after delayed
@@ -354,7 +385,14 @@ export const wallClockBudgetInclude = [
 	// the fully serialized, dead-last phase.
 	"tests/clients/lsp/service-notify-cpu-liveness.test.ts",
 	"tests/clients/metrics-history-stderr.test.ts",
+	// #2886 round 2: the /lens-perf occupancy row keeps its real-clock
+	// sampler assertion (a yield count is O(input) and cannot see per-chunk
+	// block growth), so the file runs here, fully serialized (flake-shape
+	// admission).
+	"tests/clients/performance-report-occupancy.test.ts",
+	"tests/clients/persistent-reverify.test.ts",
 	"tests/clients/pipeline-lsp-sync.test.ts",
+	"tests/clients/project-data-dir-slug.test.ts",
 	"tests/clients/read-expansion-enrichment.test.ts",
 	// #2622: adjacent read-guard stars previously produced exponential regex
 	// backtracking against a long non-matching path; the test measures the real
@@ -369,6 +407,10 @@ export const wallClockBudgetInclude = [
 	"tests/clients/safe-spawn-resource-usage.test.ts",
 	"tests/clients/safe-spawn-timeout-teardown.test.ts",
 	"tests/clients/safe-spawn-windows-command.test.ts",
+	// #3403: real scratch-tree rotation performs cold-disk filesystem work;
+	// measured p95 is 3.63s under six workers and eight CPU hogs, so the 10s
+	// assertion/budget leaves bounded CI scheduling headroom.
+	"tests/clients/sgconfig-scratch-bound.test.ts",
 	"tests/clients/shared-checkout-guard.test.ts",
 	"tests/clients/startup-overhead.test.ts",
 	// #2603 (was #2591 review round 2, F1): the workspace-member matcher's
@@ -377,6 +419,9 @@ export const wallClockBudgetInclude = [
 	// `**` chain), so a fake clock measures nothing.
 	"tests/clients/workspace-glob-nonbacktracking-budget.test.ts",
 	"tests/config/gitignore-tracked-shadow.test.ts",
+	// #3244: the advisory floor must observe the real oxlint --print-config and
+	// counter process; an in-process double would only restate the expected rule map.
+	"tests/config/oxlint-advisory-rule-floor-gate.test.ts",
 	// #2697: the strictness ratchet spawns two real tsc processes and waits for
 	// their wall-clock completion; keep its 120s budget in the quiet phase.
 	"tests/config/strictness-ratchet.test.ts",
@@ -435,6 +480,9 @@ export const wallClockBudgetInclude = [
 	// #2369: the fixture-ordering defect lives in the CLI's own module-load
 	// order; only a real child process is the script under test.
 	"tests/scripts/smoke-tools-lsp-fixture-registration.test.ts",
+	// #3322: the Sonar gate CLI's exit codes and rendered stdout/stderr are the
+	// process-boundary contract; keep its real child out of the fork storm.
+	"tests/scripts/sonar-master-gate.test.ts",
 	// #2586 review F1: proves the ACTUAL stdout bytes supply-host-provided-deps.mjs
 	// prints (real child process, flake-shape admission).
 	"tests/scripts/supply-host-provided-deps.test.ts",
@@ -443,9 +491,34 @@ export const wallClockBudgetInclude = [
 	// where the record lands and is unobservable in-process (flake-shape
 	// admission).
 	"tests/scripts/warm-loader-cache.test.ts",
+	// #2042 2026-09-15: the sample-tail wiring is proven by spawning the real
+	// wrapper (its own real setInterval sampling loop cannot be faked from the
+	// test process) and, in one case, killing the wrapper's real process mid-run
+	// -- the exact "wrapper is the kill's victim" shape the diagnosis found on
+	// master 1701d01. A poll loop (real setTimeout) waits for the file's first
+	// write rather than a fixed sleep (flake-shape admission).
+	"tests/scripts/with-memory-watch.test.ts",
 	"tests/support/fault-injection.test.ts",
 	"tests/support/git-config-guard.test.ts",
 	"tests/support/git-fixture-env.test.ts",
+	// #3179: the guard's #3179 fix's one real, cross-process reproduction. A
+	// separately spawned process races node's own recursive-watch readdirSync
+	// against a directory removal — the same race PR #3178 hit in CI — which
+	// no in-process stand-in can occupy the other side of (flake-shape
+	// admission).
+	"tests/support/tests-tree-write-guard-race.test.ts",
+	// #3082: the tests-tree write guard's one real-watcher case. A recursive
+	// `fs.watch` delivers on the kernel's schedule, so the case retries the
+	// create/remove and polls the guard's own report (real setTimeout, bounded)
+	// rather than sleeping a guessed settle time (flake-shape admission).
+	"tests/support/tests-tree-write-guard.test.ts",
+];
+
+// #2912: the tmp-fixture governance sweep compares the real process-wide
+// namespace before and after one file. Run it after every other project drains
+// so another worker cannot be mistaken for this file's owner.
+export const tmpFixtureHygieneInclude = [
+	"tests/config/tmp-fixture-hygiene.test.ts",
 ];
 // #2512 round 2: runtime-turn-session.test.ts's "retires a deleted failed
 // target through the real client and records real telemetry" spawns a REAL
@@ -478,6 +551,7 @@ export default defineConfig({
 						...timingSensitiveInclude,
 						...lspSpawnHeavyInclude,
 						...wallClockBudgetInclude,
+						...tmpFixtureHygieneInclude,
 					],
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
@@ -545,8 +619,11 @@ export default defineConfig({
 					// index (~1.2s, retry: 2) and at cap 2 starved
 					// performance-report-occupancy's sampler on a loaded runner (107ms
 					// against a 75ms budget, 3/3 retries). #2254 converted that guard to
-					// a load-invariant clock-read count and moved it out of this lane, so
-					// the heavy neighbour is gone and the cap returns to 2.
+					// a load-invariant clock-read count and moved it out of this lane;
+					// #2886 round 2 moved performance-report-occupancy's re-admitted
+					// sampler row to the fully serialized wall-clock-budget lane, so
+					// the cap rests on the remaining members' own measurements (see
+					// the lens-diagnostics-occupancy note at this list's tail).
 					maxWorkers: 2,
 					// Its own phase, after both "default" and "grammar-heavy" drain
 					// (required anyway once maxWorkers differs from "default" — see
@@ -611,6 +688,19 @@ export default defineConfig({
 					// project has drained.
 					maxWorkers: 1,
 					sequence: { groupOrder: 4 },
+					hookTimeout: 60_000,
+				},
+			},
+			{
+				test: {
+					name: "tmp-fixture-hygiene",
+					include: tmpFixtureHygieneInclude,
+					exclude: sharedExclude,
+					globalSetup: sharedGlobalSetup,
+					setupFiles: sharedSetupFiles,
+					execArgv: sharedExecArgv,
+					maxWorkers: 1,
+					sequence: { groupOrder: 6 },
 					hookTimeout: 60_000,
 				},
 			},

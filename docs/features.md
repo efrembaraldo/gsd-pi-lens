@@ -2,7 +2,7 @@
 
 ### LSP Support
 
-pi-lens includes **45 language server definitions** (including four cross-cutting _auxiliary_ scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server is not installed, pi-lens offers an interactive install prompt.
+pi-lens includes **46 language server definitions** (including four cross-cutting *auxiliary* scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server is not installed, pi-lens offers an interactive install prompt.
 
 **LSP Idle Management:** LSP servers shut down after 240 seconds of inactivity (no files modified) to free resources. The timer resets when you resume editing, preventing cold-start penalties during active development.
 
@@ -19,13 +19,13 @@ pi-lens includes **45 language server definitions** (including four cross-cuttin
 - **`capabilities`** — shows which operations are supported by the active LSP server(s) for a file, read directly from the cached `initialize` response (no round-trip).
 - **Symbol column resolution** — passing `symbol: "myFunc"` instead of an exact `character` position resolves the correct column automatically. Use `symbol: "foo#2"` for the second occurrence of `foo` on the line.
 
-LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
+LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
 
 ### Formatters
 
-pi-lens auto-detects and runs **34 formatters** based on project config:
+pi-lens auto-detects and runs **35 formatters** based on project config:
 
-biome, prettier, oxfmt, ruff, black, sqlfluff, gofmt, rustfmt, zig fmt, dart format, shfmt, nixfmt, mix format, ocamlformat, clang-format, ktlint, ktfmt, rubocop, standardrb, gleam format, terraform fmt, terragrunt-hcl, php-cs-fixer, csharpier, fantomas, swiftformat, stylua, ormolu, taplo, google-java-format, cljfmt, cmake-format, cue fmt, psscriptanalyzer-format
+biome, prettier, oxfmt, ruff, black, sqlfluff, gofmt, rustfmt, zig fmt, dart format, shfmt, nixfmt, mix format, ocamlformat, clang-format, ktlint, ktfmt, rubocop, standardrb, gleam format, typstyle, terraform fmt, terragrunt-hcl, php-cs-fixer, csharpier, fantomas, swiftformat, stylua, ormolu, taplo, google-java-format, cljfmt, cmake-format, cue fmt, psscriptanalyzer-format
 
 Detection rules:
 
@@ -119,10 +119,6 @@ pi-lens enforces a **read-before-edit** policy on all file writes and edits. Bef
 - **Snapshot validation** — covered edit ranges are hash-checked against the lines the agent actually saw at read time; stale-range edits are rejected even when range coverage exists. Hash capture covers reads up to 3 000 lines
 
 Coverage is tracked across multiple reads: two reads of lines 1–100 and 101–200 together satisfy a full-file write. Symbol-expanded reads (small reads silently widened to the enclosing symbol via tree-sitter) count toward coverage at the symbol level. Markdown files generate a warning instead of blocking (edits outside the section-expanded read range are warned, not silently passed). Plain-text (`.txt`) and log (`.log`) files remain fully exempt.
-
-**Markdown coverage (frontmatter + adjacent tables).** Section-expanded markdown reads include the YAML frontmatter block at the top of the file when one is present, plus adjacent table rows when a `| --- | --- |` separator sits directly above the section's starting heading or opens the following one. An edit inside the frontmatter, or in a table row that lives next to the read section, no longer raises a spurious out-of-range warning.
-
-The expansion is opt-out via `readGuard.markdown.frontmatterAlwaysRead` in `~/.pi-lens/config.json`. The default is `true`. Setting it to `false` reverts the expanded range to heading-only. See `docs/configuration.md` for the schema.
 
 Override for a single edit: `/lens-allow-edit <path>`
 
@@ -230,7 +226,7 @@ One event per logical write batch (not per file) — e.g. a single eslint `--fix
 
 **Versioning policy: additive-only.** New optional fields may be added under `v: 1`. A breaking change to an existing field's meaning bumps `v`. Consumers should ignore unknown fields.
 
-**Non-goals:** pi-lens does not (yet) consume anyone's bus events, and does not emit for edits the agent makes itself through its own tool calls — the host already knows about those. This is a broadcast-only surface. The request/response counterpart — `pilens:rpc:*` — ships via R009 / S07 and lives in its own section below ("Bus Events — `pilens:rpc:*` request/response query (R009 / S07)"). It reuses the same versioning discipline.
+**Non-goals:** pi-lens does not (yet) consume anyone's bus events, and does not emit for edits the agent makes itself through its own tool calls — the host already knows about those. This is a broadcast-only surface; see `#478` for the planned `pilens:rpc:*` request/response query API that will reuse the same versioning discipline.
 
 **Kill switch:** `PI_LENS_BUS_PUBLISH=0` disables publishing entirely (see `docs/environment-variables.md`). Publishing is fire-and-forget — a disabled/unavailable/throwing bus never affects the write path's own success or latency.
 
@@ -294,83 +290,7 @@ Late-joiners are a non-problem in-process — extensions activate at `session_st
 
 **Before/after content:** intentionally omitted from v1 (the size/complexity tradeoff the original issue sketch flagged) — a consumer that needs pre-format text for diff rendering is a follow-up, not part of this event.
 
-**Shared schema with R009 / S07 (bound, not merged).** The `PilensDiagnosticsPayload` type (`clients/diagnostics-publish.ts`) is defined once and reused verbatim by the `pilens:rpc:diagnostics` pull response — push (this event) and pull (R009) are two deliveries of the same shape over the same lens-engine seam. Adding a new pull channel (`pilens:rpc:knip-findings` and friends) means one `handleXxxRequest` plus one new event constant in `clients/rpc-publish.ts`; no shape fork. The `#449` registry-dogfooding concern stayed a parallel gating issue for the *cross-process* wire-up of `PilensDiagnosticsPayload` and does NOT apply to the in-process RPC pull, which reads only the local widget state.
-
-### Bus Events — `pilens:rpc:*` request/response query (R009 / S07)
-
-The first `pi.events` surface that breaks the broadcast-only doctrine of #482 / #502: pi's `pi.events` is a plain EventEmitter with no native request/response semantics, so this module reserves two request channels and emits a correlated response on a per-token channel for every well-formed request.
-
-**Wire shape (request):**
-
-```
-event:   pilens:rpc:diagnostics | pilens:rpc:files-touched
-payload: {
-  v: 1,
-  source: "pi-lens",
-  token: string,        // 1..128 chars, opaque to pi-lens
-  paths?: string[],     // optional, only consulted when the handler chooses
-}
-```
-
-**Wire shape (response):**
-
-```
-event:   pilens:rpc:<token>:response
-payload: {
-  v: 1,
-  source: "pi-lens",
-  token: string,        // echoed from the request
-  ttlMs: number,        // the rpc.responseTtlMs config value at emit time
-  payload: PilensDiagnosticsPayload | PilensRpcFilesTouchedPayload,
-  expired?: true,       // set ONLY when the TTL elapsed before the response could be built
-}
-```
-
-The response channel is constructed by the internal `rpcResponseChannel(token)` helper (`pilens:rpc:` + token + `:response`) — the only place that string is built. The token in the channel name is the structural loop guard: two concurrent requesters never see each other's reply because their tokens differ, and a same-process consumer that wanted to forward a response back through the bus would have to construct a `pilens:rpc:<other-token>:response` channel — never a `pilens:rpc:diagnostics` channel — so the `origin: "bus"` loop guard from #482 stays the right shape for push surfaces, while the per-token response channel is the right shape for pull.
-
-**Request semantics:**
-
-- `token` is validated (`typeof === "string"` AND `1 ≤ length ≤ 128`); invalid envelopes log `rpc_request_invalid_no_token` to `bus-events.log` and emit nothing.
-- The handler reads the current `widgetState.allDiagnostics` snapshot (not a stale cached one — the same full-replace-per-path discipline as #502 applies) for `pilens:rpc:diagnostics`, and the recent-touches buffer (bounded cross-process aggregate from #492) for `pilens:rpc:files-touched`.
-- Per-file cap: `MAX_DIAGNOSTICS_PER_FILE_EVENT` (12) per file, errors prioritized when capping, identical to the push publisher's #502 cap. A capped file entry sets `truncated: true`.
-- Global cap: `rpc.maxDiagnosticsPerResponse` (default `200`, env override `PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE`) bounds the TOTAL diagnostics across all files in a single response. When the cap fires the response is truncated and the wrapper carries the same `truncated: true` semantics at the file-entry level.
-- TTL: `rpc.responseTtlMs` (default `5000` ms, env override `PI_LENS_RPC_RESPONSE_TTL_MS`) is evaluated at emit time. A response that exceeded the TTL before the handler reached emit is still published (a request must always get SOME answer) but the wrapper carries `expired: true` and an empty `payload`. The window is microseconds in the current synchronous handler; the path exists for the future async case and for tests that force the boundary.
-
-**Files-touched response (separate, minimal envelope):**
-
-```
-{
-  v: 1,
-  source: "pi-lens",
-  token: string,
-  ttlMs: number,
-  payload: {
-    paths: string[],   // absolute, normalized
-    ts: number,        // max(entries.map(e => e.ts)) || Date.now()
-  },
-}
-```
-
-**State-missing branches:** an empty diagnostics snapshot (`getDiagnosticsState()` returns `[]`/null/undefined) emits `{diagnostics: []}` and logs `rpc_response_skipped_no_state` — the requester still gets an answer so its timeout does not fire, but the explicit empty lets the requester distinguish "pi-lens has no findings" from "pi-lens never answered". The same shape applies to an empty recent-touches buffer.
-
-**Errors:** any thrown exception inside the handler is logged as `rpc_response_failed` and swallowed — a single bad request must not bring down the bus for the rest of the session.
-
-**No new IPC / JSON-RPC runtime.** Only subscribers/publishers on the already-wired `pi.events` bus. The MCP server (`mcp/`) and the host's print/RPC modes do not wire `pi.events`, so `wireRpcBusSubscriber` is a structural no-op there — a request sent over MCP times out on the requester side without a response, which is the documented failure mode. The `wireRpcBusSubscriber` call is feature-gated on `typeof events?.on === "function"` so the wiring tolerates the absence of a bus entirely.
-
-**Observability:** every request and every response emits a row to `~/.pi-lens/bus-events.log` with bounded counters (rolled up per session in `latency.log`). The full outcome enum on the RPC surface:
-
-- `rpc_request_received` — a well-formed request was received and is being handled
-- `rpc_request_invalid_no_token` — token validation failed (empty / non-string / >128 chars)
-- `rpc_response_emitted` — a response was published on the per-token channel
-- `rpc_response_skipped_no_state` — state was missing, an explicit empty was emitted
-- `rpc_response_expired_no_state` — TTL elapsed before the response could be built, `expired: true` set
-- `rpc_response_failed` — the handler threw; swallowed
-
-Existing `emitted`/failure counters from #482 continue to cover the push surfaces — the six new outcomes sit alongside without disturbing the rollup.
-
-**Kill switch:** `PI_LENS_BUS_PUBLISH=0` (same family as #482 — no new env var) silences BOTH push and RPC surfaces together. There is no separate RPC-only kill switch; the surfaces die as one. To diagnose a request that never received a response, tail `bus-events.log` and look for `rpc_request_received` without a matching `rpc_response_emitted` (or one of its `skipped`/`expired`/`failed` siblings).
-
-**Adding a new `pilens:rpc:*` channel:** the schema, cap, and TTL machinery are shared and live in `clients/runtime-config.ts` (`getRpcMaxDiagnosticsPerResponse`, `getRpcResponseTtlMs`). Adding a channel means one `BUS_RPC_REQUEST_XXX_EVENT` constant, one `handleXxxRequest` function, and one conformance entry in `tests/config/rpc-bus-conformance.test.ts` — never a fork of the envelope shape, and never a second TTL path. The conformance test sweeps `clients/`, `tools/`, `mcp/`, `scripts/` plus root `index.ts` for any module that subscribes to a request channel or emits on a `pilens:rpc:*` response channel, and pins the response-channel helper shape (`rpcResponseChannel(token)` concatenating `pilens:rpc:` + token + `:response`) so a future refactor that switches to a non-template construction trips the guard.
+**Shared schema with #478 (bound, not merged).** The `PilensDiagnosticsPayload` type (`clients/diagnostics-publish.ts`) is defined once and reused verbatim by #478's future `pilens:rpc:diagnostics` pull response — push (this event) and pull (#478) are two deliveries of the same shape over the same lens-engine seam. #478 stays separately gated on #449 registry dogfooding.
 
 ### Opportunistic Read Expansion
 
@@ -396,7 +316,7 @@ Covers JavaScript/TypeScript, Python, Go, Rust, Ruby, Shell, and CMake. A TypeSc
 
 Structural rules organized by language in `rules/tree-sitter-queries/<language>/`. Rules marked **🔴** block the agent inline at write time (only for lines in the current edit); others are advisory.
 
-**Suppressing a finding:** add `// pi-lens-ignore: rule-id` on the flagged line or the line above (JS/TS), or `# pi-lens-ignore: rule-id` for Python/Ruby/Shell. This suppresses that specific rule at that location only.
+**Suppressing a finding:** add `// pi-lens-ignore: rule-id` on the flagged line or the line above (JS/TS), or `# pi-lens-ignore: rule-id` for Python/Ruby/Shell. Rule ids are comma-separated. A supported separator (` -- `, ` — `, or `: `) starts one trailing reason suffix for the whole payload; all remaining text, including commas, stays in the reason and is not parsed as another rule id. This suppresses each listed rule at that location only.
 
 **Bring your own rules:** drop YAML query files into `rules/tree-sitter-queries/<language>/` in your project — pi-lens merges them with the built-ins on session start. The schema, predicates (`eq`, `match`, `any-of`), and `inline_tier` (`blocking` | `warning` | `review`) are documented in [`custom-rules.md`](custom-rules.md). A `rules/tree-sitter-queries/rule-schema.json` JSON Schema is bundled for editor autocomplete via `.vscode/settings.json`.
 
@@ -410,7 +330,7 @@ Pattern-based structural rules in `rules/ast-grep-rules/` across JS, TS, and Pyt
 
 ### Opengrep Security Scanner (Auxiliary LSP, Experimental)
 
-[Opengrep](https://github.com/opengrep/opengrep) (an open, login-free fork of Semgrep) runs as a pi-lens **auxiliary diagnostic LSP** — a cross-cutting, diagnostic-only language server that attaches _alongside_ the file's normal language server (TypeScript, Python, …) and contributes findings on the same on-write diagnostics path. Running it as a warm LSP server compiles its ruleset **once per session** rather than on every file, so per-file scans cost ~1–2s (vs ~8s for a cold CLI invocation per file). High-signal security findings become blocking; the rest are advisory.
+[Opengrep](https://github.com/opengrep/opengrep) (an open, login-free fork of Semgrep) runs as a pi-lens **auxiliary diagnostic LSP** — a cross-cutting, diagnostic-only language server that attaches *alongside* the file's normal language server (TypeScript, Python, …) and contributes findings on the same on-write diagnostics path. Running it as a warm LSP server compiles its ruleset **once per session** rather than on every file, so per-file scans cost ~1–2s (vs ~8s for a cold CLI invocation per file). High-signal security findings become blocking; the rest are advisory.
 
 - **On by default** (it's a registered LSP server) when the `opengrep` binary is available; pi-lens **auto-installs it on demand** — a single GitHub-release binary, **no login, token, or telemetry**. Disable with `--no-opengrep`.
 - **Rules:** a repo `.opengrep.yml`/`.opengrep.yaml` (or a legacy `.semgrep.yml`/`.semgrep.yaml`, whose format Opengrep consumes natively) is used if present; otherwise it falls back to Opengrep's login-free `auto` Community ruleset.
@@ -431,11 +351,11 @@ metadata:
 
 Three external scanners run **once per session in the background** (not on every write — their inputs change at most daily and the scans are whole-tree). Each is **opt-in and auto-installed only when its gate trips**; results surface at turn end, with the highest-severity findings treated as blockers and the rest as advisory.
 
-| Scanner         | Finds                                                                                                                                                                                                                           | Opt-in gate                                                                                 | Auto-install                          |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------- |
-| **gitleaks**    | Committed secrets (API keys, tokens, certs) — regex + entropy, language-agnostic                                                                                                                                                | `.gitleaks.toml` / `.gitleaksignore`, a `gitleaks` dep, or a pre-commit hook referencing it | GitHub release                        |
-| **govulncheck** | Go module CVEs **reachable** from the build graph (call-graph filtered)                                                                                                                                                         | a `go.mod` at the analysis root                                                             | `go install` (needs the Go toolchain) |
-| **trivy**       | Dependency CVEs across every ecosystem (npm, PyPI, Maven/Gradle, Go, Cargo, Composer, RubyGems, NuGet, …), **hardcoded secrets**, and **dependency license risk** (copyleft/restricted licenses) — all from one `trivy fs` pass | **`trivy.enabled: true` in `.pi-lens.json`** _and_ a dependency manifest at the root        | GitHub release                        |
+| Scanner | Finds | Opt-in gate | Auto-install |
+|---|---|---|---|
+| **gitleaks** | Committed secrets (API keys, tokens, certs) — regex + entropy, language-agnostic | `.gitleaks.toml` / `.gitleaksignore`, a `gitleaks` dep, or a pre-commit hook referencing it | GitHub release |
+| **govulncheck** | Go module CVEs **reachable** from the build graph (call-graph filtered) | a `go.mod` at the analysis root | `go install` (needs the Go toolchain) |
+| **trivy** | Dependency CVEs across every ecosystem (npm, PyPI, Maven/Gradle, Go, Cargo, Composer, RubyGems, NuGet, …), **hardcoded secrets**, and **dependency license risk** (copyleft/restricted licenses) — all from one `trivy fs` pass | **`trivy.enabled: true` in `.pi-lens.json`** *and* a dependency manifest at the root | GitHub release |
 
 Secret findings from **gitleaks, trivy, and the ast-grep `*-hardcoded-secret-*` rules** are collapsed **by location** before surfacing: the same credential flagged by several scanners (with different rule ids) is reported **once** with combined provenance (`[gitleaks + trivy + ast-grep]`), not two or three times — the duplicate advisory copy is suppressed. This is the dedup contract that lets multiple secret scanners coexist without the triple-report noise.
 
@@ -444,14 +364,14 @@ Trivy requires an **explicit** opt-in (rather than just a manifest being present
 ```jsonc
 // .pi-lens.json
 {
-	"trivy": {
-		"enabled": true,
-		"minSeverity": "MEDIUM", // default "HIGH"; HIGH/CRITICAL are always surfaced
-	},
+  "trivy": {
+    "enabled": true,
+    "minSeverity": "MEDIUM" // default "HIGH"; HIGH/CRITICAL are always surfaced
+  }
 }
 ```
 
-**IaC misconfiguration (per-edit, not a session scan).** When `trivy.enabled` is set, pi-lens also runs `trivy config` as an on-write dispatch runner (alongside hadolint/tflint) over **Dockerfiles** and **Kubernetes manifests** (YAML with an `apiVersion:` + `kind:` signature) — Trivy's security-policy engine (runs-as-root, no `HEALTHCHECK`, `privileged: true`, missing resource limits, …), a different class from hadolint's lint. On Dockerfiles, trivy-config findings that hadolint already reports at the same line are suppressed, so it only adds the security checks hadolint lacks. Docker Compose is covered by the same runner when `trivy.compose.enabled` is set in `.pi-lens.json` (off by default); Terraform is covered by the same runner, and Helm charts are covered by rendered-manifest validation below.
+**IaC misconfiguration (per-edit, not a session scan).** When `trivy.enabled` is set, pi-lens also runs `trivy config` as an on-write dispatch runner (alongside hadolint/tflint) over **Dockerfiles** and **Kubernetes manifests** (YAML with an `apiVersion:` + `kind:` signature) — Trivy's security-policy engine (runs-as-root, no `HEALTHCHECK`, `privileged: true`, missing resource limits, …), a different class from hadolint's lint. On Dockerfiles, trivy-config findings that hadolint already reports at the same line are suppressed, so it only adds the security checks hadolint lacks. Compose/CloudFormation are tracked as follow-ups; Terraform is covered by the same runner, and Helm charts are covered by rendered-manifest validation below.
 
 **Rendered-manifest validation for Helm charts (opt-in).** `helm lint` checks a chart's source; it cannot see what the chart produces. When a project sets
 
@@ -475,19 +395,17 @@ pi-lens ships an MCP (Model Context Protocol) server so Claude Code — or any M
 
 **18 tools, grouped by lifecycle layer** (the same three layers the pi agent hooks use):
 
-
-| Layer                       | MCP tools                                                                                                                                                                                       | What they expose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Per-edit**                | `pilens_analyze`, `pilens_lsp_diagnostics`, `pilens_lsp_navigation`, `pilens_ast_grep_search`, `pilens_ast_grep_replace`, `pilens_module_report`, `pilens_read_symbol`, `pilens_read_enclosing` | The fast pipeline (format → autofix → LSP diagnostics → parallel runners) plus the structured read-substitute pair. `analyze` accepts `mode: warm \| fresh` — `warm` reuses the server's in-process LSP, `fresh` forks a worker that loads freshly-built code from disk so the result reflects the latest commit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| **Per-turn**                | `pilens_turn_end`                                                                                                                                                                               | Drives the **real** `handleTurnEnd` (knip incremental, dep-circular, cascade, tests, actionable+code-quality warnings) — not a re-implementation. Caller-supplied edited files are auto-registered into turn-state via `addModifiedRange`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Per-session**             | `pilens_session_start`                                                                                                                                                                          | Drives the **real** `handleSessionStart` — full jscpd/knip/madge/govulncheck/gitleaks/trivy scans + complexity baselines + LSP warm. The error-debt baseline (`npm test` + `npm run build`) is populated only when the `error-debt-baseline` flag is enabled — set `errorDebtBaseline.enabled: true` in `~/.pi-lens/config.json`, or pass `--error-debt-baseline`. Off by default because both commands are expensive on real projects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Project / observability** | `pilens_project_scan`, `pilens_project_report`, `pilens_diagnostics`, `pilens_health`, `pilens_latency`, `pilens_symbol_search`, `pilens_effective_config`                                      | Cheap project-wide scans, cached diagnostic state, latency telemetry, ranked identifier search (BM25 over the persisted word index — see [docs/word-index.md](word-index.md)). Cross-file blast radius now lives in `pilens_module_report`'s `blastRadius` option. `pilens_health` (and its pi-side `/lens-health` counterpart) also reports a bounded, process-local **degradation ledger** — trust refusals, mode suppressions, LSP breaker trips, formatter skips/failures, TypeScript/word-index/review-graph/project-snapshot idle evictions, WASM aborts, and diagnostics-timeout tallies — so silently degraded behavior stays visible instead of vanishing into a log. `pilens_effective_config` answers **“why is X running / why is X not running”** from one query — the resolved configuration with the provenance of every setting, and for a file you name, its language plus every LSP server with the reason it was selected or denied and the runners that would dispatch. It reports sources, never values. |
-| **Lifecycle / loop**        | `pilens_rebuild`                                                                                                                                                                                | Runs `npm run build:dist` so `pilens_analyze mode=fresh` reflects the latest commit. Makes the review loop self-contained: commit → `pilens_rebuild` → `pilens_analyze mode=fresh` → `pilens_latency`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Layer | MCP tools | What they expose |
+|---|---|---|
+| **Per-edit** | `pilens_analyze`, `pilens_lsp_navigation`, `pilens_ast_grep_search`, `pilens_ast_grep_replace`, `pilens_module_report`, `pilens_read_symbol`, `pilens_read_enclosing` | The fast pipeline (format → autofix → LSP diagnostics → parallel runners) plus the structured read-substitute pair. `analyze` accepts `mode: warm \| fresh` — `warm` reuses the server's in-process LSP, `fresh` forks a worker that loads freshly-built code from disk so the result reflects the latest commit. |
+| **Per-turn** | `pilens_turn_end` | Drives the **real** `handleTurnEnd` (knip incremental, dep-circular, cascade, tests, actionable+code-quality warnings) — not a re-implementation. Caller-supplied edited files are auto-registered into turn-state via `addModifiedRange`. |
+| **Per-session** | `pilens_session_start` | Drives the **real** `handleSessionStart` — full jscpd/knip/madge/govulncheck/gitleaks/trivy scans + complexity baselines + LSP warm. The error-debt baseline is not currently populated by the production session-start path. |
+| **Project / observability** | `pilens_project_scan`, `pilens_project_report`, `pilens_diagnostics`, `pilens_health`, `pilens_latency`, `pilens_symbol_search`, `pilens_effective_config` | Cheap project-wide scans, cached diagnostic state, latency telemetry, ranked identifier search (BM25 over the persisted word index — see [docs/word-index.md](word-index.md)). Cross-file blast radius now lives in `pilens_module_report`'s `blastRadius` option. `pilens_health` (and its pi-side `/lens-health` counterpart) also reports a bounded, process-local **degradation ledger** — trust refusals, mode suppressions, LSP breaker trips, formatter skips/failures, TypeScript/word-index/review-graph/project-snapshot idle evictions, WASM aborts, and diagnostics-timeout tallies — so silently degraded behavior stays visible instead of vanishing into a log. `pilens_effective_config` answers **“why is X running / why is X not running”** from one query — the resolved configuration with the provenance of every setting, and for a file you name, its language plus every LSP server with the reason it was selected or denied and the runners that would dispatch. It reports sources, never values. |
+| **Lifecycle / loop** | `pilens_rebuild`, `pilens_session_end` | `pilens_rebuild` runs `npm run build:dist` so `pilens_analyze mode=fresh` reflects the latest commit. Makes the review loop self-contained: commit → `pilens_rebuild` → `pilens_analyze mode=fresh` → `pilens_latency`. `pilens_session_end` ends the MCP connection's telemetry session and writes its bounded situational-tool telemetry line; terminal for the connection. |
 
 **Honest limits** (live-tested, documented in `mcp.md`):
 
 - **`fresh` always cold-spawns the LSP**, so it systematically under-reports LSP diagnostics on large TS projects (`typescript-language-server` must index the whole project first). The result carries an explicit `lsp` honesty signal (`ran` / `status` / `diagnosticCount` / `durationMs`) so a cold `0` is never read as "clean" — use `warm` for LSP-complete reviews.
-- **`mode=fresh` reports `warmup-timeout` instead of a silent `0`** when the LSP warm-up call (`LSPService.touchFile`) does not return within `PI_LENS_MCP_FRESH_WARMUP_TIMEOUT_MS` (default `10000` ms). The summary embeds `lsp 0 (warmup-timeout, <ms>ms)` so a cold LSP that simply took too long is reported with its cause — distinct from `skipped` (LSP unsupported for this file) and `clean` (a real affirmative result). Use the warm server for LSP-complete reviews when this fires.
 - **`pilens_analyze` by default surfaces everything** (`blockingOnly=false`); the per-edit fast path in the pi extension is still blocking-first.
 - **The MCP server keeps the LSP warm across calls** within its process; `fresh` is for benchmarking a real cold spawn, not for steady-state usage.
 
@@ -508,27 +426,13 @@ claude mcp add --scope user pi-lens \
 **Hooks** (`settings.json`) close the loop: PostToolUse = per-edit, Stop = per-turn.
 
 ```json
-{
-	"hooks": {
-		"PostToolUse": [
-			{
-				"matcher": "Edit|Write",
-				"hooks": [{ "type": "command", "command": "pi-lens-analyze --hook" }]
-			}
-		],
-		"Stop": [
-			{
-				"hooks": [
-					{
-						"type": "command",
-						"command": "pi-lens-analyze --turn-end",
-						"timeout": 60
-					}
-				]
-			}
-		]
-	}
-}
+{ "hooks": {
+  "PostToolUse": [
+    { "matcher": "Edit|Write",
+      "hooks": [ { "type": "command", "command": "pi-lens-analyze --hook" } ] } ],
+  "Stop": [
+    { "hooks": [ { "type": "command", "command": "pi-lens-analyze --turn-end", "timeout": 60 } ] } ]
+} }
 ```
 
 The per-edit hook falls back to a cold local analysis when no server is up; the `Stop` hook is **warm-server-only** because only the server process owns the session state and pending turn work. It skips with a single stderr line when unavailable. Workspace IPC requests are ordered, so a timed-out PostToolUse client cannot let `Stop` overtake analysis still running in the server. `SubagentStop` is deliberately not registered because subagent edits already reach turn-state through PostToolUse.

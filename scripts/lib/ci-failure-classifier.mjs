@@ -93,7 +93,7 @@ const FAIL_LINE = /^\s*FAIL\s+\S+\s+(\S+\.test\.tsx?)\s*>\s*(.+)$/gm;
 const BARE_FAIL_LINE = /^\s*FAIL\b.*?(\S+\.test\.tsx?)(?=\s|$)/m;
 // (real log, same run) "AssertionError: expected false to be true //
 // Object.is equality"
-const ASSERTION_LINE = /AssertionError:\s*(.+)/;
+const ASSERTION_LINE = /^\s*AssertionError:\s*(.+)$/m;
 // vitest prints this inline, AS EACH FILE FINISHES, before the end-of-run
 // "Failed Tests" summary block ever gets a chance to print (real log, run
 // 32913518938, job 98012237782, line 536): " ❯  default
@@ -118,13 +118,13 @@ const INLINE_TEST_FAIL_MARKER = /^\s*×\s+(.+?)\s*\d*m?s?\s*$/m;
 // failure evidence even when an infrastructure-looking line appears later.
 // Keep these explicit: the classifier must not let a new infra needle outrank
 // a genuine assertion or compile failure.
-const TEST_FILES_FAILED = /\bTest Files\s+\d+\s+failed\b/i;
+const TEST_FILES_FAILED = /^\s*Test Files\s+\d+\s+failed\b/im;
 const TYPESCRIPT_ERROR =
 	/^\s*\S+\.tsx?\(\d+,\d+\): error TS\d+:|^\s*\S+\.tsx?:\d+:\d+ - error TS\d+:/m;
 // The run's own final tally line (real log, same run): " Tests  1 failed |
 // 9837 passed | 48 skipped (9886)". No file/test detail, but a nonzero
 // failed count here is unambiguous.
-const OVERALL_TESTS_FAILED = /\bTests\s+(\d+)\s+failed\b/;
+const OVERALL_TESTS_FAILED = /^\s*Tests\s+(\d+)\s+failed\b/m;
 // #2839: vitest's timeout failure text (real log, run 34389495533 attempt 1,
 // job 102594125043, PR #2834): "Error: Test timed out in 5000ms." Vitest's
 // runner uses the same template for hooks: "Error: Hook timed out in 300ms."
@@ -472,11 +472,13 @@ export function classifyFailureLog(rawLog) {
 	}
 
 	const realSignal = findRealFailureSignal(log);
+	// Keep exit-137/SIGKILL infra unless a line-shaped test failure signal is
+	// present. Incidental prose, test names, mem-watch explanations, and long
+	// MCP smoke output must not turn the #2848 kill into `ci:real`.
+	if (killClassification && !realSignal) return killClassification;
 	if (realSignal) {
 		return { kind: "real", detail: realSignal.detail };
 	}
-
-	if (killClassification) return killClassification;
 
 	const networkEvidence = findNetworkUnreachableEvidence(log);
 	if (networkEvidence) {
@@ -508,20 +510,29 @@ export function classifyFailureLog(rawLog) {
 // -eligible infra one), or "failed:<http-status>" when an attempt was made
 // but the API call itself failed (review round 1, F4) -- see
 // shouldTriggerRerun for why only "true" blocks a future retry.
+//
+// `attempt=<n>` (#2042, 2026-09-15) records the CI run attempt a
+// `rerun=true` belongs to, and is read by shouldTriggerRerun for exactly
+// that state -- a `false` / `failed:` marker never blocks a later pass, so
+// its attempt is not consulted. OPTIONAL in the pattern on purpose: every
+// marker written before this field existed is still a valid marker and still
+// parses, defaulting to attempt 1 -- which is exactly what it was, because
+// the workflow only ever invoked the classifier on `run_attempt == 1`.
 const MARKER_PATTERN =
-	/<!--\s*ci-classifier:sha=([0-9a-fA-F]{7,40})\s+rerun=(true|false|failed:\d+)\s*-->(?=\s*$)/g;
+	/<!--\s*ci-classifier:sha=([0-9a-fA-F]{7,40})\s+rerun=(true|false|failed:\d+)(?:\s+attempt=(\d+))?\s*-->(?=\s*$)/g;
 
 /**
  * @param {string} sha
  * @param {string} rerunState "true" | "false" | `failed:${number}`
+ * @param {number} [runAttempt] the CI run attempt this state belongs to
  */
-export function buildMarker(sha, rerunState) {
-	return `<!-- ci-classifier:sha=${sha} rerun=${rerunState} -->`;
+export function buildMarker(sha, rerunState, runAttempt = 1) {
+	return `<!-- ci-classifier:sha=${sha} rerun=${rerunState} attempt=${runAttempt} -->`;
 }
 
 /**
  * @param {string | null | undefined} commentBody
- * @returns {{ sha: string, rerunState: string, rerunTriggered: boolean } | null}
+ * @returns {{ sha: string, rerunState: string, rerunTriggered: boolean, runAttempt: number } | null}
  */
 export function parseClassifierMarker(commentBody) {
 	if (!commentBody) return null;
@@ -534,6 +545,9 @@ export function parseClassifierMarker(commentBody) {
 		sha: match[1],
 		rerunState: match[2],
 		rerunTriggered: match[2] === "true",
+		// Pre-#2042 markers carry no attempt field; they were only ever written
+		// from attempt 1, so 1 is the honest default rather than a guess.
+		runAttempt: match[3] === undefined ? 1 : Number(match[3]),
 	};
 }
 
@@ -545,14 +559,35 @@ function sanitizeCommentDetail(detail) {
 }
 
 /**
- * The once-per-SHA rerun guard. A real failure is never rerun, full stop.
+ * The maximum CI run attempt an automatic rerun may be issued FROM (#2042,
+ * 2026-09-15). Attempts 1 and 2 can each trigger one rerun, so a head gets at
+ * most TWO automatic reruns and attempt 3 is terminal. This is the same bound
+ * `.github/workflows/ci-infra-kill-rerun.yml`'s `jobs.classify.if` applies
+ * (`run_attempt <= 2`); it is repeated here because a human can invoke this
+ * CLI on any run id with no workflow gate in front of it, and because the
+ * per-attempt marker keying below would otherwise be unbounded.
+ */
+export const MAX_AUTO_RERUN_ATTEMPT = 2;
+
+/**
+ * The once-per-ATTEMPT rerun guard. A real failure is never rerun, full stop.
  * An infra classification is rerun-eligible UNLESS the PR's current
  * classifier comment already carries a `rerun=true` marker for this EXACT
- * SHA -- a different SHA (a new push) always gets to try again, because the
- * guard's job is "don't loop on the same commit", not "never rerun this PR
- * again". Review round 1, F4: a marker of "failed:<status>" (the rerun API
- * call itself failed) is NOT "already triggered" -- it must remain eligible
- * so the next invocation can retry.
+ * SHA **at this run attempt or later** -- a different SHA (a new push) always
+ * gets to try again, because the guard's job is "don't loop", not "never
+ * rerun this PR again". Review round 1, F4: a marker of "failed:<status>"
+ * (the rerun API call itself failed) is NOT "already triggered" -- it must
+ * remain eligible so the next invocation can retry.
+ *
+ * WHY PER-ATTEMPT, NOT PER-SHA (#2042, 2026-09-15): keyed on the SHA alone,
+ * one head got exactly one automatic rerun ever. A runner that 137-kills
+ * attempt 1 usually kills attempt 2 as well -- #3048 and #3040 both did on
+ * 2026-09-15 -- and the second kill then sat until a human pressed rerun.
+ * The marker still blocks a re-invocation for the SAME attempt (the original
+ * "don't loop on one commit" job it was built for); a LATER attempt is a new
+ * failure and gets its own single try, up to MAX_AUTO_RERUN_ATTEMPT. The
+ * master lane never reaches this guard at all -- no PR, so no marker to read
+ * -- which is why the workflow gate had to move too.
  *
  * REAL SCOPE OF THE "ONCE PER SHA" GUARANTEE (review round 2, V2/V3 --
  * measured, not assumed): this guard serializes SEQUENTIAL invocations
@@ -587,19 +622,22 @@ function sanitizeCommentDetail(detail) {
  * SOME comment (this invocation's own, or a later reconciled one), and a
  * duplicate rerun is GitHub's own no-op, not a runaway loop.
  *
- * @param {{ classification: Classification, sha: string, existingMarker: { sha: string, rerunTriggered: boolean } | null }} args
+ * @param {{ classification: Classification, sha: string, runAttempt?: number, existingMarker: { sha: string, rerunTriggered: boolean, runAttempt?: number } | null }} args
  */
 export function shouldTriggerRerun({
 	classification,
 	sha,
+	runAttempt = 1,
 	existingMarker,
 	rerunKinds = ["infra-kill", "infra-net"],
 }) {
 	if (!rerunKinds.includes(classification.kind)) return false;
+	if (runAttempt > MAX_AUTO_RERUN_ATTEMPT) return false;
 	if (
 		existingMarker &&
 		existingMarker.sha === sha &&
-		existingMarker.rerunTriggered
+		existingMarker.rerunTriggered &&
+		(existingMarker.runAttempt ?? 1) >= runAttempt
 	) {
 		return false;
 	}
@@ -614,9 +652,14 @@ export function shouldTriggerRerun({
  * machine-readable marker appended on the same line so the comment stays
  * one visible line and is still upsertable per SHA.
  *
- * @param {{ classification: Classification, sha: string, rerunState: string }} args
+ * @param {{ classification: Classification, sha: string, rerunState: string, runAttempt?: number }} args
  */
-export function buildCommentBody({ classification, sha, rerunState }) {
+export function buildCommentBody({
+	classification,
+	sha,
+	rerunState,
+	runAttempt = 1,
+}) {
 	const detail = sanitizeCommentDetail(classification.detail);
 	classification = { ...classification, detail };
 	const suffix = rerunState.startsWith("failed:")
@@ -628,46 +671,7 @@ export function buildCommentBody({ classification, sha, rerunState }) {
 		classification.kind === "real"
 			? `ci-classifier: real — first failure: ${classification.detail}`
 			: `ci-classifier: ${classification.kind} (${classification.detail}${suffix})`;
-	return `${line} ${buildMarker(sha, rerunState)}`;
-}
-
-/**
- * Decide a classification and the comment body ASSUMING any eligible rerun
- * would succeed. Pure -- no I/O -- used for testing the classification and
- * guard logic in isolation. The real orchestration (runClassifier) does NOT
- * use this to decide the final marker state: it attempts the rerun FIRST
- * and only then knows whether "true" or "failed:<status>" is honest (review
- * round 1, F4) -- see runClassifier.
- *
- * @param {{ rawLog: string, sha: string, existingCommentBody: string | null | undefined }} args
- */
-export function decideClassifierAction({ rawLog, sha, existingCommentBody }) {
-	const classification = classifyFailureLog(rawLog);
-	const existingMarker = parseClassifierMarker(existingCommentBody);
-	const eligibleForRerun = shouldTriggerRerun({
-		classification,
-		sha,
-		existingMarker,
-	});
-	const rerunState = eligibleForRerun
-		? "true"
-		: existingMarker &&
-			  existingMarker.sha === sha &&
-			  existingMarker.rerunTriggered
-			? "true"
-			: "false";
-	const commentBody = buildCommentBody({ classification, sha, rerunState });
-	// Review round 2, V5: `rerunTriggeredThisPass` (not `rerunTriggered`,
-	// which parseClassifierMarker's return keeps for the CUMULATIVE
-	// marker-state meaning) -- this field means "did THIS pass trigger a
-	// rerun". eligibleForRerun already IS that this-pass answer (this pure
-	// function assumes an eligible attempt always succeeds; see
-	// runClassifier for the real, attempt-then-record version).
-	return {
-		classification,
-		rerunTriggeredThisPass: eligibleForRerun,
-		commentBody,
-	};
+	return `${line} ${buildMarker(sha, rerunState, runAttempt)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +763,11 @@ async function fetchRunAndFailedJob({ fetcher, owner, repo, runId, jobName }) {
 	return {
 		sha: run.head_sha,
 		prNumber,
+		// GitHub's own per-head attempt counter (#2042): the rerun guard is
+		// keyed on it, so it is read from the run the classifier was pointed
+		// at rather than passed in by the caller. An API shape without it
+		// (or a hand-rolled fixture) reads as attempt 1.
+		runAttempt: Number(run.run_attempt) || 1,
 		jobId: failedJob.id,
 		jobName: failedJob.name,
 	};
@@ -906,10 +915,12 @@ async function attemptRerun({ fetcher, owner, repo, runId }) {
  * lookup failed) and throws. With it, classification and the rerun attempt
  * still run in full, but every PR-comment step (find/upsert/reconcile) is
  * skipped -- there is no issue thread to post to. That also means the
- * cross-invocation "already reran this SHA" marker guard (shouldTriggerRerun
- * reading `existingMarker`) has no comment to read for a push run; the
- * workflow's own `run_attempt == 1` gate is what bounds a push rerun to
- * once per completed run, the same way it bounds the PR path.
+ * cross-invocation "already reran this attempt" marker guard
+ * (shouldTriggerRerun reading `existingMarker`) has no comment to read for a
+ * push run -- so on that lane the ONLY bounds are the workflow's own
+ * `run_attempt <= 2` gate and this module's MAX_AUTO_RERUN_ATTEMPT, both of
+ * which cap a head at two automatic reruns without needing any stored state
+ * (#2042).
  *
  * @param {{ fetcher: typeof fetch, owner: string, repo: string, runId: number | string, jobName?: string, prNumber?: number, allowMissingPr?: boolean }} args
  */
@@ -955,6 +966,7 @@ export async function runClassifier({
 	const {
 		sha,
 		prNumber: resolvedPrNumber,
+		runAttempt,
 		jobId,
 		jobName: resolvedJobName,
 	} = runAndJob;
@@ -1008,6 +1020,7 @@ export async function runClassifier({
 	const eligibleForRerun = shouldTriggerRerun({
 		classification,
 		sha,
+		runAttempt,
 		existingMarker,
 		rerunKinds,
 	});
@@ -1021,6 +1034,15 @@ export async function runClassifier({
 	// on a later re-invocation that finds the rerun already succeeded
 	// earlier for this exact SHA (see the `else if` below).
 	let rerunTriggeredThisPass = false;
+	// The attempt the marker's rerun state BELONGS to -- this attempt when the
+	// rerun (or its failure) happens now, the earlier attempt when this pass
+	// only carries a prior success forward (the `else if` below). #3086:
+	// this is the ONLY writer of the carry-forward rule -- the pure
+	// decideClassifierAction that used to duplicate it (and needed its own
+	// twin test, #3079) is deleted; see the "#2042: a real classification
+	// at attempt 2..." test in ci-failure-classifier.test.ts for the
+	// mutation this branch guards.
+	let markerRunAttempt = runAttempt;
 	if (eligibleForRerun) {
 		const result = await attemptRerun({ fetcher, owner, repo, runId });
 		rerunState = result.ok ? "true" : `failed:${result.status}`;
@@ -1036,9 +1058,15 @@ export async function runClassifier({
 		// This pass itself triggered nothing, though (rerunTriggeredThisPass
 		// stays false).
 		rerunState = "true";
+		markerRunAttempt = existingMarker.runAttempt;
 	}
 
-	const commentBody = buildCommentBody({ classification, sha, rerunState });
+	const commentBody = buildCommentBody({
+		classification,
+		sha,
+		rerunState,
+		runAttempt: markerRunAttempt,
+	});
 	// A push run has no issue thread to post the sticky comment to -- the
 	// classify job's own log (this function's caller prints commentBody) is
 	// the only trace for that run, by design (#2668).

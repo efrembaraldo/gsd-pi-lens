@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import * as path from "node:path";
 import type { ActionableWarningsReport } from "../../clients/actionable-warnings.js";
 import { CacheManager } from "../../clients/cache-manager.js";
@@ -14,7 +14,11 @@ import { getLastLoggedPhase } from "../../clients/latency-logger.js";
 import * as latencyLogger from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
-import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import {
+	createTempFile,
+	cleanupTestEnvironmentsDrained,
+	setupTestEnvironment,
+} from "./test-utils.js";
 import {
 	_resetForTests as resetBusPublish,
 	wireBusEmitter,
@@ -54,6 +58,13 @@ vi.mock("../../clients/pipeline.js", async (importOriginal) => {
 });
 
 describe("runtime-agent-end deferred formatting", () => {
+	const cleanupAgentEndTemps = async () => {
+		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-");
+	};
+
+	afterEach(cleanupAgentEndTemps);
+	afterAll(cleanupAgentEndTemps);
+
 	it("does not resolve autofix clients for format-only records", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-only-clients-");
 		try {
@@ -294,6 +305,19 @@ describe("runtime-agent-end deferred formatting", () => {
 				"let value=1\n",
 			);
 			fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+			// The shared agreement gate requires independent lockfile evidence for
+			// the Biome autonomous writer; the config file alone must not authorize
+			// a deferred mutation.
+			fs.writeFileSync(
+				path.join(env.tmpDir, "package.json"),
+				JSON.stringify({ devDependencies: { "@biomejs/biome": "^1.0.0" } }),
+			);
+			fs.writeFileSync(
+				path.join(env.tmpDir, "package-lock.json"),
+				JSON.stringify({
+					packages: { "node_modules/@biomejs/biome": { version: "1.0.0" } },
+				}),
+			);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 			runtime.deferMutation(

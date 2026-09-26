@@ -4,8 +4,8 @@
  * Runs `cargo clippy` for Rust files to catch common mistakes.
  */
 
-import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { pathsEqual } from "../../path-utils.js";
 import { rustClient } from "../../rust-client.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { stripAnsi } from "../../sanitize.js";
@@ -24,7 +24,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { PRIORITY } from "../priorities.js";
-import { resolveRunnerCwd } from "../../tool-cwd.js";
+import { resolveRunnerCwdWithReason } from "../../tool-cwd.js";
 import { createCwdCachedProbe } from "./utils/runner-helpers.js";
 
 // Cached per-cwd `cargo clippy --version` probe (#120). Before this, the
@@ -127,13 +127,14 @@ const rustClippyRunner: RunnerDefinition = {
 		}
 
 		// The package root (where Cargo.toml is), through the shared cwd seam
-		// (#2894): `RUNNER_MARKERS["rust-clippy"]` is `["Cargo.toml"]`, so this
-		// IS the walk this runner used to do with `findNearestContaining` — plus
+		// (#2894): the shared language marker vocabulary includes `Cargo.toml`, so
+		// this IS the walk this runner used to do with `findNearestContaining` — plus
 		// the seam's dispatch-root and `$HOME` ceilings, which the hand-rolled
 		// walk had neither of. The gate then asks about exactly the directory
 		// cargo will run in, rather than about a separately-derived one.
-		const cargoDir = resolveRunnerCwd(ctx, "rust-clippy");
-		if (!existsSync(join(cargoDir, "Cargo.toml"))) {
+		const cargoResolution = resolveRunnerCwdWithReason(ctx, "rust-clippy");
+		const cargoDir = cargoResolution.cwd;
+		if (cargoResolution.marker !== "Cargo.toml") {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
@@ -171,9 +172,13 @@ const rustClippyRunner: RunnerDefinition = {
 		// a crate-mate's pre-existing diagnostic must NOT fail the edited file's
 		// turn. Filter to the edited file like golangci-lint — if the edited file
 		// is clean, this turn succeeds even when siblings carry warnings/errors.
+		// #3278: one seam for reported-path attribution — see javac.ts. This
+		// member already had the right BASE (`parseClippyOutput` resolves
+		// `span.file` against `cargoDir`); what it lacked was the on-disk
+		// identity predicate.
 		const absEdited = resolve(ctx.filePath);
-		const diagnostics = allDiagnostics.filter(
-			(d) => resolve(d.filePath) === absEdited,
+		const diagnostics = allDiagnostics.filter((d) =>
+			pathsEqual(resolve(cargoDir, d.filePath), absEdited),
 		);
 
 		const hasErrors = diagnostics.some((d) => d.semantic === "blocking");

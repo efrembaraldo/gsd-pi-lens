@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import { emitBounded } from "../bounded-telemetry.js";
 import { withTimeout } from "../deadline-utils.js";
 import { minimatch } from "../deps/minimatch.js";
+import { mapWithConcurrency } from "../map-with-concurrency.js";
 import {
 	incrementDegradationCount,
 	recordDegradationOnce,
@@ -38,7 +39,11 @@ import {
 	newLspMutationCorrelationId,
 } from "../lsp-mutation.js";
 import { getProcessSingleton } from "../process-singletons.js";
-import { getAmbientAbortSignal } from "../safe-spawn.js";
+import {
+	getAmbientAbortSignal,
+	isOwnLiveChild,
+	releaseOwnChildPid,
+} from "../safe-spawn.js";
 import { raceToCompletion } from "./aggregation.js";
 import {
 	hashDiagnosticContent,
@@ -55,11 +60,14 @@ import {
 	type PositionEncoding,
 } from "./position-encoding.js";
 import {
+	negotiateSaveOptions,
 	negotiateSyncKind,
 	TEXT_DOCUMENT_SYNC_KIND_FULL,
 	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
+	type TextDocumentSaveOptions,
 	type TextDocumentSyncKind,
 } from "./sync-kind.js";
+import { exceedsLspSyncLimits } from "./content-limits.js";
 import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
@@ -326,6 +334,14 @@ export interface LSPClientInfo {
 			languageId: string,
 			preserveDiagnostics?: boolean,
 			silent?: boolean,
+			/**
+			 * #3405: the pushed bytes are this file's saved on-disk state and the
+			 * caller wants it diagnosed now — follow the didOpen/didChange with
+			 * `textDocument/didSave` when the server declared `save`. Only the
+			 * post-write sync and the explicit `lsp_diagnostics` query set it; warm
+			 * reads, cascade neighbours, desync repairs and bulk sweeps do not.
+			 */
+			saved?: boolean,
 		): Promise<void>;
 		change(filePath: string, content: string): Promise<void>;
 		/**
@@ -572,12 +588,22 @@ export interface LSPClientInfo {
  * document state waits behind it and supersedes only the still-pending entry.
  */
 interface PendingDocumentNotify {
-	run: (coalescedCount: number) => Promise<void>;
+	run: (coalescedCount: number, saved: boolean) => Promise<void>;
 	waiters: Array<{
 		resolve: () => void;
 		reject: (error: unknown) => void;
 	}>;
 	coalescedCount: number;
+	/**
+	 * #3405: sticky across coalescing. A superseded entry's save intent carries
+	 * onto its replacement — otherwise the post-write sync's save is silently
+	 * dropped whenever the dispatch runner's unsaved touch for the same path
+	 * replaces it before it starts writing, which is the common case when the
+	 * pipeline's write has not landed yet (so no debounce entry exists to skip
+	 * the runner's notify). The replacement carries NEWER disk bytes, which is
+	 * exactly what the save should describe.
+	 */
+	saved: boolean;
 }
 
 /**
@@ -764,27 +790,6 @@ const WORKSPACE_PULL_SCOPE = "*workspace*";
 // protocol reply, never something worth tuning per project.
 const REFRESH_REPULL_CONCURRENCY = 4;
 
-/** Run `mapper` over `items` with at most `concurrency` in flight at once.
- *  Same shape as `dependency-checker.ts`'s helper of the same name — a
- *  worker-pool pattern repeated per-file by design in this codebase rather
- *  than shared, so each caller can keep it un-exported and file-local. */
-async function mapWithConcurrency<T>(
-	items: readonly T[],
-	concurrency: number,
-	mapper: (item: T) => Promise<void>,
-): Promise<void> {
-	if (items.length === 0) return;
-	let nextIndex = 0;
-	const workerCount = Math.max(1, Math.min(concurrency, items.length));
-	const worker = async (): Promise<void> => {
-		while (true) {
-			const index = nextIndex++;
-			if (index >= items.length) return;
-			await mapper(items[index]);
-		}
-	};
-	await Promise.all(Array.from({ length: workerCount }, () => worker()));
-}
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -1058,6 +1063,15 @@ export interface LSPClientState {
 		}
 	>;
 	readonly openDocuments: Set<string>;
+	/**
+	 * #3310: whether this client's ONE-SHOT empty-first-publish hold has been
+	 * spent. Only ever set for a server the matrix measures as
+	 * `emptyFirstPublish: "indexing"`. The cold whole-workspace index builds once
+	 * per session, so holding at most one publish bounds the hold's cost to that
+	 * one index window: every later touch — warm, or a server that never
+	 * re-publishes — resolves on its first publish exactly as before.
+	 */
+	emptyFirstPublishHoldSpent: boolean;
 	/** Paths explicitly closed during this client lifetime; late publishes are dropped. */
 	readonly closedDocuments?: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
@@ -1092,6 +1106,12 @@ export interface LSPClientState {
 	 *  `{ text }` shape pi-lens has always sent — an absent value never changes
 	 *  behavior. Set once at initialize, next to `positionEncoding`. */
 	syncKind?: TextDocumentSyncKind;
+	/** #3405: `textDocumentSync.save` the server negotiated at initialize, or
+	 *  `undefined` when it declared none — see `negotiateSaveOptions`. Absent by
+	 *  default (the initial state literal below never sets it), so a server that
+	 *  never advertised `save`, and every hand-written test double, receives no
+	 *  `textDocument/didSave`. Set once at initialize, next to `syncKind`. */
+	saveOptions?: TextDocumentSaveOptions | undefined;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
 	/** Live dynamic registrations from client/registerCapability: id → record.
@@ -1290,6 +1310,9 @@ export async function killProcessTree(
 		(proc.exitCode != null || proc.signalCode != null) &&
 		!options.processExiting
 	) {
+		// #3091 F1-r2b: this pid will never be signalled again, so retire the
+		// ownership hold taken at spawn rather than leaving it to age out.
+		releaseOwnChildPid(pid);
 		proc.unref?.();
 		return;
 	}
@@ -1364,7 +1387,20 @@ export async function killProcessTree(
 	}
 
 	const killPosixProcessGroup = (signal: NodeJS.Signals): boolean => {
-		if (pid <= 0) return false;
+		// #2042: one ownership predicate for every kill-by-raw-pid, replacing
+		// the `pid <= 0` sign check that let a test double's invented pid
+		// through. A pid we do not own falls back to `killDirectChild` below,
+		// which signals through the retained handle and can only ever reach
+		// our own child.
+		//
+		// #3091 F1: `proc` is deliberately NOT passed. The handle arm means
+		// "already exited ⇒ refuse", and this group kill must still fire when
+		// the direct child is dead — the early return at :1269 is skipped under
+		// `options.processExiting`, and a POSIX group outlives its leader, so
+		// the group signal is the only thing that reaps surviving grandchildren
+		// at host exit (#2026). Ownership here comes from the kernel and, once
+		// the leader is gone, from the verdict recorded while it was alive.
+		if (!isOwnLiveChild(pid, "lsp-stop-posix-group")) return false;
 		try {
 			process.kill(-pid, signal);
 			return true;
@@ -1420,6 +1456,11 @@ export async function killProcessTree(
 						killDirectChild("SIGKILL");
 					}
 				}
+				// AFTER the escalation, never before it: this tick issues the
+				// last signal this pid can receive, and retiring the ownership
+				// hold first would make that very SIGKILL the thing that gets
+				// refused (#3091 F1-r2b).
+				releaseOwnChildPid(pid);
 			}, 1500);
 			timer.unref?.();
 			proc.unref?.();
@@ -1457,6 +1498,7 @@ export async function killProcessTree(
 				killDirectChild("SIGKILL");
 			}
 		}
+		releaseOwnChildPid(pid);
 	} catch {
 		// ignore
 	}
@@ -2214,8 +2256,29 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
  * e.g. "scan.jobs") against the server's `initializationOptions` blob.
  * - No section (undefined/empty) → the whole blob, per spec ("if a scope
  *   isn't asked for" the client returns the full settings for that scope).
- * - An unresolvable path → `null`, never the whole blob — a server asking
- *   for a section it doesn't get must not silently receive unrelated config.
+ * - An unresolvable path → an EMPTY settings object, never the whole blob — a
+ *   server asking for a section it doesn't get must not silently receive
+ *   unrelated config.
+ *
+ * #3217: that second case used to answer `null`, and a server that reads the
+ * answer without a null guard loses its diagnostics or dies outright. Both
+ * shapes are live in the nightly LSP fixture set:
+ *   - vscode-css-language-server hands the answer to
+ *     `new LintConfigurationSettings(settings && settings.lint)` whose
+ *     `constructor(conf = {})` default only fires for `undefined`, then throws
+ *     `Cannot read properties of null (reading 'validProperties')` INSIDE its
+ *     own diagnostics computation and answers the pull with an empty report —
+ *     visible to a client only as a `window/logMessage`. Every `.css`/`.scss`/
+ *     `.less`/`.sass` file was silently undiagnosed, which is why the #2780
+ *     clean gate read "0 diagnostic(s)" for css on every nightly since it
+ *     landed.
+ *   - @prisma/language-server reads `settings.enableDiagnostics` in
+ *     `validateTextDocument` with no guard and the whole SERVER PROCESS exits
+ *     on the uncaught `TypeError`.
+ * `{}` is what a client with no value for that section actually means ("no
+ * settings here"), it is already what this function answers for an item with
+ * no section at all against an absent blob, and it leaves the "never the whole
+ * blob" invariant #983 added untouched.
  * Exported for the #983 regression test.
  */
 export type ConfigurationSection =
@@ -2230,12 +2293,12 @@ export function resolveConfigurationSection(
 	initialization: Record<string, unknown> | undefined,
 	section: string | undefined,
 ): ConfigurationSection {
-	if (!initialization) return section ? null : {};
+	if (!initialization) return {};
 	if (!section) return initialization;
 	let cur: unknown = initialization;
 	for (const part of section.split(".")) {
 		if (typeof cur !== "object" || cur === null || !Object.hasOwn(cur, part)) {
-			return null;
+			return {};
 		}
 		cur = (cur as Record<string, unknown>)[part];
 	}
@@ -2412,6 +2475,66 @@ export function setupIncomingHandlers(
 				const currentVersion = state.documentVersions.get(normalizedPath);
 				return currentVersion !== undefined && docVersion < currentVersion;
 			};
+
+			// #3310: HOLD the empty first publish of an asynchronously-indexing
+			// server. Measured (docs/lsp-capability-matrix.md's `first-publish`
+			// column): intelephense answers `didOpen` with `[]` while its
+			// whole-workspace index builds and publishes the real set once
+			// indexing ends, so letting that first publish through cached an empty
+			// set, bumped the publication stamp and emitted — which resolved the
+			// push wait AND satisfied the "answered" evidence check in
+			// `clients/lsp/index.ts`, rendering a file with an error as "confirmed
+			// clean". A timeout is not a false clean; an empty pre-index publish
+			// must not become one either.
+			//
+			// Held means: not cached, no version bump, no emit — so it can neither
+			// resolve a wait nor count as evidence. Nothing is scheduled and
+			// nothing is awaited: the server's OWN next publish releases the hold
+			// (it is no longer a first publish), and the existing per-server budget
+			// stays the only bound, so there is no new timer, listener or
+			// cancellation path. A genuinely clean file still gets an affirmative
+			// clean, because the measured server re-publishes `[]` at the end of
+			// indexing.
+			//
+			// Three conditions, each load-bearing:
+			//  - the MEASURED class (never every push server): a Tier 2/2* server
+			//    that publishes `[]` once for a clean file keeps resolving the wait
+			//    on it, with no added latency (#3310 AC2);
+			//  - one-shot per client session: the cold index builds once, so a warm
+			//    touch — or a class server that never re-publishes — pays nothing;
+			//  - FIRST publication for this document: no cached push AND no pending
+			//    debounce timer. An empty publish that CLEARS an earlier non-empty
+			//    one (a fix landing) is never held, in either arrival order.
+			if (
+				strategy.emptyFirstPublish === "indexing" &&
+				!state.emptyFirstPublishHoldSpent &&
+				newDiags.length === 0 &&
+				!state.pushDiagnostics.has(normalizedPath) &&
+				!state.pendingDiagnostics.has(normalizedPath)
+			) {
+				state.emptyFirstPublishHoldSpent = true;
+				// Bounded by construction: one record per client session, because
+				// the hold itself is one-shot.
+				logLatency({
+					type: "phase",
+					phase: "lsp_empty_first_publish_held",
+					filePath: normalizedPath,
+					durationMs: Math.max(
+						0,
+						publishReceivedAt -
+							(state.documentOpenedAt.get(normalizedPath) ?? publishReceivedAt),
+					),
+					metadata: {
+						serverId: state.serverId,
+						emptyFirstPublish: strategy.emptyFirstPublish,
+						// `pubVersion`, the `[lsp-pub]` trace's own field name for the
+						// publish's LSP document version — not a lifecycle identity, and
+						// not the retired glossary spelling (AGENTS.md "generation").
+						pubVersion: docVersion ?? "push-unversioned",
+					},
+				});
+				return;
+			}
 
 			// Seed on first push for servers whose first push is known complete.
 			// Bypasses the debounce timer entirely — resolves waiting promises immediately.
@@ -2596,7 +2719,9 @@ export function setupIncomingHandlers(
 	// dot-path into the server's config, e.g. "scan.jobs") — not a fixed
 	// single-element array duplicating the whole blob for every item. An item
 	// with no `section` gets the whole blob (that's what "no section" means
-	// per spec); an unresolvable section gets `null`, never the whole blob.
+	// per spec); an unresolvable section gets `{}` (never `null`: strict consumers such as
+	// vscode-css-language-server and @prisma/language-server throw or exit on
+	// null), never the whole blob.
 	state.connection.onRequest(
 		"workspace/configuration",
 		async (params: { items?: Array<{ section?: string }> }) => {
@@ -3838,6 +3963,66 @@ export function handleNotifyExternalChange(
 	state.watchQueue.enqueue(uri, type);
 }
 
+/**
+ * #3405: tell the server the document it just received is the file's saved
+ * on-disk state.
+ *
+ * pi-lens has no unsaved-buffer concept — every notification it sends carries
+ * bytes read from disk — so a save-triggered server is the one class of server
+ * this client could never reach: `CLIENT_CAPABILITIES` has advertised
+ * `synchronization.didSave` since #278 and no caller emitted one, so Expert
+ * (whose ONLY whole-project recompile trigger is didSave —
+ * `expert-lsp/expert@6bbad8c` `apps/expert/lib/expert/state.ex:243-257`)
+ * published nothing for an edit made through pi-lens.
+ *
+ * Sent ONLY when the caller declared this touch a save (`saved`) AND the server
+ * declared `textDocumentSync.save`; `includeText` decides whether the text
+ * rides along. Both gates fail closed: an undeclared notification is the #278
+ * class of hazard, and a save claimed for content whose didOpen/didChange never
+ * left the process would tell the server to diagnose bytes it does not have —
+ * so every call site below sends this only after its own content notification
+ * returned `true` from `safeSendNotification`, and never for a document this
+ * client has not opened.
+ */
+async function sendDidSave(
+	state: LSPClientState,
+	uri: string,
+	content: string,
+): Promise<void> {
+	const save = state.saveOptions;
+	if (!save) return;
+	if (!isClientAlive(state)) return;
+	// #3405 r2 (M3406-1): `text` is a SECOND full copy of bytes the server was
+	// just handed, so it is the one payload here that can be file-sized. The
+	// explicit `lsp_diagnostics` writer reads whole files with no bound of its
+	// own, so without this the same 32MB string would be framed twice. Bound it
+	// at the shared seam both writers pass through rather than at either caller.
+	//
+	// Omitting `text` is what the contract tolerates, and it is not a lost save:
+	// `DidSaveTextDocumentParams.text` is OPTIONAL ("Optional the content when
+	// saved") in the spec, FsAutoComplete — the one `includeText: true` server in
+	// the registry — types it `string option` and, given `None`, keeps the source
+	// it already holds and still runs its re-check
+	// (ionide/FsAutoComplete@85886b1, AdaptiveServerState.fs lines 2649-2673),
+	// and pi-lens only ever sends this after a landed didOpen/didChange for the
+	// same document, so the server has these bytes either way. Skipping the save
+	// outright would instead drop the diagnose trigger this PR exists to restore.
+	const limit = save.includeText
+		? exceedsLspSyncLimits(content)
+		: { tooLarge: false, reason: "" };
+	if (limit.tooLarge) {
+		recordDegradationOnce({
+			kind: "lsp-did-save-text-omitted",
+			subject: state.serverId,
+			reason: limit.reason,
+		});
+	}
+	await safeSendNotification(state.connection, "textDocument/didSave", {
+		textDocument: { uri },
+		...(save.includeText && !limit.tooLarge ? { text: content } : {}),
+	});
+}
+
 async function handleNotifyOpenOnce(
 	state: LSPClientState,
 	filePath: string,
@@ -3846,6 +4031,7 @@ async function handleNotifyOpenOnce(
 	preserveDiagnostics = false,
 	silent = false,
 	coalescedCount = 0,
+	saved = false,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -3909,6 +4095,7 @@ async function handleNotifyOpenOnce(
 				);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
+			if (saved && reopenSent) await sendDidSave(state, uri, content);
 			return;
 		}
 		const changeSent = await safeSendNotification(
@@ -3927,6 +4114,7 @@ async function handleNotifyOpenOnce(
 				content,
 				coalescedCount,
 			);
+		if (saved && changeSent) await sendDidSave(state, uri, content);
 		return;
 	}
 
@@ -3972,6 +4160,7 @@ async function handleNotifyOpenOnce(
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
+	if (saved && openSent) await sendDidSave(state, uri, content);
 	// Telemetry is deliberately detached after didOpen succeeds.
 	// #1412 H1: routed through runReadOnlyServerCommand, NOT runServerCommand —
 	// the probe must never open the serverEditsAllowed/activeMutationContext
@@ -4005,7 +4194,8 @@ async function handleNotifyOpenOnce(
 function enqueueDocumentNotify(
 	state: LSPClientState,
 	normalizedPath: string,
-	run: (coalescedCount: number) => Promise<void>,
+	run: (coalescedCount: number, saved: boolean) => Promise<void>,
+	saved = false,
 ): Promise<void> {
 	let queue = state.notifyChangeQueues.get(normalizedPath);
 	if (!queue) {
@@ -4023,6 +4213,7 @@ function enqueueDocumentNotify(
 			run,
 			waiters,
 			coalescedCount: (previous?.coalescedCount ?? 0) + (previous ? 1 : 0),
+			saved: saved || previous?.saved === true,
 		};
 		if (queue!.running) return;
 		queue!.running = true;
@@ -4035,7 +4226,7 @@ function enqueueDocumentNotify(
 					if (!next) break;
 					queue!.pending = undefined;
 					try {
-						await next.run(next.coalescedCount);
+						await next.run(next.coalescedCount, next.saved);
 						for (const waiter of next.waiters) waiter.resolve();
 					} catch (error) {
 						for (const waiter of next.waiters) waiter.reject(error);
@@ -4070,19 +4261,25 @@ export function handleNotifyOpen(
 	languageId: string,
 	preserveDiagnostics = false,
 	silent = false,
+	saved = false,
 ): Promise<void> {
 	if (!isClientAlive(state)) return Promise.resolve();
 	const normalizedPath = normalizeMapKey(filePath);
-	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
-		handleNotifyOpenOnce(
-			state,
-			filePath,
-			content,
-			languageId,
-			preserveDiagnostics,
-			silent,
-			coalescedCount,
-		),
+	return enqueueDocumentNotify(
+		state,
+		normalizedPath,
+		(coalescedCount, queuedSaved) =>
+			handleNotifyOpenOnce(
+				state,
+				filePath,
+				content,
+				languageId,
+				preserveDiagnostics,
+				silent,
+				coalescedCount,
+				queuedSaved,
+			),
+		saved,
 	);
 }
 
@@ -4151,6 +4348,10 @@ export function handleNotifyChange(
 ): Promise<void> {
 	if (!isClientAlive(state)) return Promise.resolve();
 	const normalizedPath = normalizeMapKey(filePath);
+	// #3405: no `saved` argument — `LSPService.updateFile` is this path's only
+	// entry point and no caller declares a save through it, so a change never
+	// originates one. A save intent inherited from a superseded open entry is
+	// dropped here by construction rather than sent after a bare didChange.
 	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
 		handleNotifyChangeOnce(
 			state,
@@ -5321,6 +5522,8 @@ export async function createLSPClient(options: {
 		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		// #3310: one-shot, per client session.
+		emptyFirstPublishHoldSpent: false,
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
@@ -5500,6 +5703,9 @@ export async function createLSPClient(options: {
 	state.syncKind = negotiateSyncKind(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
+	state.saveOptions = negotiateSaveOptions(
+		(initResult as { capabilities?: unknown })?.capabilities,
+	);
 	state.rawCapabilityKeys = Object.keys(
 		(initResult as { capabilities?: Record<string, unknown> })?.capabilities ??
 			{},
@@ -5551,7 +5757,14 @@ export async function createLSPClient(options: {
 		getProcessPid: () => lspProcess.pid,
 
 		notify: {
-			async open(filePath, content, languageId, preserveDiagnostics, silent) {
+			async open(
+				filePath,
+				content,
+				languageId,
+				preserveDiagnostics,
+				silent,
+				saved,
+			) {
 				return handleNotifyOpen(
 					state,
 					filePath,
@@ -5559,6 +5772,7 @@ export async function createLSPClient(options: {
 					languageId,
 					preserveDiagnostics,
 					silent,
+					saved,
 				);
 			},
 			async change(filePath, content) {

@@ -19,8 +19,14 @@ import { describe, expect, it } from "vitest";
 import {
 	checkCleanSignalDrift,
 	classifyCleanBehavior,
+	classifyFirstPublish,
+	COMPARABLE_FIRST_PUBLISH,
+	createPublishTraceDrainer,
 	findCleanSignalDrift,
+	strategyKeyForLang,
 } from "../../scripts/lib/clean-signal.mjs";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	mergeRows,
 	mergeSrc,
@@ -28,7 +34,50 @@ import {
 	replaceTable,
 } from "../../scripts/lib/md-matrix.mjs";
 
+/** One parsed `[lsp-pub]` record as the drainer pushes it into a phase sink. */
+interface DrainedPublish {
+	server: string;
+	pubVersion: string;
+	diags: number;
+	versioned: boolean;
+}
+
 describe("classifyCleanBehavior (phase-aware 4-way)", () => {
+	it("scopes an interleaved extension.log trace to the row's server", () => {
+		// #3390 recurrence: a shared extension.log lets another live server's
+		// publish become this row's first-publish and clean-signal evidence.
+		const fixture = fs.readFileSync(
+			path.join(
+				process.cwd(),
+				"tests/fixtures/extension-logs/probe-clean-signal-interleaved.log",
+			),
+			"utf8",
+		);
+		const bytes = Buffer.from(fixture);
+		const drain = createPublishTraceDrainer({
+			readLog() {
+				return {
+					size: bytes.length,
+					read(start) {
+						const chunk = bytes.subarray(start).toString("utf8");
+						return { chunk, bytesRead: bytes.length - start };
+					},
+				};
+			},
+		});
+		const own: DrainedPublish[] = [];
+		drain(own, "server-a");
+		expect(own).toHaveLength(2);
+		expect(own.map((publish) => publish.diags)).toEqual([1, 0]);
+		expect(
+			classifyCleanBehavior({
+				dirtyPublishes: own.slice(0, 1).length,
+				dirtyVersioned: 1,
+				cleanTransitionPublishes: own.slice(1).length,
+				cleanTransitionVersioned: 1,
+			}).behavior,
+		).toBe("publishes-versioned");
+	});
 	it("classifies a versioned clean-transition publisher as publishes-versioned (tier 2)", () => {
 		// ast-grep-shaped: re-publishes WITH a version on a clean transition.
 		const v = classifyCleanBehavior({
@@ -379,5 +428,55 @@ describe("md-matrix merge guard (#390)", () => {
 		expect(out).toContain(
 			"| json | vscode-json-language-server | pull | — | 1 | dev+ci |",
 		);
+	});
+});
+
+describe("classifyFirstPublish (#3310)", () => {
+	// The recurrence: intelephense's EMPTY pre-index publish resolved the push
+	// wait, so a php file with an undefined-variable error rendered as
+	// "confirmed clean". The runtime hold is keyed on this classification, so a
+	// classifier that guessed either way would either re-open that false clean
+	// or stall every Tier 2 clean file.
+	it("classifies the measured intelephense shape as empty-first", () => {
+		const verdict = classifyFirstPublish([{ diags: 0 }, { diags: 2 }]);
+		expect(verdict.firstPublish).toBe("empty-first");
+		expect(verdict.reason).toContain("EMPTY");
+	});
+
+	it("classifies a server whose first publish carries the findings as direct", () => {
+		expect(
+			classifyFirstPublish([{ diags: 1 }, { diags: 0 }]).firstPublish,
+		).toBe("direct");
+	});
+
+	it("refuses to classify an all-empty dirty trace in either direction", () => {
+		// A dirty fixture the server does not diagnose is indistinguishable from
+		// an index that never finished — `empty-only` is the honest answer, and it
+		// is not comparable against the strategy marker.
+		const verdict = classifyFirstPublish([{ diags: 0 }, { diags: 0 }]);
+		expect(verdict.firstPublish).toBe("empty-only");
+		expect(COMPARABLE_FIRST_PUBLISH.has(verdict.firstPublish)).toBe(false);
+	});
+
+	it("reports unknown when nothing published at all", () => {
+		expect(classifyFirstPublish([]).firstPublish).toBe("unknown");
+		expect(classifyFirstPublish(undefined).firstPublish).toBe("unknown");
+	});
+
+	it("compares only the two classifiable values", () => {
+		expect([...COMPARABLE_FIRST_PUBLISH].sort()).toEqual([
+			"direct",
+			"empty-first",
+		]);
+	});
+
+	it("maps an alias fixture lang onto its strategy key", () => {
+		expect(strategyKeyForLang("jedi")).toBe("python-jedi");
+		expect(strategyKeyForLang("php")).toBe("php");
+		// #3347: markdown's server id is `marksman`, the key its silentOnClean
+		// marker lives under. While this mapping was missing, the drift check
+		// looked the marker up under `markdown`, found nothing, and reported the
+		// MARKED marksman as silent-not-marked on every run that reached it.
+		expect(strategyKeyForLang("markdown")).toBe("marksman");
 	});
 });

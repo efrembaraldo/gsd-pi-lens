@@ -22,8 +22,19 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
+import { removeTempDirSync } from "./test-utils.js";
 
 interface SpawnRecord {
 	command: string;
@@ -119,7 +130,8 @@ vi.mock("../../clients/instance-registry.js", () => ({
 	readInstanceRegistry: async () => h.state.registry,
 }));
 
-vi.mock("../../clients/latency-logger.js", () => ({
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal()),
 	logLatency: (entry: Record<string, unknown>) => {
 		h.latency.push(entry);
 	},
@@ -194,14 +206,23 @@ function sweepUntrackedOrphans(
 	return sweepUntrackedOrphansImpl(...args);
 }
 
-function lastBackstopRecord(): Record<string, unknown> | undefined {
+function lastBackstopRecord(
+	startIndex = sweepIndex,
+): Record<string, unknown> | undefined {
 	return h.latency
-		.slice(sweepIndex)
+		.slice(startIndex)
 		.find((entry) => entry.phase === "orphan_backstop_reaped");
 }
 
+function backstopMetadataForSweep(startIndex: number): Record<string, unknown> {
+	return (lastBackstopRecord(startIndex)?.metadata ?? {}) as Record<
+		string,
+		unknown
+	>;
+}
+
 function backstopMetadata(): Record<string, unknown> {
-	return (lastBackstopRecord()?.metadata ?? {}) as Record<string, unknown>;
+	return backstopMetadataForSweep(sweepIndex);
 }
 
 const ORPHAN_COMMAND = isWindows
@@ -211,6 +232,30 @@ const ORPHAN_COMMAND = isWindows
 /** Sweep options that keep every test fast and hermetic: no cooldown, and a
  *  kill-verification budget of one immediate probe. */
 const FAST = { force: true, verifyAttempts: 1, verifyIntervalMs: 0 } as const;
+
+// #3042 recurrence, found by the #3050 sweep: this file used to rely on a
+// stale assumption (see the beforeEach comment this replaces) that
+// `PI_LENS_HOME` was a per-worker temp dir. Since #2912 it is ONE directory
+// shared by the whole vitest run, so this file's every-test
+// `fs.rmSync(.../orphan-backstop.{json,lock})` was deleting — and
+// `scheduleUntrackedOrphanSweep`/`sweepUntrackedOrphans` below were racing —
+// the SAME orphan-backstop lock/state file every other concurrent Vitest
+// fork's real reaper sweep depends on. A private, per-file home removes both
+// hazards: the rest of this file's assertions are unchanged.
+let previousBackstopHome: string | undefined;
+let backstopHome: string;
+
+beforeAll(() => {
+	previousBackstopHome = process.env.PI_LENS_HOME;
+	backstopHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-backstop-"));
+	process.env.PI_LENS_HOME = backstopHome;
+});
+
+afterAll(() => {
+	if (previousBackstopHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousBackstopHome;
+	removeTempDirSync(backstopHome);
+});
 
 beforeEach(() => {
 	h.spawns.length = 0;
@@ -225,8 +270,8 @@ beforeEach(() => {
 	h.state.scannerPids.length = 0;
 	h.state.bareKills.length = 0;
 	// Each test gets a fresh cooldown stamp and sweep lock. PI_LENS_HOME is
-	// redirected per worker (tests/support/vitest-setup.ts), so this only ever
-	// touches the worker's own temp dir.
+	// this file's OWN private dir (pinned in beforeAll above, #3042/#3050) —
+	// never the run-shared home other Vitest forks' real reaper sweeps use.
 	fs.rmSync(path.join(process.env.PI_LENS_HOME ?? "", "orphan-backstop.json"), {
 		force: true,
 	});
@@ -429,26 +474,49 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 	it("arms one follow-up sweep when the grace spared a candidate", async () => {
 		h.state.stdout = FRESH_ROW();
+		h.latency.push({
+			phase: "orphan_backstop_reaped",
+			metadata: { tooFresh: 99, graceRetryInMs: 99 },
+		});
+		let completions = 0;
+		let scheduledRetries = 0;
+		let resolveRetry: ((outcome: string) => void) | undefined;
+		const retryCompleted = new Promise<string>((resolve) => {
+			resolveRetry = resolve;
+		});
 
 		const outcome = await sweepUntrackedOrphans({
 			...FAST,
 			graceRetryDelayMs: 5,
+			onComplete: (completedOutcome) => {
+				completions += 1;
+				if (completions === 2) resolveRetry?.(completedOutcome);
+			},
+			onGraceRetryScheduled: () => {
+				scheduledRetries += 1;
+			},
 		});
+		const directSweepStart = sweepIndex;
 
 		expect(outcome).toBe("clean");
 
-		// The retry actually runs, and it is NOT blocked by the stamp the first
-		// sweep just wrote. Waiting for it here is also the #2669 regression:
-		// by the time this resolves, the retry's own `orphan_backstop_reaped`
-		// row (it never carries `graceRetryInMs`) is the newest row in the
-		// log, so a metadata lookup keyed on "the last row" instead of "the
-		// row THIS sweep call logged" deterministically reads the retry's
-		// metadata instead of the direct call's.
-		await new Promise((resolve) => setTimeout(resolve, 80));
+		// Await the retry's completion signal instead of racing its unref'd timer.
+		const retryOutcome = await Promise.race([
+			retryCompleted,
+			new Promise<string>((_, reject) =>
+				setTimeout(
+					() => reject(new Error("grace retry did not complete")),
+					100,
+				),
+			),
+		]);
+		expect(retryOutcome).toBe("clean");
+		expect(completions).toBe(2);
+		expect(scheduledRetries).toBe(1);
 		expect(h.state.scannerPids.length).toBeGreaterThanOrEqual(2);
 
-		expect(backstopMetadata().tooFresh).toBe(1);
-		expect(backstopMetadata().graceRetryInMs).toBe(5);
+		expect(backstopMetadataForSweep(directSweepStart).tooFresh).toBe(1);
+		expect(backstopMetadataForSweep(directSweepStart).graceRetryInMs).toBe(5);
 	});
 
 	it("does not arm a follow-up when nothing was spared", async () => {
@@ -467,18 +535,27 @@ describe("#1864 review F2: a grace-spared candidate is re-examined", () => {
 
 	it("bounds the chain at one: the retry never arms another retry", async () => {
 		h.state.stdout = FRESH_ROW();
+		let completions = 0;
+		let scheduledRetries = 0;
 
 		// This IS the follow-up sweep — same options the re-arm passes itself.
 		const outcome = await sweepUntrackedOrphans({
 			...FAST,
 			graceRetryDelayMs: 5,
 			allowGraceRetry: false,
+			onComplete: () => {
+				completions += 1;
+			},
+			onGraceRetryScheduled: () => {
+				scheduledRetries += 1;
+			},
 		});
 
 		expect(outcome).toBe("clean");
 		expect(backstopMetadata().tooFresh).toBe(1);
 		expect(backstopMetadata().graceRetryInMs).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(completions).toBe(1);
+		expect(scheduledRetries).toBe(0);
 		expect(h.state.scannerPids).toHaveLength(1);
 	});
 });

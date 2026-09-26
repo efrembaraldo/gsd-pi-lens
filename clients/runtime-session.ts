@@ -24,9 +24,11 @@ import { resetPendingRunnerFindings } from "./dispatch/pending-runner-findings.j
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
+	drainProjectDataDirMigrations,
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
 	getProjectDataDir,
+	resetProjectDataDirSessionState,
 } from "./file-utils.js";
 import { GitleaksClient, type GitleaksResult } from "./gitleaks-client.js";
 import { resetGoAvailability } from "./go-client.js";
@@ -1923,7 +1925,7 @@ function scheduleDeferredToolProbesWithClients(
 export const SESSION_START_GUIDANCE: string[] = [
 	"📌 pi-lens active — automated checks run on every edit/write; blocking errors (including pre-existing) show inline and must be fixed.\n" +
 		"Key tools (see each tool's own description for args):\n" +
-		"• lens_diagnostics — source=session reads cache; empty cache ≠ clean; use source=lsp scope=paths for changed files with absent or stale findings.\n" +
+		"• lens_diagnostics — source=session reads cache; empty cache ≠ clean; use source=lsp scope=paths for changed files with absent or stale findings (aggregate hosts: lens(action=diagnostics)).\n" +
 		"• symbol_search → module_report → read_symbol/read_enclosing — ranked identifier search, then navigable outline/callback handles + exact body reads; cheaper than reading a whole file before editing.\n" +
 		"• Situational (activate via pi_lens_activate_tools): lsp_navigation, ast_grep_search, ast_grep_replace. Use ast_grep_search with dump=true to inspect AST nodes.",
 ];
@@ -1938,6 +1940,7 @@ export async function handleSessionStart(
 	// every analyzer refused for the rest of the process — AGENTS.md defect
 	// shape 17. The resident clients themselves are deliberately kept.
 	resetAnalyzerBootstrapSessionState();
+	resetProjectDataDirSessionState();
 	resetTestRunnerDelivery();
 	// #2450 fix round 3, catalog shape 17: the "bridge unavailable" dbg latch
 	// (`clients/lsp-mutation.ts`) is a process-lifetime once-per-session flag,
@@ -2514,6 +2517,25 @@ export async function handleSessionStart(
 	// project data roots and machine-global registry root once per session start;
 	// this is fire-and-forget and bounded so it never delays startup.
 	const projectDataDir = getProjectDataDir(cwd);
+	// #2874: `getProjectDataDir` queues one migration per old-slug directory
+	// it renames (or finds coexisting with its hashed successor). Drain here
+	// so each migration emits one bounded record per session at most.
+	for (const migration of drainProjectDataDirMigrations()) {
+		const targetName = path.basename(migration.to);
+		const hash = targetName.match(/([0-9a-f]{8})$/)?.[1] ?? "unknown";
+		recordDegradationOnce({
+			kind: "data_dir_migrated",
+			subject: hash,
+			reason:
+				migration.outcome === "renamed"
+					? "using hashed directory after renaming legacy directory"
+					: migration.outcome === "coexisting"
+						? "using hashed directory because legacy and hashed directories both exist"
+						: migration.outcome === "rename-failed"
+							? "using legacy directory after hashed-directory rename failure"
+							: "using resolved directory after realpath fallback",
+		});
+	}
 	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's
 	// bin/ and tools/ subdirectories (clients/installer/index.ts's
 	// GITHUB_BIN_DIR / TOOLS_DIR, now atomic-write.js writers too) need their

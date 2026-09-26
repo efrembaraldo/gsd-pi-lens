@@ -1,18 +1,44 @@
 export declare function detectFlattenedBody(body?: string): boolean;
+export declare function blankCommentsAndStrings(source: string): {
+	text: string;
+	strings: Array<{
+		start: number;
+		end: number;
+		quote: "'" | '"' | "`";
+		text: string;
+		prefix: string;
+	}>;
+};
 export declare function repairFlattenedBody(body?: string): string;
 export declare function detectEscapedNewlineBody(body?: string): boolean;
 export declare function repairEscapedNewlineBody(body?: string): string;
+export declare function splitMarkdownUnits(
+	body?: string,
+): Array<{ kind: string; text: string }>;
 export declare function normalizePrBodyForChecking(
 	body?: string,
 	pullRequestNumber?: number,
 ): { body: string; normalized: boolean };
 export declare function lintPrBody(
 	body?: string,
-	options?: { requireTestAssessment?: boolean; diff?: string },
+	options?: {
+		requireTestAssessment?: boolean;
+		workingTree?: boolean;
+		diff?: string;
+		cwd?: string;
+		git?: (args: string[], options?: Record<string, unknown>) => string;
+		headFiles?: Map<string, string>;
+		testCorpus?: { paths: Set<string>; titles: Set<string> };
+	},
 ): {
 	valid: boolean;
 	errors: string[];
 };
+export declare function testCorpus(options?: {
+	cwd?: string;
+	workingTree?: boolean;
+	git?: (args: string[], options?: Record<string, unknown>) => string;
+}): { paths: Set<string>; titles: Set<string> };
 export declare function localTouchesTests(
 	cwd?: string,
 	git?: (args: string[], options?: Record<string, unknown>) => string,

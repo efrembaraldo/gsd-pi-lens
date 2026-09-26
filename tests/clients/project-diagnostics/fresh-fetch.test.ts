@@ -6,10 +6,21 @@ import type { BootstrapClients } from "../../../clients/bootstrap.js";
 import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../../clients/degradation-ledger.js";
+import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../../clients/project-trust.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
+import { OpengrepClient } from "../../../clients/opengrep-client.js";
+import { realpathOrResolve } from "../../../clients/path-utils.js";
+import * as safeSpawn from "../../../clients/safe-spawn.js";
+// #2962: the retirement consumer is imported so the coverage this fetch
+// produces is judged by the REAL decision function, not by a restatement of it.
+import { runnerRetirementDecision } from "../../../tools/lens-diagnostics.js";
+import type { WidgetDiagnostic } from "../../../clients/widget-state.js";
 import { removeTempDirSync } from "../test-utils.js";
 import {
 	_resetStateCacheForTests,
@@ -24,18 +35,19 @@ import {
 // a real tmp-dir fixture.
 
 let tmp: string;
-let previousDataDir: string | undefined;
+let previousPiLensHome: string | undefined;
 
 beforeEach(() => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-fresh-fetch-"));
-	previousDataDir = process.env.PILENS_DATA_DIR;
-	process.env.PILENS_DATA_DIR = path.join(tmp, "pi-lens-data");
+	previousPiLensHome = process.env.PI_LENS_HOME;
+	process.env.PI_LENS_HOME = path.join(tmp, "pi-lens-home");
 	_resetStateCacheForTests();
+	resetDegradationLedger();
 });
 
 afterEach(() => {
-	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
-	else process.env.PILENS_DATA_DIR = previousDataDir;
+	if (previousPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousPiLensHome;
 	_resetStateCacheForTests();
 	removeTempDirSync(tmp);
 });
@@ -272,6 +284,152 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 
 		expect(result.unsafeRoot).toBeUndefined();
 		expect(clients.knipClient.analyze).toHaveBeenCalledTimes(1);
+	});
+
+	it("runs the reporter's home-cwd reproduction for an explicit project root (#2053)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		const fakeHome = path.join(tmp, "home", "user");
+		const project = path.join(fakeHome, "repo");
+		fs.mkdirSync(project, { recursive: true });
+
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			fakeHome,
+			clients,
+			undefined,
+			{ homeDir: fakeHome, analysisRoot: path.join(project, "..", "repo") },
+		);
+
+		expect(result.unsafeRoot).toBeUndefined();
+		expect(result.analysisRootError).toBeUndefined();
+		expect(clients.knipClient.analyze).toHaveBeenCalledWith(
+			fs.realpathSync(project),
+			expect.anything(),
+		);
+	});
+
+	it("shares one validated explicit root with every heavyweight consumer (#2977)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients({ jscpdAvailable: true, madgeAvailable: true });
+		const fakeHome = path.join(tmp, "home", "user");
+		const project = path.join(fakeHome, "repo");
+		fs.mkdirSync(project, { recursive: true });
+
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			fakeHome,
+			clients,
+			undefined,
+			{ homeDir: fakeHome, analysisRoot: "repo" },
+		);
+
+		const validated = result.analysisRootValidation;
+		expect(validated).toEqual({
+			state: "safe",
+			root: fs.realpathSync(project),
+		});
+		for (const consumer of [
+			clients.knipClient.analyze,
+			clients.jscpdClient.scan,
+			clients.depChecker.scanProject,
+		]) {
+			expect(consumer).toHaveBeenCalled();
+			const calls = (consumer as unknown as { mock: { calls: unknown[][] } })
+				.mock.calls;
+			expect(calls[0]?.[0]).toBe(fs.realpathSync(project));
+		}
+	});
+
+	it("refuses an explicit analysis root AT or ABOVE home (#2053, #749)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		const fakeHome = path.join(tmp, "home", "user");
+		fs.mkdirSync(fakeHome, { recursive: true });
+
+		for (const analysisRoot of [fakeHome, path.join(fakeHome, "..")]) {
+			const result = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				path.join(fakeHome, "session"),
+				clients,
+				undefined,
+				{ homeDir: fakeHome, analysisRoot },
+			);
+
+			expect(result.unsafeRoot).toBe(true);
+			expect(result.coldReasons?.knip).toMatch(/at or above/i);
+		}
+		expect(clients.knipClient.analyze).not.toHaveBeenCalled();
+		expect(cacheManager.writeCache).not.toHaveBeenCalled();
+	});
+
+	it("refuses a missing or non-directory explicit analysis root (#2053)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		const missing = path.join(tmp, "missing-project");
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+			undefined,
+			{ homeDir: path.join(tmp, "home"), analysisRoot: missing },
+		);
+
+		expect(result.analysisRootError).toMatch(/unavailable/i);
+		expect(clients.knipClient.analyze).not.toHaveBeenCalled();
+		expect(
+			getDegradationSummary().some(
+				({ kind }) => kind === "lens-diagnostics-analysis-root-rejected",
+			),
+		).toBe(true);
+	});
+
+	it("rejects every explicit root that is not strictly below canonical home (#2977 F1)", async () => {
+		const cacheManager = makeCacheManager();
+		const fakeHome = path.join(tmp, "home", "user");
+		const inside = path.join(fakeHome, "repo");
+		const outside = path.join(tmp, "outside");
+		fs.mkdirSync(inside, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+		fs.symlinkSync(outside, path.join(fakeHome, "link-out"), "dir");
+
+		const cases = [
+			["ceiling", fakeHome, false],
+			["above", path.join(fakeHome, ".."), false],
+			[
+				"traversal",
+				path.join(fakeHome, "repo", "..", "..", "..", "outside"),
+				false,
+			],
+			["absolute outside", outside, false],
+			["symlink outside", path.join(fakeHome, "link-out"), false],
+			["relative", "repo", true],
+			["empty", "", false],
+			["non-existent", path.join(fakeHome, "missing"), false],
+		] as const;
+		for (const [, root, accepted] of cases) {
+			const caseClients = makeClients();
+			const result = await fetchFreshProjectDiagnostics(
+				cacheManager,
+				fakeHome,
+				caseClients,
+				undefined,
+				{ homeDir: fakeHome, analysisRoot: root },
+			);
+			expect(
+				result.unsafeRoot === true || result.analysisRootError !== undefined,
+			).toBe(!accepted);
+			expect(caseClients.knipClient.analyze).toHaveBeenCalledTimes(
+				accepted ? 1 : 0,
+			);
+		}
+		expect(cacheManager.writeCache).toHaveBeenCalled();
+		const summary = getDegradationSummary();
+		expect(
+			summary.some(
+				({ kind }) => kind === "lens-diagnostics-analysis-root-rejected",
+			),
+		).toBe(true);
 	});
 
 	it("reports jscpd cold when the tool isn't available, without writing cache", async () => {
@@ -827,6 +985,7 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		(clients.opengrepClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue(
 			{
 				success: true,
+				analyzed: true,
 				scannedAt: "now",
 				findings: [
 					{
@@ -1042,7 +1201,7 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		const cacheManager = makeCacheManager();
 		const pythonClient = {
 			id: "python",
-			language: "python",
+			language: "Python",
 			detect: vi.fn().mockReturnValue(true),
 			analyze: vi.fn().mockResolvedValue({
 				success: true,
@@ -1060,6 +1219,7 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				unusedFiles: [],
 				unusedDeps: [],
 				unlistedDeps: [],
+				analyzed: true,
 			}),
 		};
 		const clients = makeClients();
@@ -1082,6 +1242,365 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			expect.anything(),
 		);
 		expect(result.runners).toContain("dead-code");
+		expect(result.authoritativeCoverage).toEqual([]);
+	});
+
+	it("records only the real opengrep scanned-path evidence", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep 1.25.0 --json on a clean fixture.
+				fs.writeFileSync(
+					report,
+					'{"version":"1.25.0","results":[],"errors":[],"paths":{"scanned":["src/a.py"]},"interfile_languages_used":[],"skipped_rules":[]}',
+				);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+		const result = await fetchFreshProjectDiagnostics(
+			makeCacheManager(),
+			tmp,
+			clients,
+		);
+		const coverage = result.authoritativeCoverage ?? [];
+		expect(coverage).toHaveLength(1);
+		expect(coverage[0].runnerId).toBe("opengrep");
+		expect(coverage[0].files).toEqual(new Set([path.resolve(tmp, "src/a.py")]));
+	});
+
+	it("records analyzed-file coverage for a non-opengrep runner", async () => {
+		const scanned = path.join(tmp, "src", "a.ts");
+		fs.mkdirSync(path.dirname(scanned), { recursive: true });
+		const clients = makeClients({
+			knipResult: {
+				success: true,
+				analyzed: true,
+				analyzedFiles: [scanned],
+				issues: [],
+				unusedExports: [],
+				unusedFiles: [],
+				unusedDeps: [],
+				unlistedDeps: [],
+				summary: "ok",
+			},
+		});
+		const result = await fetchFreshProjectDiagnostics(
+			makeCacheManager(),
+			tmp,
+			clients,
+		);
+		expect(result.authoritativeCoverage).toEqual([
+			expect.objectContaining({
+				runnerId: "knip",
+				files: new Set([scanned]),
+			}),
+		]);
+	});
+
+	it("does not record coverage for a captured failed empty opengrep scan", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep 1.29.0 --json on a symlink-root refusal.
+				fs.writeFileSync(
+					report,
+					'{"version":"1.29.0","results":[],"errors":[{"code":2,"level":"error","type":"SemgrepError","message":"File not found"}],"paths":{"scanned":[]},"skipped_rules":[]}',
+				);
+				return { status: 2, stdout: "", stderr: "" };
+			},
+		);
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+		const result = await fetchFreshProjectDiagnostics(
+			makeCacheManager(),
+			tmp,
+			clients,
+		);
+		expect(result.analyzed).not.toContain("opengrep");
+		expect(result.authoritativeCoverage).toEqual([]);
+	});
+
+	// #2962: the zero-scanned DECLARATION is now carried (an entry with an empty
+	// set) instead of being dropped. `analyzed` still contains opengrep so the
+	// render layer keeps #2970's analysed-and-found-nothing state; the empty set
+	// is what removes its file-level retirement authority.
+	it("records an empty coverage declaration for a captured successful empty opengrep scan", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep 1.29.0 --json with no matching language.
+				fs.writeFileSync(
+					report,
+					'{"version":"1.29.0","results":[],"errors":[],"paths":{"scanned":[]},"interfile_languages_used":[],"skipped_rules":[]}',
+				);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+		const result = await fetchFreshProjectDiagnostics(
+			makeCacheManager(),
+			tmp,
+			clients,
+		);
+		expect(result.analyzed).toContain("opengrep");
+		expect(result.authoritativeCoverage).toEqual([
+			{
+				runnerId: "opengrep",
+				root: realpathOrResolve(tmp),
+				files: new Set(),
+			},
+		]);
+	});
+
+	// #2962, driven through the production path: the REAL
+	// `fetchFreshProjectDiagnostics` result is handed to the REAL
+	// `runnerRetirementDecision` — the two production units joined at their own
+	// interface, never a hand-shaped coverage array.
+	// Captured from opengrep 1.29.0 --json: a complete report (no `errors`) whose
+	// `paths.scanned` is empty because no rule language matched the root.
+	const COMPLETE_ZERO_SCANNED =
+		'{"version":"1.29.0","results":[],"errors":[],"paths":{"scanned":[]},"interfile_languages_used":[],"skipped_rules":[]}';
+	// Captured from opengrep's warning-level partial shape: one unlexable file
+	// zeroed the scanned set.
+	const PARTIAL_ZERO_SCANNED =
+		'{"results":[],"errors":[{"level":"warn","message":"invalid UTF-8"}],"paths":{"scanned":[]}}';
+
+	function retained(tool: string): WidgetDiagnostic {
+		return {
+			tool,
+			severity: "warning",
+			message: "retained",
+			uri: "",
+			rule: `${tool}:finding`,
+		};
+	}
+
+	async function fetchWithOpengrepReport(reportJson: string | undefined) {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi
+			.fn()
+			.mockResolvedValue(reportJson !== undefined);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementation(
+			async (_command, args: string[]) => {
+				const flag = args.indexOf("--json-output");
+				// Only opengrep's own invocation writes a report; any other spawn
+				// this fetch makes must not be handed one.
+				if (flag >= 0 && reportJson !== undefined) {
+					fs.writeFileSync(args[flag + 1], reportJson);
+				}
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+		return await fetchFreshProjectDiagnostics(makeCacheManager(), tmp, clients);
+	}
+
+	// Recurrence: one complete opengrep report with `paths.scanned: []` used to
+	// retire EVERY retained opengrep finding in the tree, because the missing
+	// coverage entry fell through to the whole-root id-only arm.
+	it("a complete zero-scanned opengrep report keeps a retained finding", async () => {
+		const result = await fetchWithOpengrepReport(COMPLETE_ZERO_SCANNED);
+		expect(result.analyzed).toContain("opengrep");
+		expect(
+			runnerRetirementDecision(
+				retained("opengrep"),
+				path.join(tmp, "src", "never-scanned.py"),
+				new Set(result.analyzed),
+				result.authoritativeCoverage,
+			),
+		).toBe("keep");
+	});
+
+	// The over-reach direction: the zero-file declaration belongs to opengrep
+	// alone. knip declares no coverage, so its own id-only arm still retires.
+	it("a zero-coverage opengrep scan does not change another runner's decision", async () => {
+		const result = await fetchWithOpengrepReport(COMPLETE_ZERO_SCANNED);
+		expect(result.analyzed).toContain("knip");
+		expect(
+			runnerRetirementDecision(
+				retained("knip"),
+				path.join(tmp, "src", "never-scanned.ts"),
+				new Set(result.analyzed),
+				result.authoritativeCoverage,
+			),
+		).toBe("retire");
+	});
+
+	// #2962's headline premise, measured rather than asserted: a COLD opengrep
+	// does not convert another runner's retained findings into keep-forever —
+	// coverage is filtered by `entry.runnerId`, so knip still retires. Pinned so
+	// the cross-runner leak the issue describes cannot appear later.
+	it("coverage state: a cold coverage producer does not change another runner's decision", async () => {
+		const result = await fetchWithOpengrepReport(undefined);
+		expect(result.cold).toContain("opengrep");
+		expect(result.analyzed).not.toContain("opengrep");
+		expect(
+			runnerRetirementDecision(
+				retained("knip"),
+				path.join(tmp, "src", "never-scanned.ts"),
+				new Set(result.analyzed),
+				result.authoritativeCoverage,
+			),
+		).toBe("retire");
+		expect(
+			runnerRetirementDecision(
+				retained("opengrep"),
+				path.join(tmp, "src", "never-scanned.py"),
+				new Set(result.analyzed),
+				result.authoritativeCoverage,
+			),
+		).toBe("keep");
+	});
+
+	// The unlexable-file case from #2962: the warning-level report zeroes the
+	// scanned set, the producer is partial rather than analysed, and the retained
+	// finding is kept.
+	it("a partial zero-scanned report keeps a retained finding", async () => {
+		const result = await fetchWithOpengrepReport(PARTIAL_ZERO_SCANNED);
+		expect(result.partial).toContain("opengrep");
+		expect(result.analyzed).not.toContain("opengrep");
+		expect(
+			runnerRetirementDecision(
+				retained("opengrep"),
+				path.join(tmp, "src", "never-scanned.py"),
+				new Set(result.analyzed),
+				result.authoritativeCoverage,
+			),
+		).toBe("keep");
+	});
+
+	it("records the zero-coverage producer once per session", async () => {
+		await fetchWithOpengrepReport(COMPLETE_ZERO_SCANNED);
+		await fetchWithOpengrepReport(COMPLETE_ZERO_SCANNED);
+		const group = getDegradationSummary().find(
+			({ kind }) => kind === "runner-coverage-empty",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.subject).toBe(
+			`opengrep:${realpathOrResolve(tmp)}`,
+		);
+	});
+
+	// Recurrence: a successful partial report used to enter `analyzed` without
+	// paths, then render as cold/not-run despite carrying findings.
+	it("keeps a partial opengrep scan distinct from cold", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep's warning-level partial report shape.
+				fs.writeFileSync(
+					report,
+					'{"results":[],"errors":[{"level":"warn","message":"invalid UTF-8"}],"paths":{"scanned":[]}}',
+				);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+		const result = await fetchFreshProjectDiagnostics(
+			makeCacheManager(),
+			tmp,
+			clients,
+		);
+		expect(result.analyzed).not.toContain("opengrep");
+		expect(result.partial).toContain("opengrep");
+		expect(result.cold).not.toContain("opengrep");
+		expect(result.partialReasons?.opengrep).toBe("invalid UTF-8");
+		expect(result.authoritativeCoverage).toEqual([]);
+	});
+
+	// Recurrence: a warning-level report with findings and scanned paths used to
+	// be cached as complete when the fresh-fetch partial branch was bypassed.
+	it("keeps findings visible and skips cache for a partial scanned report", async () => {
+		const client = new OpengrepClient();
+		client.ensureAvailable = vi.fn().mockResolvedValue(true);
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementationOnce(
+			async (_command, args: string[]) => {
+				const report = args[args.indexOf("--json-output") + 1];
+				// Captured from opengrep 1.25.0 --json with one finding and one
+				// warning-level skipped-file error.
+				fs.writeFileSync(
+					report,
+					'{"results":[{"check_id":"python.lang.security.audit.subprocess-shell-true","path":"a.py","start":{"line":7,"col":3},"end":{"line":7,"col":20},"extra":{"message":"shell=True is dangerous","severity":"ERROR","metadata":{"cwe":["CWE-78: OS Command Injection"]}}}],"errors":[{"level":"warn","message":"skipped 1 file"}],"paths":{"scanned":["a.py"]}}',
+				);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		);
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		(clients as unknown as { opengrepClient: OpengrepClient }).opengrepClient =
+			client;
+
+		const result = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+		);
+
+		expect(result.partial).toContain("opengrep");
+		expect(result.partialReasons?.opengrep).toBe("skipped 1 file");
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				runner: "opengrep",
+				filePath: path.resolve(tmp, "a.py"),
+				message: "shell=True is dangerous (CWE-78: OS Command Injection)",
+			}),
+		);
+		expect(cacheManager.writeCache).not.toHaveBeenCalledWith(
+			"opengrep",
+			expect.anything(),
+			path.resolve(tmp),
+			expect.anything(),
+		);
+	});
+
+	it("does not cache a dead-code result that did not analyse the root (#2887)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		const deadCodeClient = {
+			id: "python",
+			language: "Python",
+			detect: vi.fn().mockReturnValue(true),
+			analyze: vi.fn().mockResolvedValue({
+				success: true,
+				analyzed: false,
+				language: "Python",
+				summary: "not applicable",
+				unusedExports: [],
+				unusedFiles: [],
+				unusedDeps: [],
+				unlistedDeps: [],
+			}),
+		};
+		(clients as unknown as { deadCodeClients: unknown[] }).deadCodeClients = [
+			deadCodeClient,
+		];
+
+		await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(cacheManager.writeCache).not.toHaveBeenCalledWith(
+			"dead-code-python",
+			expect.anything(),
+			expect.anything(),
+			expect.anything(),
+		);
 	});
 
 	it("runs all analyzers in parallel, not serially", async () => {

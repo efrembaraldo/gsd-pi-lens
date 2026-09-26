@@ -722,6 +722,20 @@ export interface LSPTouchFileOptions {
 	/** Skip workspace/didChangeWatchedFiles — use for cascade reads, not real fs changes */
 	silent?: boolean;
 	/**
+	 * #3405: this touch's content IS the file's saved on-disk state and the
+	 * caller wants that file diagnosed now, so each server whose
+	 * `textDocumentSync.save` asked for it gets a `textDocument/didSave` after
+	 * its content notification lands. Two callers set it, both one-file and
+	 * caller-initiated: the post-write sync (`clients/pipeline.ts`
+	 * `resyncLspFile`) and the explicit `lsp_diagnostics` query
+	 * (`tools/lsp-diagnostics.ts`). Warm-ups, cascade neighbour reads, the drift
+	 * resync and the workspace sweep deliberately leave it unset — a save is a
+	 * recompile trigger on a save-triggered server (Expert schedules a whole
+	 * project compile), so one per background read would be a storm, and none of
+	 * those callers is answering "is this file clean right now".
+	 */
+	saved?: boolean;
+	/**
 	 * #645: per-sweep gate (see `createSweepIndexGate`/`SweepIndexGate`) that
 	 * lets a `workspaceIndexing`-strategy server (e.g. marksman) pay its full
 	 * `aggregateWaitMs` wait only once per `runWorkspaceDiagnostics` sweep
@@ -5067,7 +5081,14 @@ export class LSPService {
 							// (or any synchronous throw) still reads as a rejected write rather
 							// than rejecting the whole per-file `Promise.all`.
 							const writePromise = entry.client.notify
-								.open(filePath, content, languageId, undefined, silent)
+								.open(
+									filePath,
+									content,
+									languageId,
+									undefined,
+									silent,
+									options.saved === true,
+								)
 								.then(() => true as const);
 							// #1714: the document is now in this auxiliary's input queue,
 							// whether or not the write settles inside our budget. Counted here
@@ -5250,6 +5271,12 @@ export class LSPService {
 			// (undefined = the race didn't produce an answer; the end-of-wait
 			// fallback below may still fill it in on a timed-out empty result).
 			let tsserverSyncEligible = false;
+			// #1639/#3187: `ensureWarmForSweep`'s readiness probe (`source:
+			// "lsp_sweep_warmup"`) is the one touch that is single-server,
+			// `clientScope: "primary"` and NON-collecting at the same time. Both
+			// sync-confirm gates below and the per-server wait's settle-source tag
+			// read the same fact, so it is derived once, here.
+			const isWarmupTouch = source === "lsp_sweep_warmup";
 			let tsserverSyncConfirmed:
 				| import("./client.js").LSPDiagnostic[]
 				| undefined;
@@ -5453,9 +5480,20 @@ export class LSPService {
 				// synchronous gate and pays ZERO extra work — not even the snapshot
 				// read; a non-typescript `silentOnClean` server instead gets the
 				// generic (non-racing) clean-confirm fallback further below.
+				// #3187: the warm-up touch is eligible too, though it collects
+				// nothing. `collectDiagnostics` is here because a touch that discards
+				// its diagnostics has nothing to carry a confirm INTO — but the warm-up
+				// is not after diagnostics at all, it is after a VERDICT, and the sync
+				// commands are the only thing that can hand a tier3-silent server one
+				// before its whole cold-start budget lapses (measured: 6,972 ms of a
+				// 20,000 ms warm-up budget, then the sweep touched the same file again
+				// in 113 ms). It stays non-collecting on purpose: a collecting warm-up
+				// would write this file's `lastKnownDiagnostics` from primary-scope-only
+				// evidence — and an empty confirm would DELETE a previously confirmed
+				// record — which is the #1470/#1493 prime hazard from a new direction.
 				if (
 					!notifyWriteTimedOut &&
-					options.collectDiagnostics === true &&
+					(options.collectDiagnostics === true || isWarmupTouch) &&
 					clientScope === "primary" &&
 					spawned.length === 1 &&
 					spawned[0].client.serverId === "typescript" &&
@@ -5651,8 +5689,8 @@ export class LSPService {
 					// consumer can tell them apart instead of double-counting. Omitted
 					// (rather than passed as "pull") on the common path — the client
 					// already defaults to "pull", and existing tests assert the exact
-					// argument list `waitForDiagnostics` is called with.
-					const isWarmupTouch = source === "lsp_sweep_warmup";
+					// argument list `waitForDiagnostics` is called with. #3187: derived
+					// once above, next to the sync-confirm gate that reads the same fact.
 					// #743: per-server — a server we DID push to still gets the
 					// version-baseline wait even when a sibling was debounced away.
 					const waitForDiagnostics = (): Promise<void> =>
@@ -6623,9 +6661,9 @@ export class LSPService {
 			// ever double-deciding typescript's own touches — when the sync race
 			// was attempted and failed/was unavailable, typescript's existing
 			// "falls through to inconclusive, unchanged" contract (#707) is
-			// preserved exactly; typescript touches that never enter that gate
-			// (e.g. `collectDiagnostics: false`, like `ensureWarmForSweep`'s own
-			// warm-up call) are still eligible here as a genuine bonus fix. Scoped
+			// preserved exactly for a COLLECTING touch; #3187 re-admits the
+			// non-collecting warm-up, which has no end-of-wait retry to fall
+			// through to (see the exclusion's own comment below). Scoped
 			// to `clientScope === "primary"`/`spawned.length === 1` exactly like
 			// the sync-eligible gate above (and like `ensureWarmForSweep`'s own
 			// `clientScope: "primary"` warm-up touch) so a multi-server
@@ -6646,7 +6684,17 @@ export class LSPService {
 				// below means the one server IS the primary, so this is the same condition
 				// written in the vocabulary the rest of the merge now uses.
 				!primaryNotifyWriteTimedOut &&
-				!tsserverSyncEligible &&
+				// #3187: the warm-up is sync-ELIGIBLE now, and eligibility alone must
+				// not cost it this fallback. For a collecting touch the exclusion is
+				// #707's contract (the end-of-wait retry above is typescript's second
+				// chance, and failing it stays inconclusive); the warm-up collects
+				// nothing, so that retry's `collected !== undefined` precondition can
+				// never hold for it and the exclusion would leave a server whose
+				// `typescript.tsserverRequest` is unavailable stranded inconclusive —
+				// a #744 warm-up failure, its retry, and a SKIPPED sweep group, where
+				// today it is certified clean. Reaching here at all means the race
+				// produced no answer, so this decides nothing the sync already decided.
+				(!tsserverSyncEligible || isWarmupTouch) &&
 				clientScope === "primary" &&
 				spawned.length === 1 &&
 				getStrategy(
@@ -8668,6 +8716,13 @@ export class LSPService {
 			});
 			const warmupAttempt = this.touchFile(representativeFile, content, {
 				diagnostics: "document",
+				// #3187: stays FALSE. This touch wants a verdict, not findings: its
+				// `clientScope: "primary"` evidence does not speak for the auxiliaries
+				// the sweep's own `clientScope: "all"` touch waits on, so collecting
+				// here would prime this file's `lastKnownDiagnostics` from a narrower
+				// scope than the result that follows (and an empty confirm would delete
+				// a previously confirmed record). `touchFile`'s sync-confirm gates key
+				// off `source` instead, so the verdict still arrives at ~grace+RTT.
 				collectDiagnostics: false,
 				clientScope: "primary",
 				source: "lsp_sweep_warmup",
@@ -9308,9 +9363,16 @@ export class LSPService {
 				// duplicating what the per-edit path already suppresses. `content`
 				// was already read above for this file, so `detectFileRole` gets the
 				// higher-accuracy content-aware classification at no extra cost.
+				// #3041: `filePath`/`scanRoot` additionally apply each rule's own
+				// `ignores` carve-out (#965). ast-grep's LSP does NOT apply it to the
+				// per-document diagnostics it publishes (only its own `scan` walk
+				// does), so without this the sweep re-surfaces exactly what the NAPI
+				// runner skips on the same file.
 				const filteredDiagnostics = diagnostics
 					? applyAuxiliarySuppressions(diagnostics, content, {
 							fileRole: detectFileRole(filePath, content),
+							filePath,
+							scanRoot: root,
 						})
 					: diagnostics;
 				results.push({

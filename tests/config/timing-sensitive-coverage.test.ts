@@ -9,8 +9,12 @@ import { toPosix } from "../../clients/path-utils.js";
 // gitignored COMPILED `vitest.config.js` that `npm run build` emits at the repo
 // root, so this guard would silently read a stale config (verified 2026-08-12:
 // commenting an entry out of the .ts left the imported list unchanged).
-import vitestConfig from "../../vitest.config.ts";
-import { assertNonEmptyScan } from "../support/sweep-kit.js";
+import vitestConfig, { wallClockBudgetInclude } from "../../vitest.config.ts";
+import {
+	assertNonEmptyScan,
+	listSourceFiles,
+	readWalkedFiles,
+} from "../support/sweep-kit.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -22,6 +26,25 @@ const repoRoot = path.resolve(
 // busy-loop/yielding examples, rather than guarding a production timing budget.
 const timingMeasurementOnly = ["tests/support/perf-harness.test.ts"];
 
+// Members of the timing-sensitive lane that are NOT sampler/cpuUsage tests.
+// The lane's charter is a quiet measurement window, and these files need one
+// for a different timing shape: real child-process lock/barrier races whose
+// scheduling budget the default fork storm eats (#2173), a forced-GC heap
+// guard whose MiB deltas need a quiet host, and a worker-generation
+// suspension window whose admission is timing-critical but deterministic
+// (#1318). Each entry carries its reason; the reverse check below fails a
+// non-sampler file that lands here without one.
+const timingSensitiveNonSamplerMembers: Readonly<Record<string, string>> = {
+	"tests/clients/instance-registry-lock.test.ts":
+		"real child-process lock contention with a scheduling budget; unsuitable for the default fork storm (#2173)",
+	"tests/clients/instance-registry-race.test.ts":
+		"real node child-process barrier race; process scheduling makes this unsuitable for the default fork storm (#2173)",
+	"tests/clients/review-graph-retention.test.ts":
+		"forced-GC heap-retention guard whose MiB deltas need a quiet host (#2073)",
+	"tests/clients/review-graph-superseded-persist.test.ts":
+		"worker-generation promotion held in a 400ms test-only suspension window while admitting its replacement (#1318)",
+};
+
 // Self-exclusion: this meta-test must not match ITSELF. It searches for the
 // very markers that define a timing-sensitive test, so the marker literals are
 // split and re-joined at runtime — spelled out in full, this file would report
@@ -29,12 +52,12 @@ const timingMeasurementOnly = ["tests/support/perf-harness.test.ts"];
 const samplerHelper = "measureMaxSyncBlock" + "Ms";
 const cpuUsageCall = "process." + "cpuUsage(";
 
+/** Every `*.test.ts` under `dir`, through the shared walker (#3082): this file
+ *  used to hand-roll the identical recursive `readdirSync` walk. */
 function testFiles(dir: string): string[] {
-	return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-		const entryPath = path.join(dir, entry.name);
-		if (entry.isDirectory()) return testFiles(entryPath);
-		return entry.name.endsWith(".test.ts") ? [entryPath] : [];
-	});
+	return listSourceFiles(dir, { extensions: [".ts"] }).filter((file) =>
+		file.endsWith(".test.ts"),
+	);
 }
 
 /** The `include` list of the "timing-sensitive" project, read from the live config. */
@@ -82,11 +105,11 @@ function isTimingSensitive(source: string): boolean {
 describe("timing-sensitive Vitest project coverage", () => {
 	it("phases every sync-block-sampler and process.cpuUsage budget test", () => {
 		const included = timingSensitiveInclude();
-		const timingFiles = testFiles(path.join(repoRoot, "tests"))
-			.map((file) => toPosix(path.relative(repoRoot, file)))
-			.filter((file) =>
-				isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
-			);
+		// readWalkedFiles: a path that vanished between the walk and the read is
+		// out of the population, not a finding (#3082).
+		const timingFiles = readWalkedFiles(testFiles(path.join(repoRoot, "tests")))
+			.filter(({ source }) => isTimingSensitive(source))
+			.map(({ file }) => toPosix(path.relative(repoRoot, file)));
 		// Calibration: 14 sampler/CPU-usage tests on 2026-08-26; half is 7.
 		assertNonEmptyScan("timing-sensitive detection", timingFiles.length, 7);
 
@@ -101,7 +124,13 @@ describe("timing-sensitive Vitest project coverage", () => {
 
 		const unexpected = timingFiles.filter(
 			(file) =>
-				!included.includes(file) && !timingMeasurementOnly.includes(file),
+				!included.includes(file) &&
+				!timingMeasurementOnly.includes(file) &&
+				// A sampler test phased in the fully serialized wall-clock-budget
+				// lane is quieter than this lane promises, not unphased
+				// (#2886 round 2: performance-report-occupancy keeps its sampler
+				// row there beside its deterministic yield-count row).
+				!wallClockBudgetInclude.includes(file),
 		);
 		expect(
 			unexpected,
@@ -114,6 +143,43 @@ describe("timing-sensitive Vitest project coverage", () => {
 		expect(
 			staleExceptions,
 			"escape-hatch entries must still be sampler/cpuUsage tests",
+		).toEqual([]);
+	});
+
+	// Reverse check (#2933 round 2, F2): every `included` entry must still be
+	// a sampler/cpuUsage test or a documented non-sampler member. Without
+	// this, dropping a deterministic test out of the lane — or adding a
+	// non-timing file to it — is green either way and the lane roster rots.
+	it("included entries are sampler/cpuUsage tests or documented non-sampler members", () => {
+		const included = timingSensitiveInclude();
+		const nonSampler = included.filter((file) => {
+			const source = fs.readFileSync(path.join(repoRoot, file), "utf8");
+			return (
+				!isTimingSensitive(source) &&
+				!(file in timingSensitiveNonSamplerMembers)
+			);
+		});
+		expect(
+			nonSampler,
+			"non-sampler files must carry a reason in timingSensitiveNonSamplerMembers",
+		).toEqual([]);
+
+		const staleReasons = Object.keys(timingSensitiveNonSamplerMembers).filter(
+			(file) => !included.includes(file),
+		);
+		expect(
+			staleReasons,
+			"non-sampler reasons must still name lane members",
+		).toEqual([]);
+
+		const samplerNowCovered = Object.keys(
+			timingSensitiveNonSamplerMembers,
+		).filter((file) =>
+			isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
+		);
+		expect(
+			samplerNowCovered,
+			"non-sampler reasons must not cover sampler/cpuUsage tests",
 		).toEqual([]);
 	});
 

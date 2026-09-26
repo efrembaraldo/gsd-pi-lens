@@ -68,6 +68,12 @@ resource needs a row. Two outcomes are acceptable and one is not:
 
 Silently leaving a change unrowed is the failure this skill exists to prevent.
 
+A change to `.github/workflows/release.yml` or to `package.json`'s
+`packageManager` pin is already rowed: `publish-toolchain-pinned` drives the
+publish job's own `npx -y "npm@<pin>"` invocation against the candidate (#2940).
+Name it in the report as the covering row rather than re-deriving one — and if
+it reads SKIPPED, the publish path was NOT witnessed for this candidate.
+
 ### 3. Run the runner
 
 ```
@@ -171,6 +177,11 @@ trailing commit after the bump+roll commit is fine) and name it in the PR
 body. Also read the rolled section for a "next version" literal that the
 fragments assumed (`4.2.0` in a `Deprecated since …` line when the release is
 a patch) and correct it in code, docs and the rolled section together.
+
+The bump PR title is `chore(release): <version> (refs #<tracker>)` — the
+PR-title lint requires the conventional prefix AND an issue ref, and a title
+missing either reds `ci-verdict` on an otherwise green workflow (the 4.2.0
+bump was retitled after exactly that).
 
 ### 4. Report
 

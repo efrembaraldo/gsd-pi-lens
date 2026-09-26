@@ -22,6 +22,17 @@ export function classifyCleanBehavior(obs: CleanSignalObservations): {
 	reason: string;
 };
 
+export function createPublishTraceDrainer(options: {
+	readLog: (offset: number) => {
+		size: number;
+		read: (offset: number) => { chunk: string; bytesRead: number } | null;
+	};
+	echoTrace?: boolean;
+}): {
+	(sink: Array<{ server?: string }>, serverId: string): void;
+	reset(offset: number): void;
+};
+
 export interface DriftInput {
 	lang: string;
 	behavior: string;
@@ -46,3 +57,21 @@ export function findCleanSignalDrift(
 	rows: DriftInput[],
 	lookupSilentOnClean: (lang: string) => boolean | undefined,
 ): DriftResult[];
+
+// #3310: the first-publish axis — is a push server's FIRST publish the answer,
+// or an empty placeholder sent while a one-time index builds?
+export type FirstPublishClass =
+	| "empty-first"
+	| "direct"
+	| "empty-only"
+	| "unknown";
+
+export function classifyFirstPublish(
+	dirtyPublishes: Array<{ diags: number }> | undefined,
+): { firstPublish: FirstPublishClass; reason: string };
+
+export const COMPARABLE_FIRST_PUBLISH: Set<string>;
+
+export const LANG_TO_STRATEGY_KEY: Record<string, string>;
+
+export function strategyKeyForLang(lang: string): string;

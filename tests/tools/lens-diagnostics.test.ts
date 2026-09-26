@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
+import { PROJECT_DIAGNOSTICS_CACHE_VERSION } from "../../clients/project-diagnostics/cache.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -17,6 +18,7 @@ import {
 import {
 	_setRecentPhasesForTest,
 	getRecentLoggedPhases,
+	resetOncePerSessionPhases,
 } from "../../clients/latency-logger.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
@@ -68,18 +70,28 @@ vi.mock("../../clients/project-diagnostics/scanner.js", () => ({
 	scanProjectDiagnostics: projectDiagnosticsMocks.scanProjectDiagnostics,
 }));
 
-vi.mock("../../clients/project-diagnostics/cache.js", () => ({
-	PROJECT_DIAGNOSTICS_CACHE_VERSION: 2,
-	loadProjectDiagnosticsSnapshot:
-		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot,
-	loadProjectDiagnosticsDeltaReport:
-		projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport,
-	// Identity passthrough — these tests exercise ignore-filtering, not on-disk
-	// staleness (covered in project-diagnostics.test.ts).
-	reconcileProjectDiagnosticsSnapshot: (
-		snapshot: import("../../clients/project-diagnostics/types.js").ProjectDiagnosticsSnapshot,
-	) => ({ snapshot, staleDropped: 0 }),
-}));
+// #2154: the version comes from the REAL module. A hand-copied `2` here
+// silently drifted the moment the constant moved to 3, leaving these tests
+// asserting against a version production no longer writes.
+vi.mock(
+	"../../clients/project-diagnostics/cache.js",
+	async (importOriginal) => ({
+		PROJECT_DIAGNOSTICS_CACHE_VERSION: (
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/cache.js")
+			>()
+		).PROJECT_DIAGNOSTICS_CACHE_VERSION,
+		loadProjectDiagnosticsSnapshot:
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot,
+		loadProjectDiagnosticsDeltaReport:
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport,
+		// Identity passthrough — these tests exercise ignore-filtering, not on-disk
+		// staleness (covered in project-diagnostics.test.ts).
+		reconcileProjectDiagnosticsSnapshot: (
+			snapshot: import("../../clients/project-diagnostics/types.js").ProjectDiagnosticsSnapshot,
+		) => ({ snapshot, staleDropped: 0 }),
+	}),
+);
 
 // ── Mock widget state ─────────────────────────────────────────────────────────
 
@@ -175,6 +187,32 @@ function run(
 	return tool.execute("1", params, new AbortController().signal, null, { cwd });
 }
 
+/**
+ * #3196: maps every indented row/label line in a mode=delta render to the
+ * unindented header line immediately above it — the exact pairing the
+ * `lines.includes(rel)` header-suppression bug broke, since a later tier's
+ * rows for a file already headed elsewhere in the buffer land under
+ * whichever OTHER header the buffer's tail happens to sit under instead of
+ * their own file's.
+ */
+function deltaBlocksByHeader(text: string): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	let header: string | undefined;
+	for (const line of text.split("\n")) {
+		if (
+			line.length > 0 &&
+			!line.startsWith(" ") &&
+			!line.startsWith("Summary")
+		) {
+			header = line;
+			out[header] ??= [];
+		} else if (header !== undefined && line.startsWith(" ")) {
+			out[header]?.push(line.trim());
+		}
+	}
+	return out;
+}
+
 describe("lens_diagnostics compact filename", () => {
 	it("names a real one-file paths request", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-one-file-"));
@@ -188,8 +226,9 @@ describe("lens_diagnostics compact filename", () => {
 		try {
 			const tool = makeTool({}, service);
 			const result = await run(tool, { source: "lsp", paths: [file] }, cwd);
+			expect(tool.renderResult).toBeDefined();
 			const rendered = (
-				tool.renderResult?.(result, { expanded: false }, {} as Theme, {
+				tool.renderResult!(result, { expanded: false }, {} as Theme, {
 					args: { source: "lsp", paths: [file] },
 				}) as any
 			)
@@ -219,8 +258,9 @@ describe("lens_diagnostics compact filename", () => {
 				{ source: "lsp", path: unrelated, paths: [diagnosed] },
 				cwd,
 			);
+			expect(tool.renderResult).toBeDefined();
 			const rendered = (
-				tool.renderResult?.(result, { expanded: false }, {} as Theme, {
+				tool.renderResult!(result, { expanded: false }, {} as Theme, {
 					args: { source: "lsp", path: unrelated, paths: [diagnosed] },
 				}) as any
 			)
@@ -642,6 +682,28 @@ describe("lens_diagnostics source=lsp compact render", () => {
 			}),
 		).toContain("not confirmed");
 	});
+
+	it("preserves oversized files in the compact LSP summary (#3408)", () => {
+		const line = render({
+			source: "lsp",
+			totalDiagnostics: 0,
+			filesChecked: 1,
+			cleanFiles: 0,
+			outcomeCounts: { too_large: 1 },
+			outcomes: [
+				{
+					file: "/tmp/huge.ts",
+					outcome: "too_large",
+					reason:
+						"file too large for LSP diagnostics (2097153 bytes > 2097152 limit)",
+				},
+			],
+		});
+		expect(line).toContain("too large");
+		expect(line).toContain("huge.ts");
+		expect(line).toContain("2097153 bytes");
+		expect(line).not.toContain("0 diagnostics");
+	});
 });
 
 // ── schema ────────────────────────────────────────────────────────────────────
@@ -654,6 +716,48 @@ describe("lens_diagnostics schema", () => {
 		expect(props.mode).toBeDefined();
 		expect(props.severity).toBeDefined();
 		expect(props.refreshRunners).toBeDefined();
+		expect(props.analysisRoot).toBeDefined();
+	});
+
+	it("passes an explicit analysis root through mode=full (#2053)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "all",
+			analysisRoot: "/home/me/repo",
+		});
+
+		expect(freshFetchMocks.fetchFreshProjectDiagnostics).toHaveBeenCalledWith(
+			expect.anything(),
+			"/proj",
+			expect.anything(),
+			expect.anything(),
+			expect.objectContaining({ analysisRoot: "/home/me/repo" }),
+		);
+	});
+
+	it("rejects an invalid explicit analysis root as a failed tool call (#2977 F2)", async () => {
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: [],
+			cold: [],
+			timings: {},
+			failed: [],
+			analysisRootError: "explicit analysis root is unavailable",
+		});
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{
+				mode: "full",
+				refreshRunners: "all",
+				analysisRoot: "/missing",
+			},
+		);
+		expect((result as { isError?: boolean }).isError).toBe(true);
+		expect(result.content[0].text).toMatch(/unavailable/);
 	});
 
 	it("defaults to delta mode when no params supplied", async () => {
@@ -876,6 +980,256 @@ describe("lens_diagnostics mode=delta", () => {
 		const text = String(result.content[0].text);
 		expect(text).toContain("fixable");
 		expect(text).toContain("quality");
+	});
+
+	/**
+	 * #3196: `formatDeltaMode`'s quality loop suppressed a file's header with
+	 * `if (!lines.includes(rel)) lines.push(rel)` — true whenever the
+	 * actionable loop already pushed that exact path, even though the quality
+	 * rows are appended to the END of `lines`, not under that earlier header.
+	 * `src/a.ts` is in both reports, `src/b.ts` in actionable only (both
+	 * demoted, so every row renders): a.ts's quality row landed under
+	 * whichever file's header was last in the buffer (b.ts here) instead of
+	 * a.ts's own. Mutation: restoring `lines.includes(rel)` reds this.
+	 */
+	it("#3196: a file demoted in both reports renders its quality row under its OWN header, not another file's", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-delta-group-"));
+		try {
+			const aPath = path.join(cwd, "src", "a.ts");
+			const bPath = path.join(cwd, "src", "b.ts");
+			fs.mkdirSync(path.dirname(aPath), { recursive: true });
+			fs.writeFileSync(aPath, "const a = 1;\n");
+			fs.writeFileSync(bPath, "const b = 1;\n");
+			const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+			fs.utimesSync(aPath, editedAtSec, editedAtSec);
+			fs.utimesSync(bPath, editedAtSec, editedAtSec);
+			const observedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+			const warn = (message: string) => ({
+				line: 1,
+				rule: "no-unused-vars",
+				tool: "eslint",
+				message,
+			});
+			const tool = makeTool({
+				"actionable-warnings": {
+					files: [
+						{ filePath: aPath, warnings: [warn("a is unused")] },
+						{ filePath: bPath, warnings: [warn("b is unused")] },
+					],
+					generatedAt: observedAt,
+					summary: { warnings: 2 },
+				},
+				"code-quality-warnings": {
+					files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+					generatedAt: observedAt,
+					summary: { warnings: 1 },
+				},
+			});
+			const result = await run(tool, { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			const blocks = deltaBlocksByHeader(text);
+			expect(
+				blocks["src/a.ts"]?.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(true);
+			expect(
+				blocks["src/b.ts"]?.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(false);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	/**
+	 * #3196: same shape with a.ts demoted in actionable but LIVE in quality
+	 * (the report postdates the edit) — the quality row is not demoted, but
+	 * it must still render under a.ts's own header rather than b.ts's, which
+	 * the header-suppression bug did not distinguish (it fires on path
+	 * membership alone, independent of staleness).
+	 */
+	it("#3196: a file demoted in actionable but live in quality still renders its live quality row under its OWN header", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-delta-group-"));
+		try {
+			const aPath = path.join(cwd, "src", "a.ts");
+			const bPath = path.join(cwd, "src", "b.ts");
+			fs.mkdirSync(path.dirname(aPath), { recursive: true });
+			fs.writeFileSync(aPath, "const a = 1;\n");
+			fs.writeFileSync(bPath, "const b = 1;\n");
+			const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+			fs.utimesSync(aPath, editedAtSec, editedAtSec);
+			fs.utimesSync(bPath, editedAtSec, editedAtSec);
+			const warn = (message: string) => ({
+				line: 1,
+				rule: "no-unused-vars",
+				tool: "eslint",
+				message,
+			});
+			const tool = makeTool({
+				"actionable-warnings": {
+					files: [
+						{ filePath: aPath, warnings: [warn("a is unused")] },
+						{ filePath: bPath, warnings: [warn("b is unused")] },
+					],
+					// Predates the edit: demoted.
+					generatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+					summary: { warnings: 2 },
+				},
+				"code-quality-warnings": {
+					files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+					// Postdates the edit: live.
+					generatedAt: new Date(Date.now() - 60_000).toISOString(),
+					summary: { warnings: 1 },
+				},
+			});
+			const result = await run(tool, { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			// Premise: a's actionable row IS demoted and its quality row is not.
+			expect(text).toContain("⚠ [stale");
+			expect(text).toContain("ℹ L1");
+			const blocks = deltaBlocksByHeader(text);
+			expect(
+				blocks["src/a.ts"]?.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(true);
+			expect(
+				blocks["src/b.ts"]?.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(false);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	/**
+	 * #3196: a file present ONLY in the quality report (never in actionable)
+	 * cannot collide with an earlier header under the OLD `lines.includes`
+	 * predicate either — its path was never pushed before, so this case does
+	 * not independently red on pre-fix code. Kept as a coverage case for the
+	 * new grouping pass: its header must still appear exactly once, grouped
+	 * correctly, alongside an interleaved actionable-only file.
+	 */
+	it("#3196: a file present only in the quality report renders under its own header, exactly once", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-delta-group-"));
+		try {
+			const aPath = path.join(cwd, "src", "a.ts");
+			const bPath = path.join(cwd, "src", "b.ts");
+			fs.mkdirSync(path.dirname(aPath), { recursive: true });
+			fs.writeFileSync(aPath, "const a = 1;\n");
+			fs.writeFileSync(bPath, "const b = 1;\n");
+			const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+			fs.utimesSync(aPath, editedAtSec, editedAtSec);
+			fs.utimesSync(bPath, editedAtSec, editedAtSec);
+			const observedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+			const warn = (message: string) => ({
+				line: 1,
+				rule: "no-unused-vars",
+				tool: "eslint",
+				message,
+			});
+			const tool = makeTool({
+				"actionable-warnings": {
+					files: [{ filePath: bPath, warnings: [warn("b is unused")] }],
+					generatedAt: observedAt,
+					summary: { warnings: 1 },
+				},
+				"code-quality-warnings": {
+					files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+					generatedAt: observedAt,
+					summary: { warnings: 1 },
+				},
+			});
+			const result = await run(tool, { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			const headerCount = text
+				.split("\n")
+				.filter((line) => line === "src/a.ts").length;
+			expect(headerCount, text).toBe(1);
+			const blocks = deltaBlocksByHeader(text);
+			expect(
+				blocks["src/a.ts"]?.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(true);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	/**
+	 * #3196: a file with rows in BOTH tiers plus #3170's re-verify-incomplete
+	 * marker renders one header, actionable rows then quality rows, then one
+	 * trailer carrying both labels — never split across two files' headers,
+	 * and never in the wrong tier order. Mutation: restoring
+	 * `lines.includes(rel)` reds this by moving a.ts's quality row (and its
+	 * label) under b.ts.
+	 */
+	it("#3196: a file with an actionable row, a quality row, and a re-verify-incomplete marker renders one header with rows in tier order and one trailer", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-delta-group-"));
+		try {
+			const aPath = path.join(cwd, "src", "a.ts");
+			const bPath = path.join(cwd, "src", "b.ts");
+			fs.mkdirSync(path.dirname(aPath), { recursive: true });
+			fs.writeFileSync(aPath, "const a = 1;\n");
+			fs.writeFileSync(bPath, "const b = 1;\n");
+			const editedAtSec = (Date.now() - 5 * 60_000) / 1000;
+			fs.utimesSync(aPath, editedAtSec, editedAtSec);
+			fs.utimesSync(bPath, editedAtSec, editedAtSec);
+			const observedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+			const warn = (message: string) => ({
+				line: 1,
+				rule: "no-unused-vars",
+				tool: "eslint",
+				message,
+			});
+			const tool = makeTool({
+				"actionable-warnings": {
+					files: [
+						{
+							filePath: aPath,
+							warnings: [warn("a is unused")],
+							reVerifyIncomplete: true,
+						},
+						{ filePath: bPath, warnings: [warn("b is unused")] },
+					],
+					generatedAt: observedAt,
+					summary: { warnings: 2 },
+				},
+				"code-quality-warnings": {
+					files: [{ filePath: aPath, warnings: [warn("a quality nit")] }],
+					generatedAt: observedAt,
+					summary: { warnings: 1 },
+				},
+			});
+			const result = await run(tool, { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			const blocks = deltaBlocksByHeader(text);
+			const aBlock = blocks["src/a.ts"] ?? [];
+			const actionableIdx = aBlock.findIndex((l) => l.includes("a is unused"));
+			const qualityIdx = aBlock.findIndex((l) => l.includes("a quality nit"));
+			const ageIdx = aBlock.findIndex((l) => l.startsWith("(scanned"));
+			const incompleteIdx = aBlock.findIndex(
+				(l) => l === "(re-verify incomplete)",
+			);
+			expect(actionableIdx, text).toBeGreaterThanOrEqual(0);
+			expect(qualityIdx, text).toBeGreaterThan(actionableIdx);
+			expect(ageIdx, text).toBeGreaterThan(qualityIdx);
+			expect(incompleteIdx, text).toBeGreaterThan(ageIdx);
+			// Both labels render exactly once, and only under a.ts's own header.
+			const bBlock = blocks["src/b.ts"] ?? [];
+			expect(
+				bBlock.some((l) => l.includes("a quality nit")),
+				text,
+			).toBe(false);
+			expect(
+				bBlock.some((l) => l === "(re-verify incomplete)"),
+				text,
+			).toBe(false);
+			expect((text.match(/\(re-verify incomplete\)/g) ?? []).length, text).toBe(
+				1,
+			);
+		} finally {
+			removeTempDirSync(cwd);
+		}
 	});
 
 	it("severity=error excludes warnings in delta mode", async () => {
@@ -1405,6 +1759,235 @@ describe("lens_diagnostics mode=full", () => {
 
 		const phases = getRecentLoggedPhases().map((entry) => entry.phase);
 		expect(phases).not.toContain("runner_authoritative_widget_retire");
+	});
+
+	it("logs runner coverage retirement evidence once per runner per session", async () => {
+		mockSummaries.push(
+			sum(
+				"/proj/src/clean.py",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "retained",
+							line: 1,
+							rule: "opengrep:x",
+							tool: "opengrep",
+						},
+					],
+				},
+			),
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: ["opengrep", "knip"],
+			cold: [],
+			timings: {},
+			authoritativeCoverage: [
+				{
+					runnerId: "opengrep",
+					root: "/proj",
+					files: new Set(["/proj/src/clean.py"]),
+				},
+			],
+		});
+		_setRecentPhasesForTest([]);
+		await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		expect(getRecentLoggedPhases().map((entry) => entry.phase)).toContain(
+			"runner_coverage_retired",
+		);
+		const retirement = getRecentLoggedPhases().find(
+			(entry) => entry.phase === "runner_authoritative_widget_retire",
+		);
+		expect(retirement?.metadata?.runners).toBe("opengrep");
+		_setRecentPhasesForTest([]);
+		await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		expect(getRecentLoggedPhases().map((entry) => entry.phase)).not.toContain(
+			"runner_coverage_retired",
+		);
+	});
+
+	// #2962: a zero-file coverage declaration retires nothing, so it must not
+	// write this row AND must not consume the once-per-session claim — the
+	// session's first real coverage row would otherwise be suppressed by the
+	// call that proved there was no coverage.
+	it("an empty coverage entry does not burn the once-per-session coverage row", async () => {
+		// Re-arm the claim so this case does not depend on which sibling test
+		// consumed opengrep's row earlier in the file.
+		resetOncePerSessionPhases();
+		mockSummaries.push(
+			sum(
+				"/proj/src/clean.py",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "retained",
+							line: 1,
+							rule: "opengrep:x",
+							tool: "opengrep",
+						},
+					],
+				},
+			),
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: ["opengrep"],
+			cold: [],
+			timings: {},
+			authoritativeCoverage: [
+				{ runnerId: "opengrep", root: "/proj", files: new Set() },
+			],
+		});
+		_setRecentPhasesForTest([]);
+		await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		expect(getRecentLoggedPhases().map((entry) => entry.phase)).not.toContain(
+			"runner_coverage_retired",
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: ["opengrep"],
+			cold: [],
+			timings: {},
+			authoritativeCoverage: [
+				{
+					runnerId: "opengrep",
+					root: "/proj",
+					files: new Set(["/proj/src/clean.py"]),
+				},
+			],
+		});
+		_setRecentPhasesForTest([]);
+		await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		expect(getRecentLoggedPhases().map((entry) => entry.phase)).toContain(
+			"runner_coverage_retired",
+		);
+	});
+
+	it("retires only findings covered by an opengrep scanned path", async () => {
+		mockSummaries.push(
+			sum(
+				"/proj/nested/src.ts",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "nested",
+							tool: "opengrep",
+							rule: "opengrep:export",
+						},
+					],
+				},
+			),
+			sum(
+				"/proj/src.ts",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "other root",
+							tool: "opengrep",
+							rule: "opengrep:export",
+						},
+					],
+				},
+			),
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: ["opengrep"],
+			cold: [],
+			timings: {},
+			authoritativeCoverage: [
+				{
+					runnerId: "opengrep",
+					root: "/proj/nested",
+					files: new Set(["/proj/nested/src.ts"]),
+				},
+			],
+		});
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		const text = String(result.content[0].text);
+		expect(text).not.toContain("nested");
+		expect(text).toContain("other root");
+	});
+
+	it("keeps findings outside a runner file set", async () => {
+		mockSummaries.push(
+			sum(
+				"/proj/inside-set.ts",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "inside-set",
+							tool: "opengrep",
+							rule: "opengrep:duplicate",
+						},
+					],
+				},
+			),
+			sum(
+				"/proj/outside-set.ts",
+				{ warnings: 1 },
+				{
+					diagnostics: [
+						{
+							severity: "warning",
+							message: "outside-set",
+							tool: "opengrep",
+							rule: "opengrep:duplicate",
+						},
+					],
+				},
+			),
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			analyzed: ["opengrep"],
+			cold: [],
+			timings: {},
+			authoritativeCoverage: [
+				{
+					runnerId: "opengrep",
+					root: "/proj",
+					files: new Set(["/proj/inside-set.ts"]),
+				},
+			],
+		});
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		const text = String(result.content[0].text);
+		expect(text).not.toContain("inside-set");
+		expect(text).toContain("outside-set");
 	});
 
 	it("runs workspace diagnostics and merges LSP-only files with widget state", async () => {
@@ -2182,7 +2765,7 @@ describe("lens_diagnostics mode=full", () => {
 			]),
 		};
 		projectDiagnosticsMocks.scanProjectDiagnostics.mockResolvedValue({
-			version: 2,
+			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
 			cwd: "/proj",
 			tier: "cheap",
 			scannedAt: "2026-08-20T14:30:14.000Z",
@@ -2562,6 +3145,45 @@ describe("lens_diagnostics mode=full", () => {
 		).toContain("knip");
 	});
 
+	// Recurrence: a real Opengrep partial report can carry findings without a
+	// complete scanned-path set; the renderer must not call that result cold.
+	it("mode=full renders partial Opengrep findings with incomplete coverage", async () => {
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [
+				{
+					filePath: "/proj/src/a.py",
+					line: 1,
+					column: 1,
+					severity: "warning",
+					semantic: "warning",
+					tool: "opengrep",
+					runner: "opengrep",
+					rule: "opengrep:danger",
+					message: "partial finding",
+					source: "project-scan",
+				},
+			],
+			runners: ["opengrep"],
+			analyzed: [],
+			cold: [],
+			partial: ["opengrep"],
+			partialReasons: { opengrep: "invalid UTF-8" },
+			timings: { opengrep: 4 },
+		});
+		const result = await run(
+			makeTool({}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("partial finding");
+		expect(text).toContain("partial coverage (findings included): opengrep");
+		expect(text).toContain("Coverage is incomplete");
+		expect(text).not.toContain("opengrep — not run");
+		expect(
+			(result.details as { partialRunners?: string[] }).partialRunners,
+		).toEqual(["opengrep"]);
+	});
+
 	it("mode=full renders failed analyzers as unknown, not clean (#925)", async () => {
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
@@ -2690,6 +3312,29 @@ describe("lens_diagnostics mode=full", () => {
 		// the heavyweight analyzers must still never run — only the rendering
 		// of that skip changed, not the (deliberately cheap) behavior itself.
 		expect(freshFetchMocks.fetchFreshProjectDiagnostics).not.toHaveBeenCalled();
+	});
+
+	// #2535 F1: the same quick-mode note on the MCP host must name the MCP
+	// tool. Drives the real execute with a mocked LSP service (no sweep).
+	it("mode=full without refreshRunners names the MCP tool on the MCP host (#2535)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		const tool = makeTool({}, lspService);
+		const result = await tool.execute(
+			"1",
+			{ mode: "full" },
+			new AbortController().signal,
+			null,
+			{ cwd: "/proj", host: "mcp" },
+		);
+		const text = String(result.content[0].text);
+		expect(text).toContain("not run this call (quick mode)");
+		expect(text).toContain("pilens_diagnostics mode=full");
+		// Reject twin: the bare pi name must not appear — the lookbehind
+		// excludes the pilens_ prefix.
+		expect(text).not.toMatch(/(?<![A-Za-z0-9_])lens_diagnostics/);
 	});
 
 	it("mode=full refreshRunners=cached triggers the analyzer fresh-fetch for the resolved cwd (#585)", async () => {
@@ -3044,7 +3689,7 @@ describe("lens_diagnostics mode=full", () => {
 		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue({
 			// cache.js is mocked in this file, so the version constant isn't in scope;
 			// the tool path doesn't validate it (loader is mocked, reconcile is identity).
-			version: 2,
+			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
 			cwd: "/proj",
 			tier: "cheap",
 			scannedAt: "2026-01-01T00:00:00.000Z",
@@ -4331,6 +4976,67 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 	function runMark(params: Record<string, unknown>) {
 		return markTool().execute("m", params, undefined, () => {}, { cwd: ddTmp });
 	}
+
+	it("mode=full applies a stored disposition to an auxiliary LSP finding (#3041)", async () => {
+		// #3041 recurrence: the full-mode merge converted a SECOND copy of the same
+		// raw LSP diagnostics with a hardcoded `tool: "lsp"`, while the footer
+		// reconcile loop beside it already re-tagged them through
+		// `retagAuxiliaryDiagnostics` (#692). Dispositions anchor on `tool`, so a
+		// `false-positive` mark recorded against the per-edit `ast-grep` finding
+		// never matched the copy mode=full rendered.
+		const filePath = path.join(ddTmp, "app.ts");
+		fs.writeFileSync(filePath, "console.log('debug');\n");
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath,
+					diagnostics: [
+						{
+							severity: 2,
+							message: "debug output",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 11 },
+							},
+							source: "ast-grep",
+							code: "some-project-rule",
+						},
+					],
+					count: 1,
+				},
+			]),
+		};
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager({}) as any,
+			() => ddTmp,
+			() => lspService as any,
+		);
+
+		const before = await tool.execute(
+			"1",
+			{ mode: "full", paths: [filePath] },
+			new AbortController().signal,
+			null,
+			{ cwd: ddTmp },
+		);
+		expect(String(before.content[0].text)).toContain("debug output");
+		await runMark({
+			filePath,
+			line: 1,
+			message: "debug output",
+			rule: "ast-grep:some-project-rule",
+			tool: "ast-grep",
+			disposition: "false-positive",
+		});
+		const after = await tool.execute(
+			"1",
+			{ mode: "full", paths: [filePath] },
+			new AbortController().signal,
+			null,
+			{ cwd: ddTmp },
+		);
+		expect(String(after.content[0].text)).not.toContain("debug output");
+	});
 
 	it("mode=delta hides a finding suppressed via the mark tool without a re-dispatch", async () => {
 		const filePath = path.join(ddTmp, "a.ts");

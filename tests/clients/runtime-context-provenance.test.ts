@@ -3,7 +3,10 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const logLatency = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal()),
+	logLatency,
+}));
 import {
 	advisoryPathKey,
 	snapshotAdvisoryProvenance,
@@ -157,7 +160,8 @@ describe("advisory provenance at context delivery (#1413)", () => {
 			([entry]) =>
 				(entry as { phase?: string }).phase === "advisory_provenance_decision",
 		);
-		const reasons = (call?.[0] as { metadata: { reasons: string[] } }).metadata
+		expect(call).toBeDefined();
+		const reasons = (call![0] as { metadata: { reasons: string[] } }).metadata
 			.reasons;
 		expect(reasons).toHaveLength(9);
 		expect(reasons[8]).toBe("+12 more");

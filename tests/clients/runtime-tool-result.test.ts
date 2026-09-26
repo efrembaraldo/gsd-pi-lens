@@ -1,3 +1,6 @@
+// lane: windows-vitest — #3294's case-spelling cell asserts the host
+// filesystem's own answer; no external toolchain is required because the
+// production handleToolResult path and pipeline boundary are in-process.
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -9,6 +12,10 @@ import {
 	registerPrimarySession,
 	releasePrimarySession,
 } from "../../clients/session-lifecycle.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import {
@@ -21,6 +28,10 @@ import {
 	resetVerifiedPathAttributionGuessCount,
 } from "../../clients/path-attribution-telemetry.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import {
+	createBashToolDefinition,
+	createReadToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -35,6 +46,13 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const logLatency = vi.hoisted(() => vi.fn());
+const requestBootstrapClients = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/bootstrap.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/bootstrap.js")>();
+	requestBootstrapClients.mockImplementation(actual.requestBootstrapClients);
+	return { ...actual, requestBootstrapClients };
+});
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
 	return { ...actual, readdir: vi.fn(actual.readdir) };
@@ -50,17 +68,450 @@ vi.mock("../../clients/pipeline.js", () => ({
 }));
 
 const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("../../clients/lsp/index.js", () => ({ notifyExternalFileChange }));
+vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+	notifyExternalFileChange,
+}));
 
 const readdirMock = vi.mocked(fsp.readdir);
 const realReaddir = readdirMock.getMockImplementation()!;
 
 beforeEach(() => {
+	requestBootstrapClients.mockClear();
 	readdirMock.mockImplementation(realReaddir);
 	readdirMock.mockClear();
 });
 
+it("does not dispatch an edit when analyzer bootstrap is unavailable (#2939 M9)", async () => {
+	const env = setupTestEnvironment("pi-lens-2939-bootstrap-null-");
+	try {
+		requestBootstrapClients.mockResolvedValueOnce(null);
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		const filePath = createTempFile(
+			env.tmpDir,
+			"edit.ts",
+			"export const x = 1;\n",
+		);
+		await handleToolResult({
+			event: {
+				toolName: "edit",
+				input: {
+					path: filePath,
+					oldText: "export const x = 1;",
+					newText: "export const x = 2;",
+				},
+				content: [{ type: "text", text: "ok" }],
+			},
+			getFlag: () => false,
+			dbg: () => {},
+			runtime,
+			cacheManager: new CacheManager(false),
+			resetLSPService: () => {},
+			readGuard: runtime.readGuard,
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+		} as never);
+		expect(
+			vi.mocked((await import("../../clients/pipeline.js")).runPipeline),
+		).not.toHaveBeenCalled();
+	} finally {
+		env.cleanup();
+	}
+});
+
 describe("bash grep searchReads registration", () => {
+	it("supersedes the provisional native read before checkEdit", async () => {
+		const env = setupTestEnvironment("pi-lens-2802-native-supersession-");
+		try {
+			const filePath = path.join(env.tmpDir, "large.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 3000 }, (_, i) => `line${i + 1}`).join("\n") +
+					"\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolCall({
+				event: {
+					toolName: "read",
+					toolCallId: "2802-supersede",
+					input: { path: filePath, offset: 1, limit: 3000 },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+			const readTool = createReadToolDefinition(env.tmpDir);
+			const result = await readTool.execute(
+				"2802-supersede",
+				{ path: filePath, offset: 1, limit: 3000 },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+			await handleToolResult({
+				event: {
+					toolName: "read",
+					toolCallId: "2802-supersede",
+					input: { path: filePath, offset: 1, limit: 3000 },
+					content: result.content,
+					details: result.details,
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+			expect(runtime.readGuard.checkEdit(filePath, [2500, 2500]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("registers the native read range the host delivered at EOF", async () => {
+		resetDegradationLedger();
+		const env = setupTestEnvironment("pi-lens-2802-native-read-eof-");
+		try {
+			const filePath = path.join(env.tmpDir, "short.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 120 }, (_, i) => `line${i + 1}`).join("\n"),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+			const readTool = createReadToolDefinition(env.tmpDir);
+			const result = await readTool.execute(
+				"2802",
+				{ path: filePath, offset: 1, limit: 400 },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+
+			await handleToolResult({
+				event: {
+					toolName: "read",
+					input: { path: filePath, offset: 1, limit: 400 },
+					content: result.content,
+					details: result.details,
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+			expect(recordRead).toHaveBeenCalledWith(
+				expect.objectContaining({
+					filePath,
+					requestedLimit: 400,
+					effectiveOffset: 1,
+					effectiveLimit: 120,
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("registers only the lines shown by the real bash host cap", async () => {
+		resetDegradationLedger();
+		const env = setupTestEnvironment("pi-lens-2802-bash-cap-");
+		try {
+			const filePath = path.join(env.tmpDir, "large.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 3000 }, (_, i) => `line${i + 1}`).join("\n") +
+					"\n",
+			);
+			const bashTool = createBashToolDefinition(env.tmpDir, {
+				exposeSessionEnvironment: false,
+			});
+			const result = await bashTool.execute(
+				"2802",
+				{ command: `cat ${filePath}` },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
+
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					input: { command: `cat ${filePath}` },
+					content: result.content,
+					details: result.details,
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as never);
+
+			expect(recordRead).toHaveBeenCalledWith(
+				expect.objectContaining({
+					filePath,
+					effectiveOffset: 1001,
+					effectiveLimit: 2000,
+				}),
+			);
+			expect(runtime.readGuard.checkEdit(filePath, [500, 500]).action).toBe(
+				"block",
+			);
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "bash-view-clipped",
+				),
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a pipe-filtered short output on the full source span", async () => {
+		const env = setupTestEnvironment("pi-lens-2802-pipe-fallback-");
+		try {
+			const filePath = path.join(env.tmpDir, "pipe.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 50 }, (_, i) =>
+					i === 30 ? "MATCHME" : `line${i + 1}`,
+				).join("\n") + "\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					input: { command: `cat ${filePath} | grep MATCHME` },
+					content: [{ type: "text", text: "MATCHME" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"allow",
+			);
+			expect(runtime.readGuard.checkEdit(filePath, [31, 31]).action).toBe(
+				"allow",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not mark a content-identical opaque rewrite as authored", async () => {
+		const env = setupTestEnvironment("pi-lens-2802-opaque-noop-");
+		try {
+			const filePath = path.join(env.tmpDir, "unchanged.ts");
+			fs.writeFileSync(filePath, "NEVER_PRESENT\n", "utf8");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const command = `sed -i 's/ABSENT_VALUE/x/' ${filePath}`;
+			await handleToolCall({
+				event: {
+					toolName: "bash",
+					toolCallId: "2802-noop",
+					input: { command },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+			const bashTool = createBashToolDefinition(env.tmpDir, {
+				exposeSessionEnvironment: false,
+			});
+			const result = await bashTool.execute(
+				"2802-noop",
+				{ command },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					toolCallId: "2802-noop",
+					input: { command },
+					content: result.content,
+					details: result.details,
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
+				false,
+			);
+			expect(
+				(runtime.readGuard as any).unchangedThisSession.has(filePath),
+			).toBe(true);
+			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("blocks a recognized bash write when observation evidence is unavailable", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-2802-unknown-authorship-");
+		try {
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			});
+			const filePath = path.join(env.tmpDir, "unknown.ts");
+			fs.writeFileSync(filePath, "const a = 1;\n", "utf8");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const command = `sed -i 's/const a = 1;/const a = 9;/' ${filePath}`;
+			await handleToolCall({
+				event: {
+					toolName: "bash",
+					toolCallId: "2802-unknown-authorship",
+					input: { command },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+			const bashTool = createBashToolDefinition(env.tmpDir, {
+				exposeSessionEnvironment: false,
+			});
+			const result = await bashTool.execute(
+				"2802-unknown-authorship",
+				{ command },
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir } as never,
+			);
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					toolCallId: "2802-unknown-authorship",
+					input: { command },
+					content: result.content,
+					details: result.details,
+				},
+				_opaqueCaptureOptions: { forcedUnknownReason: "walk-failed" },
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+			expect((runtime.readGuard as any).wasWrittenThisSession(filePath)).toBe(
+				false,
+			);
+			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("blocks every span when a multi-span bash view is clipped", async () => {
+		resetDegradationLedger();
+		const env = setupTestEnvironment("pi-lens-2802-multi-span-clip-");
+		try {
+			const paths = ["one.ts", "two.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const filePath of paths)
+				fs.writeFileSync(
+					filePath,
+					Array.from({ length: 3000 }, (_, i) => `line${i}`).join("\n") + "\n",
+				);
+			for (const filePath of paths)
+				fs.utimesSync(filePath, new Date(0), new Date(0));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					input: { command: `cat ${paths[0]}; cat ${paths[1]}` },
+					content: [{ type: "text", text: "output" }],
+					details: { truncation: { truncated: true, outputLines: 2000 } },
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				readGuard: runtime.readGuard,
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+			for (const filePath of paths)
+				expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+					"block",
+				);
+			expect(
+				getDegradationSummary().some(
+					(entry) => entry.kind === "bash-view-clipped",
+				),
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("invalidates formatter selection through handleToolResult", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockResolvedValue({
@@ -445,6 +896,10 @@ describe("bash grep searchReads registration", () => {
 			fs.writeFileSync(filePath, "const a = 1;\nconst b = 2;\nconst c = 3;\n");
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
+			const afterWriteSpy = vi.spyOn(
+				runtime.partialApplyRecords,
+				"noteAfterWriteHash",
+			);
 			readFileSyncSpy.mockClear();
 			await handleToolResult({
 				event: {
@@ -474,11 +929,11 @@ describe("bash grep searchReads registration", () => {
 			const rawHashReads = readFileSyncSpy.mock.calls.filter(
 				(args) => args.length === 1,
 			);
-			// Two raw-byte hashes total across three applied records: one post-write
-			// hash (shared by all three record() calls AND reused as the pipeline
-			// dedup key, finding 3) and one post-pipeline hash. record() never
-			// re-reads per edit.
-			expect(rawHashReads).toHaveLength(2);
+			// One raw-byte hash is enough when the pipeline reports no write: the
+			// post-write identity is also the state the pipeline analysed. This
+			// prevents #2499's parked-pipeline latch from quoting later disk bytes.
+			expect(rawHashReads).toHaveLength(1);
+			expect(afterWriteSpy).not.toHaveBeenCalled();
 			const records = [
 				runtime.partialApplyRecords.find(
 					filePath,
@@ -1159,6 +1614,54 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	it("does not stamp an ambiguous side-effect write as the target identity (#2499 HIGH)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-2499-ambiguous-write-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"target.ts",
+				"const x = 1;\n",
+			);
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				// A side-effect file changed, but the target write has no owned hash.
+				changedFiles: [path.join(env.tmpDir, "helper.rs")],
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const noteAfterWriteHash = vi.spyOn(
+				runtime.partialApplyRecords,
+				"noteAfterWriteHash",
+			);
+
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: {
+						path: filePath,
+						edits: [{ oldText: "const x = 1;", newText: "const x = 2;" }],
+					},
+					content: [],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			expect(noteAfterWriteHash).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("runs bash synthetic writes immediately and returns authoritative content", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const env = setupTestEnvironment("pi-lens-runtime-tool-bash-write-");
@@ -1208,6 +1711,113 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			expect(
 				returned?.content.some((part) => part.text?.includes("authoritative")),
 			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("recovers opaque multi-file bash changes without granting ownership", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-3226-opaque-ownership-");
+		try {
+			vi.mocked(runPipeline).mockImplementation(async () => ({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: false,
+			}));
+			const existingPath = createTempFile(
+				env.tmpDir,
+				"extracted/existing.js",
+				"(function(){ return 1; })();\n",
+			);
+			const createdPath = path.join(env.tmpDir, "extracted", "created.js");
+			const directPath = createTempFile(
+				env.tmpDir,
+				"direct.js",
+				"const direct = 1;\n",
+			);
+			const command = `echo direct > "${directPath}"; node opaque-extractor.js`;
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const recordWritten = vi.spyOn(runtime.readGuard, "recordWritten");
+			await handleToolCall({
+				event: {
+					toolName: "bash",
+					toolCallId: "3226-opaque",
+					input: { command },
+				},
+				ctx: { cwd: env.tmpDir },
+				lensEnabled: true,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			// Stand in for the true extraction/download child boundary: the
+			// tool_result path sees only the resulting filesystem state.
+			fs.writeFileSync(existingPath, "(function(){ return 2; })();\n");
+			fs.writeFileSync(createdPath, "(function(){ return 3; })();\n");
+			fs.writeFileSync(directPath, "const direct = 2;\n");
+			const opaqueBytesBeforePipeline = new Map([
+				[existingPath, fs.readFileSync(existingPath)],
+				[createdPath, fs.readFileSync(createdPath)],
+			]);
+			await handleToolResult({
+				event: {
+					toolName: "bash",
+					toolCallId: "3226-opaque",
+					input: { command },
+					content: [{ type: "text", text: "extracted" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				readGuard: runtime.readGuard,
+			} as any);
+
+			expect(vi.mocked(runPipeline).mock.calls).toHaveLength(3);
+			expect(
+				vi
+					.mocked(runPipeline)
+					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === true),
+			).toHaveLength(1);
+			expect(
+				vi
+					.mocked(runPipeline)
+					.mock.calls.filter(([ctx]) => ctx.allowAutonomousWriters === false),
+			).toHaveLength(2);
+			expect(runtime.pendingDeferredMutationCount).toBe(1);
+			expect(recordWritten).toHaveBeenCalledWith(directPath);
+			expect(recordWritten).not.toHaveBeenCalledWith(existingPath);
+			expect(recordWritten).not.toHaveBeenCalledWith(createdPath);
+			for (const [filePath, bytes] of opaqueBytesBeforePipeline) {
+				expect(fs.readFileSync(filePath)).toEqual(bytes);
+			}
+			expect(readChangesSince(env.tmpDir, 0)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						source: "opaque-script",
+						filePath: existingPath,
+					}),
+					expect.objectContaining({
+						source: "opaque-script",
+						filePath: createdPath,
+					}),
+					expect.objectContaining({
+						source: "agent-write",
+						filePath: directPath,
+					}),
+				]),
+			);
 		} finally {
 			env.cleanup();
 		}
@@ -1974,6 +2584,162 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		}
 	});
 
+	it("uses the workspace-edit path identity for the dispatched target (#3294)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment(
+			"pi-lens-runtime-tool-workspace-edit-path-",
+		);
+		const previousCwd = process.cwd();
+		try {
+			const filePath = path.join(env.tmpDir, "src", "main.rs");
+			const unrelatedCwd = path.join(env.tmpDir, "other-cwd");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.mkdirSync(path.join(unrelatedCwd, "src"), { recursive: true });
+			fs.writeFileSync(filePath, "mod helper;\n");
+			fs.writeFileSync(path.join(unrelatedCwd, "src", "main.rs"), "other\n");
+			process.chdir(unrelatedCwd);
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "✅ Auto-fixed 1 issue(s)",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				// A cwd-relative workspace-edit spelling must be resolved against
+				// the workspace passed to applyWorkspaceEdit, not process.cwd().
+				changedFiles: ["src/main.rs"],
+			});
+
+			const modifiedRanges: string[] = [];
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 mod helper;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime: {
+					projectRoot: env.tmpDir,
+					setTelemetryIdentity: () => {},
+					updateGitGuardStatus: () => {},
+					appendCascadeResult: () => {},
+					recordInlineBlockers: () => {},
+					clearInlineBlockers: () => {},
+					nextWriteIndex: () => 1,
+					turnIndex: 1,
+					telemetryModel: "test-model",
+					telemetrySessionId: "test-session",
+					fixedThisTurn: new Set<string>(),
+					reportedThisTurn: new Set<string>(),
+					formatPipelineCrashNotice: () => "",
+					lastCascadeOutput: "",
+					cachedExports: new Map(),
+					deferFormat: () => {},
+				},
+				cacheManager: {
+					addModifiedRange: (changedFile: string) =>
+						modifiedRanges.push(changedFile),
+					readTurnState: () => ({}),
+				},
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// The normal edit receipt records the dispatched target once before
+			// this changedFiles walk. The #3294 guard must not record it again as
+			// a side effect; a genuine neighbour remains covered by the test above.
+			expect(
+				modifiedRanges.filter((changed) => changed === filePath),
+			).toHaveLength(1);
+			expect(modifiedRanges).not.toContain(
+				path.join(unrelatedCwd, "src", "main.rs"),
+			);
+		} finally {
+			process.chdir(previousCwd);
+			env.cleanup();
+		}
+	});
+
+	it("uses the filesystem answer for case-variant workspace-edit paths (#3294)", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-runtime-tool-case-variant-");
+		try {
+			const filePath = path.join(env.tmpDir, "src", "main.rs");
+			const caseVariantPath = path.join(env.tmpDir, "src", "MAIN.rs");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "mod helper;\n");
+			if (!fs.existsSync(caseVariantPath))
+				fs.writeFileSync(caseVariantPath, "pub fn helper() {}\n");
+
+			const filesystemTarget = fs.realpathSync.native(filePath);
+			const filesystemChanged = fs.realpathSync.native(caseVariantPath);
+			const isSameFilesystemFile = filesystemTarget === filesystemChanged;
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "✅ Auto-fixed 1 issue(s)",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				changedFiles: [caseVariantPath],
+			});
+
+			const modifiedRanges: string[] = [];
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 mod helper;" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime: {
+					projectRoot: env.tmpDir,
+					setTelemetryIdentity: () => {},
+					updateGitGuardStatus: () => {},
+					appendCascadeResult: () => {},
+					recordInlineBlockers: () => {},
+					clearInlineBlockers: () => {},
+					nextWriteIndex: () => 1,
+					turnIndex: 1,
+					telemetryModel: "test-model",
+					telemetrySessionId: "test-session",
+					fixedThisTurn: new Set<string>(),
+					reportedThisTurn: new Set<string>(),
+					formatPipelineCrashNotice: () => "",
+					lastCascadeOutput: "",
+					cachedExports: new Map(),
+					deferFormat: () => {},
+				},
+				cacheManager: {
+					addModifiedRange: (changedFile: string) =>
+						modifiedRanges.push(changedFile),
+					readTurnState: () => ({}),
+				},
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// The recurrence is a case-folding host receiving the target's spelling
+			// back from applyWorkspaceEdit; ext4 instead has a distinct file that
+			// must remain visible as a side effect.
+			if (isSameFilesystemFile)
+				expect(modifiedRanges).not.toContain(caseVariantPath);
+			else expect(modifiedRanges).toContain(caseVariantPath);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("uses fast LSP reset when pipeline crash recovery resets clients", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		vi.mocked(runPipeline).mockRejectedValue(new Error("boom"));
@@ -2308,6 +3074,76 @@ describe("#484 turn-summary collection gate", () => {
 					format: { prettier: 1 },
 				},
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("#3246 inline blocker provenance", () => {
+	beforeEach(async () => {
+		const pipeline = await import("../../clients/pipeline.js");
+		vi.mocked(pipeline.runPipeline).mockReset();
+	});
+
+	it("stores the structured blockers the summary was rendered from", async () => {
+		// The turn-end replay can only honor a later `lens_diagnostic_mark` if
+		// the record carries a diagnostic IDENTITY; before #3246 this hop dropped
+		// `dispatchResult.blockers` on the floor and kept only the rendered text.
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-3246-record-provenance-");
+		try {
+			const filePath = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(filePath, "eval(input);\n");
+			const blocker = {
+				id: "b1",
+				message: "eval() is banned",
+				filePath,
+				line: 1,
+				severity: "error" as const,
+				semantic: "blocking" as const,
+				tool: "ast-grep",
+				rule: "no-eval",
+			};
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				hasBlockers: true,
+				isError: false,
+				fileModified: false,
+				inlineBlockerSummary:
+					"🔴 STOP — 1 issue(s) must be fixed:\n  L1: eval() is banned",
+				inlineBlockerSources: ["ast-grep"],
+				inlineBlockerLines: [1],
+				inlineBlockerDiagnostics: [blocker],
+			});
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			await handleToolResult({
+				event: {
+					toolName: "edit",
+					input: { path: filePath },
+					details: { diff: "+  1 eval(input);" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				testRunnerClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+				// biome-ignore lint/suspicious/noExplicitAny: partial dep surface.
+			} as any);
+
+			const record = runtime.getInlineBlockersSnapshot()[0];
+			expect(record?.summary).toContain("eval() is banned");
+			expect(record?.diagnostics).toEqual([blocker]);
 		} finally {
 			env.cleanup();
 		}

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
 	escapeRegExp,
 	listSourceFiles,
+	matchingCloseIndex,
 	relativePosix,
 	stripSource,
 } from "./sweep-kit.js";
@@ -99,15 +100,12 @@ function functionBody(source: string, name: string): string | undefined {
 	if (afterParams < 0) return undefined;
 	const openBrace = source.indexOf("{", afterParams);
 	if (openBrace < 0) return undefined;
-	let depth = 0;
-	for (let i = openBrace; i < source.length; i++) {
-		if (source[i] === "{") depth++;
-		else if (source[i] === "}") {
-			depth--;
-			if (depth === 0) return source.slice(openBrace, i + 1);
-		}
-	}
-	return undefined;
+	// #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`; the
+	// slice+undefined wrapper stays local, matching
+	// `host-event-shape-scan.ts`'s `eventArgLiteral` brace match.
+	const close = matchingCloseIndex(source, openBrace, "{", "}");
+	if (close === -1) return undefined;
+	return source.slice(openBrace, close + 1);
 }
 
 /** Bare-identifier call targets inside `body` (`foo(...)`, never `x.foo(...)`). */
@@ -130,13 +128,16 @@ function directClosureCalls(body: string): string[] {
 	const maskRange = (start: number, end: number) => {
 		for (let i = start; i < end; i++) visible[i] = " ";
 	};
+	// #3134: the depth count is `sweep-kit.ts`'s `matchingCloseIndex`. The
+	// body.length-on-unbalanced fallback is this function's OWN convention —
+	// distinct from `functionBody`'s undefined-on-unbalanced above and
+	// `eventArgLiteral`'s — kept here at the call site rather than folded
+	// into the shared matcher, since `maskRange`/`functionBodyOpen` below
+	// both call `matchingBrace` expecting a real index to mask through, never
+	// a sentinel they would need to special-case.
 	const matchingBrace = (open: number): number => {
-		let depth = 0;
-		for (let i = open; i < body.length; i++) {
-			if (body[i] === "{") depth++;
-			else if (body[i] === "}" && --depth === 0) return i;
-		}
-		return body.length;
+		const close = matchingCloseIndex(body, open, "{", "}");
+		return close === -1 ? body.length : close;
 	};
 	const functionBodyOpen = (start: number): number => {
 		let parens = 0;
@@ -388,6 +389,8 @@ export interface SessionStateCandidate {
 	file: string;
 	/** Module-level `Map`/`Set` declarations found (name only). */
 	containers: string[];
+	/** Container names with their declaration line, for semantic sweeps. */
+	containerDetails?: Array<{ name: string; line: number }>;
 	/** Exported reset-shaped function names found. */
 	resets: string[];
 	/** True when at least one reset is an explicitly test-only seam. */
@@ -688,8 +691,10 @@ let cachedCandidates: SessionStateCandidate[] | undefined;
  */
 export function scanSessionStateCandidates(
 	dir = CLIENTS_ROOT,
+	options: { includeUnresetContainers?: boolean } = {},
 ): SessionStateCandidate[] {
-	const useCache = dir === CLIENTS_ROOT;
+	const includeUnreset = options.includeUnresetContainers === true;
+	const useCache = dir === CLIENTS_ROOT && !includeUnreset;
 	if (useCache && cachedCandidates) return cachedCandidates;
 	const containerDeclaration = containerDeclarationRegex(dir);
 	const found: SessionStateCandidate[] = [];
@@ -697,11 +702,15 @@ export function scanSessionStateCandidates(
 		// Stripped for the same reason the reachability walk is (R1): a
 		// commented-out declaration or reset export is not one.
 		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
-		const containers = [...source.matchAll(containerDeclaration)].map(
-			(m) => m[1],
+		const containerDetails = [...source.matchAll(containerDeclaration)].map(
+			(m) => ({
+				name: m[1],
+				line: source.slice(0, m.index).split("\n").length,
+			}),
 		);
+		const containers = containerDetails.map((container) => container.name);
 		const resets = [...source.matchAll(EXPORTED_RESET)].map((m) => m[1]);
-		if (resets.length === 0) continue;
+		if (!includeUnreset && resets.length === 0) continue;
 		const hasTestOnlyReset = resets.some((r) => TEST_ONLY_RESET.test(r));
 		const hasProcessSingleton = PROCESS_SINGLETON_CALL.test(source);
 		// Signal A (container + reset), signal B (an explicit test-only reset
@@ -712,6 +721,7 @@ export function scanSessionStateCandidates(
 		found.push({
 			file: relativePosix(dir, absolute),
 			containers,
+			containerDetails,
 			resets,
 			hasTestOnlyReset,
 			hasProcessSingleton,
@@ -719,4 +729,11 @@ export function scanSessionStateCandidates(
 	}
 	if (useCache) cachedCandidates = found;
 	return found;
+}
+
+/** Source roots shipped by pi-lens, including non-client host adapters. */
+export function shippedContainerSourceRoots(): string[] {
+	return ["clients", "tools", "mcp"]
+		.map((root) => path.join(repoRoot, root))
+		.concat(path.join(repoRoot, "index.ts"));
 }

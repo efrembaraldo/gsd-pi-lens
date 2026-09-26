@@ -1,5 +1,7 @@
 import "./clients/console-guard-install.js";
 import { BoundedSet } from "./clients/bounded-cache.js";
+import { bounded } from "./clients/deadline-utils.js";
+import { HOOK_WALL_BUDGET_MS } from "./clients/hook-budgets.js";
 import {
 	closeModuleLoadConsoleWindow,
 	installConsoleGuard,
@@ -33,65 +35,7 @@ import {
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-// Local structural ExtensionAPI (T2 pattern continuation, see clients/
-// test-runner-delivery.ts). The @gsd vendor ExtensionAPI adds
-// registerBeforeInstall/After/Remove + scopedModels + isProjectTrusted that
-// the devDep ExtensionAPI used by tests/ via the legacy scope
-// NOT have. This interface lists ONLY the methods this module uses; both
-// vendor classes have more methods than listed here, so both satisfy this
-// structural type. Tests/ continue to construct the legacy-scope ExtensionAPI
-// mocks and pass them through this boundary unchanged; production code
-// retains direct typed access without per-call casts.
-//
-// `registerTool` deliberately takes `tool: any` instead of an imported
-// ToolDefinition type because @gsd's ToolDefinition.execute(ctx:
-// ExtensionContext) requires ExtensionContext.ui.setGsdProgress (a @gsd fork
-// addition), while the legacy-scope ToolDefinition has no such constraint.
-// Accepting the parameter as `any` lets the test mock's ToolDefinition (any
-// TParams/TDetails/TState generic) and the production-side @gsd ToolDefinition
-// both satisfy this surface; the internal tool dispatch path casts locally
-// where it needs the typed shape (see clients/runtime-tool-call.ts).
-interface ExtensionAPI {
-	registerTool: (tool: any) => void;
-	registerCommand: (
-		name: string,
-		options: {
-			description: string;
-			handler: (args: string, ctx: any) => Promise<void>;
-		},
-	) => void;
-	registerFlag: (
-		name: string,
-		options: {
-			description?: string;
-			type: "boolean" | "string";
-			default?: boolean | string;
-		},
-	) => void;
-	getFlag: (name: string) => boolean | string | undefined;
-	registerMessageRenderer: (customType: string, renderer: any) => void;
-	on(event: "resources_discover", listener: (...args: any[]) => any): void;
-	on(event: "session_start", listener: (...args: any[]) => any): void;
-	on(event: "tool_call", listener: (...args: any[]) => any): void;
-	on(event: "turn_start", listener: (...args: any[]) => any): void;
-	on(event: "agent_end", listener: (...args: any[]) => any): void;
-	on(event: "turn_end", listener: (...args: any[]) => any): void;
-	events: {
-		on: (channel: string, handler: (data: unknown) => void) => () => void;
-		emit: (channel: string, payload?: unknown) => void;
-	};
-	sendMessage: (message: any) => void;
-	sessionId?: string;
-	session?: any;
-	model?: any;
-	hasUI?: boolean;
-	newSession?: (options?: any) => Promise<any>;
-	fork?: (entryId: string, options?: any) => Promise<any>;
-	switchSession?: (sessionPath: string, switchOpts?: any) => Promise<any>;
-	reload?: () => Promise<void>;
-	getActiveTools?: () => string[];
-	setActiveTools?: (tools: string[]) => void;
-}
+import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import {
 	createDefaultHostPorts,
 	type HostPorts,
@@ -102,6 +46,7 @@ import {
 	markAnalyzerBootstrapShutdown,
 	peekBootstrapClients,
 	requestBootstrapClients,
+	getAgentBehaviorClient,
 	type SessionBootstrapAccess,
 } from "./clients/bootstrap.js";
 import { CacheManager } from "./clients/cache-manager.js";
@@ -113,7 +58,6 @@ import {
 	clearWidgetState,
 	exportWidgetState,
 	getFailedLspServerIds,
-	getFileDiagnosticSummaries,
 	getSessionLanguages,
 	importWidgetState,
 	type PersistedWidgetState,
@@ -121,6 +65,7 @@ import {
 	renderWidget,
 	scheduleStaleReconcile,
 	setRenderCallback,
+	wireWidgetDispositionSubscriber,
 } from "./clients/widget-state.js";
 import { selectLspStatus } from "./clients/lsp-status.js";
 import type { PersistedReadGuardState } from "./clients/read-guard.js";
@@ -136,6 +81,7 @@ import {
 	storedLineHashesFor,
 } from "./clients/observed-mutation-sources.js";
 import { classifyMutatingTool } from "./clients/mutating-tool.js";
+import { isEditClassToolResult } from "./clients/bash-file-access.js";
 import { resolveLanguageRootForFile } from "./clients/language-profile.js";
 import { countFileLines } from "./clients/read-guard-tool-lines.js";
 import { registerReadBridge } from "./clients/read-bridge.js";
@@ -176,12 +122,7 @@ import {
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
-import {
-	wireDiagnosticsBusEmitterGetter,
-	type PilensDiagnosticEntry,
-	type PilensDiagnosticsFileEntry,
-} from "./clients/diagnostics-publish.js";
-import { wireRpcBusSubscriber } from "./clients/rpc-publish.js";
+import { wireDiagnosticsBusEmitterGetter, type PilensDiagnosticEntry, type PilensDiagnosticsFileEntry } from "./clients/diagnostics-publish.js";
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
@@ -238,6 +179,8 @@ import {
 import { configureWarmAttach } from "./clients/warm-attach.js";
 import { checkCrossProcessLspBudget } from "./clients/lsp-budget.js";
 import { handleAgentEnd } from "./clients/runtime-agent-end.js";
+import { getFileDiagnosticSummaries } from "./clients/widget-state.js";
+import { wireRpcBusSubscriber } from "./clients/rpc-publish.js";
 import {
 	consumeSessionStartGuidance,
 	consumeTurnEndFindings,
@@ -320,6 +263,13 @@ import {
  * so the identity is this fixed marker, the same value the record's
  * `filePath` has carried since #192.
  */
+// SAFETY: pre-existing pattern from upstream v4.3.0 — `import.meta.url` is the
+// canonical entry-module URL for ESM (`"type": "module"`); the static
+// `no-import-meta-in-cjs` checker over-warns because `build:dist` *can*
+// emit a CJS bundle even though we never take that path. Singular local
+// binding lets downstream calls read `MODULE_URL` like any other string.
+const MODULE_URL = import.meta.url;
+
 const LOOP_BLOCK_IDENTITY = "<pi-lens>";
 import {
 	isFreshSessionStart,
@@ -525,13 +475,6 @@ export interface CreateHostPortsOptions {
 }
 
 /** Assemble pi's live ExtensionAPI/context projections behind HostPorts. */
-// SAFETY: `pi` is typed as the LOCAL structural `ExtensionAPI` (declared
-// above) — not as `ExtensionAPI` from @gsd — so the production signature
-// accepts both the @gsd vendor ExtensionAPI (the real host runtime, which
-// has more methods than the local interface) and the legacy-scope
-// devDep ExtensionAPI mock used by tests/. Internal call sites retain
-// direct typed access to the methods this module actually uses without
-// per-call casts.
 export function createHostPorts(
 	pi: ExtensionAPI,
 	options: CreateHostPortsOptions,
@@ -542,6 +485,10 @@ export function createHostPorts(
 		const bus = pi.events;
 		bus?.emit?.call(bus, channel, payload);
 	};
+	// SAFETY: `pi` is the optional host SDK (where present) and exposes the
+	// `getActiveTools`/`setActiveTools` hooks through its pi agent runtime,
+	// which the typebox `ExtensionAPI` does not declare. Structural narrowing
+	// here keeps the rest of the file typed without claiming a host contract.
 	const activeTools = pi as unknown as {
 		getActiveTools?: () => string[];
 		setActiveTools?: (names: string[]) => void;
@@ -600,6 +547,9 @@ export function createHostPorts(
 		},
 		flags: { get: (name) => pi.getFlag(name) },
 		tools: {
+			// SAFETY: probing for an optional `getTool(name)` hook on the host
+			// SDK without claiming it exists in the ExtensionAPI type. The
+			// runtime `=== undefined` check is the structural real check.
 			has: async (name) =>
 				typeof (
 					pi as unknown as { getTool?: (tool: string) => unknown }
@@ -647,22 +597,41 @@ const cacheManager = new CacheManager();
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
 let _readBridgeRegistered = false;
-let _readBridgeGetFlag:
+let _bridgeGetFlag:
 	| ((name: string) => boolean | string | undefined)
 	| undefined;
 // #2423: the mutation bridge is the write-side sibling of the read bridge and
 // follows its registration discipline exactly — mount once per process, refresh
 // the flag getter on every activation.
 let _mutationBridgeRegistered = false;
-let _mutationBridgeGetFlag:
-	| ((name: string) => boolean | string | undefined)
-	| undefined;
+
+/**
+ * Read a bridge flag without letting a session replacement obstruct the
+ * producer. The flag is advisory: if its captured ctx is stale, treating it
+ * as unset records the read/write instead of creating a false read-before-edit
+ * failure. This is the inverse of runtime-tool-result.ts's authorship rule,
+ * where absent evidence must never grant authority; both fail toward not
+ * obstructing the user at their respective seams.
+ */
+function getBridgeFlag(
+	getter: ((name: string) => boolean | string | undefined) | undefined,
+	bridge: "read" | "mutation",
+): boolean | string | undefined {
+	try {
+		return getter?.("no-read-guard");
+	} catch (err) {
+		if (!isStaleExtensionCtxError(err)) throw err;
+		recordDegradationOnce({
+			kind: "extension-ctx-stale",
+			subject: `${bridge}-bridge`,
+			reason: `${bridge}-bridge flag read met a stale extension ctx; treating the flag as unset`,
+		});
+		return undefined;
+	}
+}
 let _turnSummaryEmitRegistered = false;
 let _turnSummaryEmitCtx:
 	| {
-			// SAFETY: see createHostPorts — stored pi uses the local
-			// structural ExtensionAPI so the emit path tolerates both
-			// vendor shapes.
 			pi: ExtensionAPI;
 			getLensFlag: (name: string) => boolean | string | undefined;
 			isLensEnabled: () => boolean;
@@ -700,17 +669,17 @@ async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
  * This used to read `provider`/`model`/`sessionId`/`session.id`/`id` off the
  * EVENT. pi sets none of them on either event that called it: `session_start`
  * is `{ type, reason }`
- * (`@gsd/pi-coding-agent/dist/core/extensions/types.d.ts`'s `SessionStartEvent`
- * interface), and `tool_result` is exactly
+ * (`@gsd/pi-coding-agent/dist/core/agent-session.js:152`,
+ * `:2072`), and `tool_result` is exactly
  * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
- * (same `types.d.ts`'s `ToolResultEvent` interface). So every call passed
- * all-undefined, `setTelemetryIdentity` ignored it, and `runtime.telemetryModel`
- * stayed `"unknown"` for the whole session against a real host.
+ * (`dist/core/agent-session.js:243-256`, source
+ * `src/core/agent-session.ts:502-516`). So every call passed all-undefined,
+ * `setTelemetryIdentity` ignored it, and `runtime.telemetryModel` stayed
+ * `"unknown"` for the whole session against a real host.
  *
  * The ctx DOES carry the model. `ExtensionContext.model` is the live `Model`
- * (`@gsd/pi-coding-agent/dist/core/extensions/runner.js:488-491` →
- * `AgentSession.model`) with `id` and `provider`, defined by the host
- * `@gsd/pi-ai` package's model types.
+ * (`dist/core/extensions/runner.js:488-491` → `AgentSession.model`, `:580-582`)
+ * with `id` and `provider` (`@gsd/pi-ai/dist/types.d.ts:661-667`).
  *
  * SESSION ID IS DELIBERATELY NOT SET HERE. `runtime.setSessionLifecycle`
  * already pins it from `ctx.sessionManager.getSessionId()` inside
@@ -875,15 +844,14 @@ function activateExtension(hostPi: ExtensionAPI) {
 		getReadGuard: () => runtime.readGuard,
 		dbg,
 	});
-	// R009 / S07: project widget-state's per-file diagnostic summaries into the
-	// bus-pull RPC `PilensDiagnosticsFileEntry` shape (the same one
-	// `clients/diagnostics-publish.ts` #502 emits on the push side, so a
-	// requester can diff both deliveries without translating). Skips
-	// `stale`-demoted findings (#1631 dependency-drift, #1641 past-EOF) so a
-	// gate-retired diagnostic never reads as live over the wire, and filters
-	// `severity` to the `PilensDiagnosticEntry` literal union — anything
-	// outside the four canonical values is dropped (better an honest gap than
-	// a wire shape that drifts from the push publisher's contract).
+	wireWidgetDispositionSubscriber({ events: pi.events });
+	// R009 / S07: fork-only bus-pull RPC subscriber (sibling to
+	// `wireAgentNudgeSubscriber`, the other read-only bus subscriber; both are
+	// listed in the AGENTS.md "First-class seam census"). Lazily resolves
+	// diagnostic summaries and the recent-touches accumulator on each request,
+	// so the wiring survives session replacement — bus subscribers stay wired
+	// once at factory time, and the getters refresh their view of state on
+	// every call rather than snapshotting at wiring.
 	const readBusRpcDiagnosticsState = (): PilensDiagnosticsFileEntry[] => {
 		const summaries = getFileDiagnosticSummaries();
 		const out: PilensDiagnosticsFileEntry[] = [];
@@ -919,15 +887,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 		}
 		return out;
 	};
-	// R009 / S07: bus-pull RPC subscriber (sibling to
-	// `wireAgentNudgeSubscriber`, the other read-only bus subscriber; both
-	// are listed in the AGENTS.md "First-class seam census"). Lazily resolves
-	// `widgetState` (via the projection above) and the `_touched` accumulator
-	// (via `getAccumulatedRecentTouches`) on each request, so the wiring
-	// survives the #473 concurrent-secondary guard — session replacement
-	// rewires publishers through `refreshCtxDerivedPlumbing` but the bus
-	// subscribers stay wired once at factory time, and the getters refresh
-	// their view of state on every call rather than snapshotting at wiring.
 	wireRpcBusSubscriber({
 		events: pi.events,
 		getDiagnosticsState: readBusRpcDiagnosticsState,
@@ -948,6 +907,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 		theme: LspStatusTheme,
 	) {
 		try {
+			// #3099: opt-in off mode. Publishing undefined removes the key entirely
+			// so a host that renders extension statuses stops showing it at all —
+			// stronger than compact, which still publishes a glyph. Checked first
+			// and before any of the selection work below: off outranks compact
+			// when both are set, since there is nothing left to render compactly
+			// once the key itself is gone. Nothing leaves the surface — the ids
+			// stay reachable through /lens-tools and lens_health.
+			if (getLensFlag("lens-hide-lsp-status") === true) {
+				setStatus("pi-lens-lsp", undefined);
+				return;
+			}
 			// Active and Failed coexist (#170): show the working servers in green
 			// AND any language whose servers all failed in red, side by side. A
 			// failed server is suppressed when a live sibling covers its language
@@ -958,18 +928,30 @@ function activateExtension(hostPi: ExtensionAPI) {
 				getSessionLanguages(),
 			);
 			const parts: string[] = [];
+			// #3099: opt-in compact rendering. Server names stay the default (#267);
+			// the compact form trades them for one glyph per state group so the line
+			// fits a statusline that cannot spare the width. Nothing leaves the
+			// surface — the ids stay reachable through /lens-tools and lens_health.
+			const compact = getLensFlag("lens-compact-lsp-status") === true;
+			const activeText = compact
+				? "LSP ✓"
+				: `LSP Active: ${activeIds.join(", ")}`;
+			const failedText = compact
+				? "LSP ✗"
+				: `LSP Failed: ${failedIds.join(", ")}`;
+			const inactiveText = compact ? "LSP ✗" : "LSP Inactive";
 			if (activeIds.length > 0) {
-				parts.push(theme.fg("success", `LSP Active: ${activeIds.join(", ")}`));
+				parts.push(theme.fg("success", activeText));
 			}
 			if (failedIds.length > 0) {
-				parts.push(theme.fg("error", `LSP Failed: ${failedIds.join(", ")}`));
+				parts.push(theme.fg("error", failedText));
 			}
 			// Inactive is a passive state (no server running for this file, or the
 			// idle timer released them) — not a fault. Render it neutral/grey, not
 			// red, only when there is nothing else to show.
 			setStatus(
 				"pi-lens-lsp",
-				parts.length > 0 ? parts.join(" · ") : theme.fg("dim", "LSP Inactive"),
+				parts.length > 0 ? parts.join(" · ") : theme.fg("dim", inactiveText),
 			);
 		} catch (err) {
 			// Theme may not be fully initialized during early session startup.
@@ -1083,7 +1065,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// Read-bridge: refresh the flag getter on every factory activation so the
 	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
 	// Register the singleton once — subsequent activations only refresh the getter.
-	_readBridgeGetFlag = getLensFlag;
+	_bridgeGetFlag = getLensFlag;
 	if (!_readBridgeRegistered) {
 		_readBridgeRegistered = true;
 		registerReadBridge({
@@ -1091,7 +1073,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			getTurnIndex: () => runtime.turnIndex,
 			peekWriteIndex: () => runtime.peekWriteIndex(),
 			isRecordable(filePath: string): boolean {
-				if (_readBridgeGetFlag?.("no-read-guard")) return false;
+				// Unknown during a replacement/reload records the read. The guard is
+				// the obstruction here, so failure must fall toward not blocking the
+				// user's later edit; recording while disabled is harmless.
+				if (getBridgeFlag(_bridgeGetFlag, "read")) return false;
 				return isRecordableProjectPath(filePath, runtime.projectRoot);
 			},
 		});
@@ -1100,7 +1085,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// Mutation bridge (#2423): same live-getter discipline as the read bridge.
 	// An in-process producer that writes a file outside pi-lens's tool-event
 	// path records it here, and the same bookkeeping runs.
-	_mutationBridgeGetFlag = getLensFlag;
 	if (!_mutationBridgeRegistered) {
 		_mutationBridgeRegistered = true;
 		registerMutationBridge({
@@ -1126,7 +1110,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return isRecordableProjectPath(filePath, runtime.projectRoot);
 			},
 			shouldStampReadGuard(): boolean {
-				return !_mutationBridgeGetFlag?.("no-read-guard");
+				return !getBridgeFlag(_bridgeGetFlag, "mutation");
 			},
 			dbg,
 		});
@@ -1578,6 +1562,26 @@ function activateExtension(hostPi: ExtensionAPI) {
 				}
 			}
 
+			// #3255 round-3 verify: a pi user with no Stop hook and no `/lens-perf`
+			// read had no automatic notice that this session lost its warm
+			// incumbent to a renamed endpoint — the remedy (restart the peer) is
+			// not something the local fallback can discover. Rendered through the
+			// SHARED renderer on a summary filtered to that one kind, so the
+			// wording cannot drift from `/lens-perf` and `pilens_health` (the
+			// #2515 divergence this repo already paid for once) and `/lens-health`
+			// gains no output for any other degradation.
+			try {
+				lines.push(
+					...renderDegradationLines(
+						getDegradationSummary().filter(
+							(group) => group.kind === "warm-ipc-endpoint-missing",
+						),
+					),
+				);
+			} catch {
+				// best-effort — a health-line render must never break /lens-health
+			}
+
 			// LSP status
 			const lspClients = getLSPService().getStatus();
 			if (lspClients.length > 0) {
@@ -1888,12 +1892,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// The key is cleared per factory instance because pi re-runs the factory on
 	// every replacement; if that ever changes, clear the key in session_shutdown.
 	let lastSessionStartIdentity: string | undefined;
+	// SAFETY: structural narrowing for the optional host SDK hooks
+	// (getActiveTools/setActiveTools), identical to the `activeTools`
+	// projection above; duplicated here because the activate-tools tool
+	// receives its own narrowed view at call time.
 	const activateToolsTool = createActivateToolsTool(
-		// SAFETY: `getActiveTools`/`setActiveTools` are not on the pinned
-		// host's ExtensionAPI baseline (they live behind a dynamic-tooling
-		// feature flag); the cast narrows pi to the minimal surface
-		// createActivateToolsTool actually reads, with the methods
-		// themselves optional to tolerate older hosts.
 		pi as unknown as {
 			getActiveTools?: () => string[];
 			setActiveTools?: (names: string[]) => void;
@@ -2041,7 +2044,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// load nothing there (#2626). Never turn the health check into a [] return:
 		// that inversion dropped real skills on four pi layouts in #2637 round 1.
 		return {
-			skillPaths: resolveSkillPaths(import.meta.url),
+			skillPaths: resolveSkillPaths(MODULE_URL),
 		};
 	});
 
@@ -2095,14 +2098,33 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// With neither a stable session ID nor a session file, fail open: the
 				// event cannot be safely identified for duplicate suppression.
 				const liveToolPlan = (() => {
+					// SAFETY: probing for the optional host SDK's getActiveTools
+					// hook (declared dynamically, not on the ExtensionAPI typebox).
+					// The `typeof ... === "function"` check is the structural real
+					// check before any narrowing is used downstream.
+					// SAFETY: structural narrowing for the optional host SDK's
+					// getActiveTools hook (declared dynamically, not on the
+					// ExtensionAPI typebox). The typeof check below is the
+					// only check that proves the runtime shape before any
+					// narrowing is consumed by the `try` block below.
 					if (
 						getLensFlag("no-lazy-tools") === true ||
-						typeof (pi as unknown as { getActiveTools?: unknown })
-							.getActiveTools !== "function"
+						typeof (
+							// SAFETY: structural narrowing for the optional host
+							// SDK's getActiveTools hook (declared dynamically, not
+							// on the ExtensionAPI typebox). The `=== "function"`
+							// check on the result is the real runtime gate.
+							pi as unknown as { getActiveTools?: unknown }
+						).getActiveTools !== "function"
 					) {
 						return undefined;
 					}
 					try {
+						// SAFETY: structural narrowing for the now-confirmed
+						// optional host hook (typeof === "function" gate above).
+						// The function-call below would still fail if the host
+						// removes the hook mid-flight; the try/catch returns
+						// undefined in that case.
 						const piWithActiveTools = pi as unknown as {
 							getActiveTools: () => string[];
 						};
@@ -2169,7 +2191,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// getBuildIdentity is a pure fs read (no spawn) and returns
 					// undefined inside the test runner, so nothing is computed when
 					// this line would be a no-op anyway.
-					const buildIdentity = getBuildIdentity(import.meta.url);
+					// oxlint-disable-next-line typescript(no-invalid-use-of-this) -- import.meta.url resolves to the entry module URL at runtime; the package is ESM (`"type": "module"`) and is never built for CommonJS, so the static checker over-warns here.
+					const buildIdentity = getBuildIdentity(MODULE_URL);
 					if (buildIdentity) dbg(formatBuildIdentity(buildIdentity));
 					const sessionReason = sessionStartReason;
 					dbg(
@@ -2363,11 +2386,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// `--no-lazy-tools` nothing is touched at all: all-active IS the
 					// requested posture.
 					try {
-						// SAFETY: same narrowing as the createActivateToolsTool
-						// call above — these methods are not on every host's
-						// ExtensionAPI baseline, so we cast through `unknown`
-						// and probe with `typeof` rather than assuming the
-						// pinned devDependency version's API exists at runtime.
+						// SAFETY: structural narrowing for the optional host SDK
+						// hooks (getActiveTools/setActiveTools); the try/catch
+						// below handles runtime absence on hosts that don't ship
+						// either hook (every host the broad `@gsd/pi-coding-agent`
+						// peer dependency allows).
 						const piWithActiveTools = pi as unknown as {
 							getActiveTools?: () => string[];
 							setActiveTools?: (names: string[]) => void;
@@ -2518,34 +2541,42 @@ function activateExtension(hostPi: ExtensionAPI) {
 					// session_start_prehandler row. Keep this inside the primary gate so
 					// a concurrent secondary cannot erase the primary's live counter.
 					resetTurnContext(stableSessionId);
-					await handleSessionStart({
-						ctxCwd: ctx.cwd,
-						sessionStartFiredAt,
-						sessionStartMonotonicAt,
-						extensionLoadedAt: PI_LENS_LOADED_AT_MS,
-						emitHostReadyDelay,
-						sessionReason,
-						handlerEnteredAt,
-						globalConfig,
-						projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
-						// #2129: this call site is only reached for "primary"/
-						// "sequential-replacement" — a declined start returned above.
-						sessionStartClassification: sessionStartDecision.classification,
-						sessionStartSameRoot: sessionStartDecision.sameRoot,
-						getFlag: (name: string) => getLensFlag(name),
-						notify: (msg, level) => notifyUi(ctx, msg, level),
-						dbg,
-						log,
-						runtime,
-						cacheManager,
-						astGrepClient,
-						bootstrap: sessionBootstrapAccess,
-						ensureTool: async (name: string) =>
-							(await import("./clients/installer/index.js")).ensureTool(name),
-						cleanStaleTsBuildInfo,
-						resetDispatchBaselines,
-						resetLSPService,
-					});
+					await bounded(
+						handleSessionStart({
+							ctxCwd: ctx.cwd,
+							sessionStartFiredAt,
+							sessionStartMonotonicAt,
+							extensionLoadedAt: PI_LENS_LOADED_AT_MS,
+							emitHostReadyDelay,
+							sessionReason,
+							handlerEnteredAt,
+							globalConfig,
+							projectConfig: loadPiLensProjectConfig(runtime.projectRoot),
+							// #2129: this call site is only reached for "primary"/
+							// "sequential-replacement" — a declined start returned above.
+							sessionStartClassification: sessionStartDecision.classification,
+							sessionStartSameRoot: sessionStartDecision.sameRoot,
+							getFlag: (name: string) => getLensFlag(name),
+							notify: (msg, level) => notifyUi(ctx, msg, level),
+							dbg,
+							log,
+							runtime,
+							cacheManager,
+							astGrepClient,
+							bootstrap: sessionBootstrapAccess,
+							ensureTool: async (name: string) =>
+								(await import("./clients/installer/index.js")).ensureTool(name),
+							cleanStaleTsBuildInfo,
+							resetDispatchBaselines,
+							resetLSPService,
+						}),
+						{
+							ms: HOOK_WALL_BUDGET_MS.session_start,
+							signal: ctx.signal,
+							hook: "session_start",
+							label: "handleSessionStart",
+						},
+					);
 					if (ctx.ui) updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
 
 					// Pin the stable identity + reason AFTER handleSessionStart (which ran
@@ -2711,19 +2742,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 		if (toolEntry && "situational" in toolEntry && toolEntry.situational) {
 			observeSituationalToolCall(toolEntry.name);
 		}
+		// SAFETY: `handleToolCall`'s parameter shape is a discriminated
+		// Event | Ctx union that the ExtensionAPI typebox does not narrow by
+		// tool. The runtime check inside handleToolCall re-validates each
+		// event/ctx pair against its tool kind before dispatch.
 		return handleToolCall({
-			// SAFETY: `event` and `ctx` are typed as the host SDK's
-			// `ToolCallEvent`/`ExtensionContext` (devDep-narrowed to the
-			// the legacy-scope devDep), but the production `handleToolCall`
-			// parameter type uses the local structural shapes from
-			// `clients/runtime-tool-call.ts` (post-T4 #2435 bridge).
-			// The runtime contract is identical; the cast widens only
-			// the compile-time nominal type.
 			event: event as unknown as Parameters<typeof handleToolCall>[0]["event"],
-			// SAFETY: same nominal-type widening as the `event` cast above —
-			// the host SDK types event/ctx against the legacy-scope devDep
-			// while handleToolCall uses the local structural shapes from
-			// clients/runtime-tool-call.ts; runtime contract is identical.
 			ctx: ctx as unknown as Parameters<typeof handleToolCall>[0]["ctx"],
 			lensEnabled,
 			getFlag: (name: string) => getLensFlag(name),
@@ -2762,6 +2786,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 		// `index.ts` and `tools/` too.
 		const rtToolName = (event as { toolName?: string })?.toolName;
 		const rtMutation = classifyMutatingTool(event, { recognizeOnly: true });
+		// #2939 F3: one edit-class predicate, shared with the `budgetKey`
+		// callback below — the two copies used to disagree on third-party
+		// shell tools carrying `input.command`.
+		const editClass = isEditClassToolResult(
+			event as { toolName?: string; input?: { command?: unknown } },
+			ctx?.cwd ?? runtime.projectRoot ?? process.cwd(),
+		);
 		if (rtMutation) {
 			logLatency({
 				type: "phase",
@@ -2778,33 +2809,64 @@ function activateExtension(hostPi: ExtensionAPI) {
 				},
 			});
 		}
+		// Read/search results still need the complete handler for read registration,
+		// bash recovery, and observed third-party mutations. Use only resident
+		// clients on that path; the handler requests them lazily if mutation work
+		// actually reaches the pipeline.
 		try {
-			const { biomeClient, ruffClient, metricsClient, agentBehaviorClient } =
-				await loadBootstrapClients();
-			return await handleToolResult({
-				event: event as any,
-				getFlag: (name: string, filePath?: string) =>
-					getLensFlag(name, filePath),
-				getFlagSource: (name: string, filePath?: string) =>
-					getLensFlagSource(name, filePath),
-				dbg,
-				runtime,
-				cacheManager,
-				biomeClient,
-				ruffClient,
-				metricsClient,
-				resetLSPService,
-				readGuard: runtime.readGuard,
-				agentBehaviorRecord: (toolName, filePath) =>
-					agentBehaviorClient.recordToolCall(toolName, filePath),
-				formatBehaviorWarnings: (warnings) =>
-					agentBehaviorClient.formatWarnings(warnings as any),
-				// #791: tags any deferred-format record queued from this tool_result
-				// with the STABLE session id of the ctx that produced it, so a
-				// later agent_end can tell its own queued work apart from a
-				// concurrent in-process secondary session's.
-				sessionId: getStableSessionId(ctx),
-			});
+			const resident = editClass
+				? await bounded(loadBootstrapClients(), {
+						ms: HOOK_WALL_BUDGET_MS.tool_result_edit,
+						signal: ctx.signal,
+						hook: "tool_result_edit",
+						label: "tool-result-bootstrap",
+					})
+				: peekBootstrapClients();
+			// `return await`, not `return`: this `try` has a `finally` that clears
+			// the ambient abort signal. Without the await the `finally` runs the
+			// instant the promise is RETURNED, so the slot is empty for the whole
+			// pipeline and an Escape mid-edit no longer kills its child processes
+			// (#2897 round 2 V2; #2939 round 2 restored it after measuring the
+			// deletion observable).
+			return await bounded(
+				handleToolResult({
+					signal: ctx.signal,
+					event: event as any,
+					getFlag: (name: string, filePath?: string) =>
+						getLensFlag(name, filePath),
+					getFlagSource: (name: string, filePath?: string) =>
+						getLensFlagSource(name, filePath),
+					dbg,
+					runtime,
+					cacheManager,
+					biomeClient: resident?.biomeClient,
+					ruffClient: resident?.ruffClient,
+					metricsClient: resident?.metricsClient,
+					resetLSPService,
+					readGuard: runtime.readGuard,
+					agentBehaviorRecord: (toolName, filePath) =>
+						(
+							resident?.agentBehaviorClient ?? getAgentBehaviorClient()
+						).recordToolCall(toolName, filePath),
+					formatBehaviorWarnings: (warnings) =>
+						(
+							resident?.agentBehaviorClient ?? getAgentBehaviorClient()
+						).formatWarnings(warnings as any),
+					// #791: tags any deferred-format record queued from this tool_result
+					// with the STABLE session id of the ctx that produced it, so a
+					// later agent_end can tell its own queued work apart from a
+					// concurrent in-process secondary session's.
+					sessionId: getStableSessionId(ctx),
+				}),
+				{
+					ms: editClass
+						? HOOK_WALL_BUDGET_MS.tool_result_edit
+						: HOOK_WALL_BUDGET_MS.tool_result_read_only,
+					signal: ctx.signal,
+					hook: editClass ? "tool_result_edit" : "tool_result_read_only",
+					label: "handleToolResult",
+				},
+			);
 		} finally {
 			setAmbientAbortSignal(undefined);
 		}
@@ -2812,7 +2874,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
 	(pi as any).on(
 		"tool_result",
-		wrapSessionEventHandler("tool_result", onToolResult, { dbg }),
+		wrapSessionEventHandler("tool_result", onToolResult, {
+			dbg,
+			budgetKey: (event, _ctx) => {
+				try {
+					// #2939 F3: the same predicate as the handler body above.
+					return isEditClassToolResult(
+						event as { toolName?: string; input?: { command?: unknown } },
+						(_ctx as { cwd?: string })?.cwd ??
+							runtime.projectRoot ??
+							process.cwd(),
+					)
+						? "tool_result_edit"
+						: "tool_result_read_only";
+				} catch {
+					return "tool_result_read_only";
+				}
+			},
+		}),
 	);
 
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
@@ -2879,8 +2958,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// finishes A run — including a run that is about to auto-retry or resume
 	// after overflow-compaction. pi computes `willRetry` only AFTER emitting
 	// this event and never exposes it to extensions (source-level audit:
-	// `AgentEndEvent` is `{type, messages}` only; see
-	// vendor/pi-coding-agent/dist/core/extensions/types.d.ts).
+	// `AgentEndEvent` is `{type, messages}` only, pi agent-session.ts:643-645;
+	// see node_modules/@gsd/pi-coding-agent/dist/core/extensions/types.d.ts).
 	// The #1387 deferred-format/autofix drain below therefore used to be able
 	// to fire MID-RUN, between retries — formatting files the agent is still
 	// actively working on, which can shift lines under queued work and stale
@@ -3046,6 +3125,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			return;
 		}
 		await handleAgentEnd({
+			signal: ctx.signal,
 			ctxCwd: ctx.cwd,
 			getFlag: (name: string, filePath?: string) => getLensFlag(name, filePath),
 			getFlagSource: (name: string, filePath?: string) =>
@@ -3395,10 +3475,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// next turn_end merges), reusing the existing neighbor→turn-end formatting —
 	// previously this outcome was logs-only, a silent under-report (#533).
 	registerCascadeTierReconcileTask(() => getLSPService(), {
-		onResolvedFound: ({ filePath, diagnostics }) => {
+		onResolvedFound: ({ filePath, diagnostics, publishedAt }) => {
 			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, {
 				filePath,
 				diagnostics,
+				publishedAt,
 			});
 			// #1443: the appended run outlives this turn's consumption —
 			// `beginTurn` carries it into the next turn_end exactly once instead
