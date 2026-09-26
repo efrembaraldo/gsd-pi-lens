@@ -2,6 +2,10 @@
 
 All notable changes to pi-lens will be documented in this file.
 
+## Modifiche strutturali rispetto a pi-lens
+
+Forked from [apmantza/pi-lens](https://github.com/apmantza/pi-lens), now aligned with upstream through release `4.3.0` via M004 alignment (the full upstream history from `1.1.2` through `4.3.0` is preserved verbatim below; fork release line `[0.1.0]`–`[0.1.1]` was absorbed into `[Unreleased]` rather than re-emitted as separate version headers, since the post-merge fork ships under the upstream release numbering). Independent fork release line published on npm as `@efrembaraldo/gsd-pi-lens` under the host scope `@gsd/*`. Default branch: `master`. Dedicated CI pipeline and publish workflow on `master`; the publish job uses OIDC provenance (`id-token: write`, no `NPM_TOKEN`). Host type declarations are regenerated from a verified GSD checkout: `.d.ts` (and runtime `.js` where required) for `@gsd/pi-coding-agent` and `@gsd/pi-tui` are vendored, and the runtime closure (`@gsd/native`, `get-east-asian-width`, `marked`) is materialized into the package's dependency closure — both stages idempotent and re-run after every install. Fork-specific verification guards: `host-sdk-type-only`, `deps-centralization`, `pi-host-contract`. Fork-only features preserved across the M004 merge: RPC bus pull surface (R009, `pilens:rpc:*`), pre-release gate (`scripts/pre-release-checklist.mjs`), publish.yml OIDC workflow, `release.yml` removed (fork-only publish owns releases), 7 non-essential workflows disabled to `workflow_dispatch` only (`ci-infra-kill-rerun`, `greetings`, `labels`, `merge-train-lane`, `merge-train-warden`, `stale`, `stale-open-issues`), error-debt baseline (`runtime-session-error-debt-baseline.test.ts`), MCP fresh warm-up honesty (`fresh-warmup-honesty.smoke.test.ts`), and vendoring of `@opengsd/gsd-pi` 1.19.0 as the host scope.
+
 ## [Unreleased]
 
 ### Added
