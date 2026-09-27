@@ -31,7 +31,7 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import {
 	createBashToolDefinition,
 	createReadToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+} from "@gsd/pi-coding-agent";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
@@ -242,9 +242,8 @@ describe("bash grep searchReads registration", () => {
 				Array.from({ length: 3000 }, (_, i) => `line${i + 1}`).join("\n") +
 					"\n",
 			);
-			const bashTool = createBashToolDefinition(env.tmpDir, {
-				exposeSessionEnvironment: false,
-			});
+			// exposeSessionEnvironment removed in vendored pi-coding-agent post-merge v4.3.0 (#3259) — option no longer in BashToolOptions
+			const bashTool = createBashToolDefinition(env.tmpDir, {});
 			const result = await bashTool.execute(
 				"2802",
 				{ command: `cat ${filePath}` },
@@ -355,9 +354,8 @@ describe("bash grep searchReads registration", () => {
 				updateLspStatus: () => {},
 				resetLSPService: () => {},
 			} as any);
-			const bashTool = createBashToolDefinition(env.tmpDir, {
-				exposeSessionEnvironment: false,
-			});
+			// exposeSessionEnvironment removed in vendored pi-coding-agent post-merge v4.3.0 (#3259) — option no longer in BashToolOptions
+			const bashTool = createBashToolDefinition(env.tmpDir, {});
 			const result = await bashTool.execute(
 				"2802-noop",
 				{ command },
@@ -427,9 +425,8 @@ describe("bash grep searchReads registration", () => {
 				updateLspStatus: () => {},
 				resetLSPService: () => {},
 			} as any);
-			const bashTool = createBashToolDefinition(env.tmpDir, {
-				exposeSessionEnvironment: false,
-			});
+			// exposeSessionEnvironment removed in vendored pi-coding-agent post-merge v4.3.0 (#3259) — option no longer in BashToolOptions
+			const bashTool = createBashToolDefinition(env.tmpDir, {});
 			const result = await bashTool.execute(
 				"2802-unknown-authorship",
 				{ command },
