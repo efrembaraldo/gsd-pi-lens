@@ -8,8 +8,11 @@ import { describe, expect, it } from "vitest";
  *
  * The fork renamed the host SDK scope `@earendil-works/*` → `@gsd/*`. This
  * guard pins the migrate-off-scope baseline: no file in the tracked tree may
- * carry an `/earendil/i` reference except the two documented whitelisted files:
+ * carry an `/earendil/i` reference except the four documented whitelisted files:
  *   - CHANGELOG.md                  — historical changelog body (upstream prose)
+ *   - HISTORY.md                    — historical release-history record (upstream prose)
+ *   - tests/workflows/fork-disclosure.test.ts — `expect(...).not.toContain("earendil-works")`
+ *     absence assertion (S02 slice disclosure check), not real usage.
  *   - tests/workflows/fork-workflows.test.ts — `expect(...).not.toContain("earendil-works")`
  *     assertions, i.e. absence assertions, not real usage.
  *
@@ -97,8 +100,18 @@ describe("scope migration baseline (S01)", () => {
 		const hits = filesMatching(SCOPE_REFERENCE, walkRepo())
 			.filter((p) => p !== SELF_RELATIVE)
 			.sort();
+		// HISTORY.md is part of the whitelist on the same footing as CHANGELOG.md:
+		// it is a pre-fork release-history document that records contractual events
+		// occurring BEFORE the August-September 2026 scope migration to `@gsd/*`.
+		// Those historical references to the legacy scope are part of the factual
+		// record and must not be retroactively rewritten; the guard protects
+		// active source/config/test/workflow files from re-introducing the legacy
+		// scope, while pre-fork historical documentation is intentionally out of
+		// protection scope. See the docblock at the top of this file for the full
+		// rationale and the corresponding CHANGELOG.md whitelist policy.
 		const expected = [
 			"CHANGELOG.md",
+			"HISTORY.md",
 			"tests/workflows/fork-disclosure.test.ts",
 			"tests/workflows/fork-workflows.test.ts",
 		].sort();
