@@ -39,6 +39,7 @@ vi.mock("../../clients/extension-log.js", async (importOriginal) => {
 const tmpDirs: string[] = [];
 let previousConfigPath: string | undefined;
 let previousAgentDir: string | undefined;
+let previousGsdAgentDir: string | undefined;
 let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 let previousEnvValues = new Map<string, string | undefined>();
@@ -104,6 +105,12 @@ beforeEach(() => {
 	// must not decide which file these assertions read.
 	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	delete process.env.PI_CODING_AGENT_DIR;
+	// resolveAgentDir() (clients/config-locations.ts) prefers GSD_CODING_AGENT_DIR
+	// (set by the gsd-pi host) over PI_CODING_AGENT_DIR; the same hermeticity
+	// rule applies — the ambient value must not decide which file these
+	// assertions read.
+	previousGsdAgentDir = process.env.GSD_CODING_AGENT_DIR;
+	delete process.env.GSD_CODING_AGENT_DIR;
 	resetGlobalConfigWarnCache();
 	resetGlobalConfigLocationCache();
 	vi.spyOn(console, "error").mockImplementation(() => {});
@@ -116,6 +123,9 @@ afterEach(() => {
 	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	if (previousGsdAgentDir === undefined)
+		delete process.env.GSD_CODING_AGENT_DIR;
+	else process.env.GSD_CODING_AGENT_DIR = previousGsdAgentDir;
 	if (previousHome === undefined) delete process.env.HOME;
 	else process.env.HOME = previousHome;
 	if (previousUserProfile === undefined) delete process.env.USERPROFILE;

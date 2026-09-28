@@ -8,13 +8,18 @@ import { describe, expect, it } from "vitest";
  *
  * The fork renamed the host SDK scope `@earendil-works/*` → `@gsd/*`. This
  * guard pins the migrate-off-scope baseline: no file in the tracked tree may
- * carry an `/earendil/i` reference except the four documented whitelisted files:
+ * carry an `/earendil/i` reference except the five documented whitelisted files:
  *   - CHANGELOG.md                  — historical changelog body (upstream prose)
  *   - HISTORY.md                    — historical release-history record (upstream prose)
  *   - tests/workflows/fork-disclosure.test.ts — `expect(...).not.toContain("earendil-works")`
  *     absence assertion (S02 slice disclosure check), not real usage.
  *   - tests/workflows/fork-workflows.test.ts — `expect(...).not.toContain("earendil-works")`
  *     assertions, i.e. absence assertions, not real usage.
+ *   - tests/scripts/m004-s02-scope-validation.mjs — M004/S02 persistent
+ *     regression script (sibling to m004-s01-strategy-validation.mjs); it
+ *     literal-string-tests the legacy scope (`@earendil-works`) by design and
+ *     therefore belongs to the same "absence-of-real-usage" whitelist class
+ *     as the two fork-workflows.test.ts assertions.
  *
  * The walk is an `fs` walk (per the S01 contract) over the working tree with
  * git/build/noise trees excluded by name. Reintroducing a scope reference in
@@ -112,6 +117,7 @@ describe("scope migration baseline (S01)", () => {
 		const expected = [
 			"CHANGELOG.md",
 			"HISTORY.md",
+			"tests/scripts/m004-s02-scope-validation.mjs",
 			"tests/workflows/fork-disclosure.test.ts",
 			"tests/workflows/fork-workflows.test.ts",
 		].sort();

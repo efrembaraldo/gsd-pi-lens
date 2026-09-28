@@ -323,6 +323,40 @@ function agentConfigPathFor(agentDir: string): string {
 }
 
 /**
+ * Read the ambient env that names the coding-agent directory.
+ *
+ * Prefers `GSD_CODING_AGENT_DIR` (set by the `gsd-pi` host) over the upstream
+ * `PI_CODING_AGENT_DIR` (set by `pi-coding-agent`). When both are set,
+ * `GSD_CODING_AGENT_DIR` wins; when both are empty or whitespace-only the
+ * function returns `undefined` so the caller's downstream check
+ * (`agentDir ? ... : undefined`) behaves identically to "env unset".
+ *
+ * Trim is unconditional on whichever value wins — a whitespace-only env is
+ * treated as ABSENT (the `||` chain collapses `""` to the next tier). The
+ * tier walk accepts a bare value (`"  /agent  "` resolves the same as
+ * `"/agent"`), so the helper performs no validation beyond trim.
+ *
+ * Stateless and context-free: the call site that OWNS the resolution context
+ * (a test injecting `homeDir`, say) decides whether to honor the ambient env
+ * at all. `resolveGlobalConfigLocation`'s `owned ? undefined : ...` branch
+ * reads from here but never asks the helper to know about ownership — the
+ * helper cannot tell one caller from another.
+ *
+ * #2457: the global-config-location PR introduced the direct env reads this
+ * helper now centralizes; the fingerprint memo additionally observes
+ * `GSD_CODING_AGENT_DIR` so a pre-swap cache cannot serve a stale resolution.
+ *
+ * @returns The trimmed env value, or `undefined` when neither variable is set.
+ */
+export function resolveAgentDir(): string | undefined {
+	return (
+		process.env.GSD_CODING_AGENT_DIR?.trim() ||
+		process.env.PI_CODING_AGENT_DIR?.trim() ||
+		undefined
+	);
+}
+
+/**
  * Resolve which file supplies the global config tier (see
  * `GlobalConfigLocationSource` for the order).
  *
@@ -384,7 +418,7 @@ export function resolveGlobalConfigLocation(
 			return "error";
 		}
 	};
-	const agentDir = owned ? undefined : process.env.PI_CODING_AGENT_DIR?.trim();
+	const agentDir = owned ? undefined : resolveAgentDir();
 	const agentPath = agentDir ? agentConfigPathFor(agentDir) : undefined;
 	const legacyProbe = probe(legacyDefault);
 	if (legacyProbe === "present") {
@@ -456,6 +490,7 @@ let memoizedGlobalConfigResolution: GlobalConfigResolutionMemo | undefined;
 
 function globalConfigEnvFingerprint(): string {
 	return JSON.stringify([
+		process.env.GSD_CODING_AGENT_DIR,
 		process.env.PI_LENS_CONFIG_PATH,
 		process.env.PI_CODING_AGENT_DIR,
 	]);
@@ -560,7 +595,7 @@ function recognizedGlobalConfigPaths(): Set<string> {
 				path.join(os.homedir(), ".pi-lens", CANONICAL_GLOBAL_CONFIG_FILE),
 			),
 		);
-		const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
+		const agentDir = resolveAgentDir();
 		if (agentDir)
 			paths.add(canonicalPathIdentity(agentConfigPathFor(agentDir)));
 		recognizedCache = { fingerprint, paths };

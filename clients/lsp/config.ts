@@ -406,9 +406,9 @@ export async function loadLSPConfig(
 		globalDir: getGlobalPiLensDir(),
 		// The global tier reads the PRODUCTION resolution (global-config-location
 		// PR, refs #2457): which file supplies it is an env fact (PI_LENS_CONFIG_PATH,
-		// then a legacy default, then PI_CODING_AGENT_DIR, then the
-		// PI_LENS_HOME-relocated canonical default), not a property of the
-		// `$HOME` this call's project walk is ceiling-bounded by. `homeDir`
+		// then a legacy default, then GSD_CODING_AGENT_DIR (or PI_CODING_AGENT_DIR),
+		// then the PI_LENS_HOME-relocated canonical default), not a property of
+		// the `$HOME` this call's project walk is ceiling-bounded by. `homeDir`
 		// stays threaded below for the walk and `globalDir`; a test redirecting
 		// the global tier does it through the env, the same way production is
 		// controlled.

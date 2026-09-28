@@ -42,6 +42,7 @@ const savedEnv = new Map<string, string | undefined>();
 const OVERRIDDEN_ENV_KEYS = [
 	"PI_LENS_CONFIG_PATH",
 	"PI_CODING_AGENT_DIR",
+	"GSD_CODING_AGENT_DIR",
 	"PI_LENS_HOME",
 	"HOME",
 	"USERPROFILE",
