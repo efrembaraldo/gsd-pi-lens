@@ -105,6 +105,13 @@ export const SECRETS_LANE_SCRATCH_DIR_NAMES: readonly string[] = [
 	// project-local session history and can report a key a user pasted into a
 	// transcript as a blocking first-party leak.
 	".omp",
+	// gsd-pi — pi-lens's own host — applies the same `pkg.piConfig?.configDir`
+	// rule (see `clients/config-locations.ts::resolveAgentDir`), so
+	// `.gsd/agent/sessions/<uuid>.jsonl` is the same transcript history
+	// `.pi/agent/sessions` holds. Without this entry the secrets lane reads
+	// project-local session transcripts and reports keys a user pasted into
+	// the conversation as blocking first-party leaks (#1562 class).
+	".gsd",
 	".pi-lens",
 	".claude",
 	".codex",

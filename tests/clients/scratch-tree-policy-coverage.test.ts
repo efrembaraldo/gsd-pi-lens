@@ -132,6 +132,31 @@ describe("scratch-tree-policy — secrets-lane tier is narrower than walker-pari
 		}
 	});
 
+	// M004/S03/T02: gsd-pi — pi-lens's own host — applies the same
+	// `pkg.piConfig?.configDir` rule, so `.gsd/agent/sessions/<uuid>.jsonl` is
+	// the same transcript history `.pi/agent/sessions` holds. Without
+	// `.gsd` in the secrets-lane list, a session transcript a user pasted a
+	// key into is reported as a blocking first-party leak (#1562 class).
+	// The three tests below pin that presence: a future refactor that
+	// removes `.gsd` "because nothing in this fork uses it" turns all three
+	// red — the walker-parity length test alone would not (#3178 class).
+	it("still excludes the gsd-pi configDir (.gsd) under secrets lane", () => {
+		expect(isUnderSecretsLaneScratchTree(".gsd/agent/sessions/abc.jsonl")).toBe(
+			true,
+		);
+		expect(isUnderSecretsLaneScratchTree(".gsd/runtime/last-error.json")).toBe(
+			true,
+		);
+	});
+
+	it("EXCLUDED_DIRS contains the gsd-pi configDir (.gsd) — prevents silent refactor removal", () => {
+		expect(EXCLUDED_DIRS).toContain(".gsd");
+	});
+
+	it("SECRETS_LANE_SCRATCH_DIR_NAMES contains the gsd-pi configDir (.gsd) — prevents silent refactor removal", () => {
+		expect(SECRETS_LANE_SCRATCH_DIR_NAMES).toContain(".gsd");
+	});
+
 	it("rejects an ordinary source path and doesn't false-positive on a substring match", () => {
 		expect(isUnderSecretsLaneScratchTree("src/config.ts")).toBe(false);
 		// Must not false-positive on a filename that merely CONTAINS an

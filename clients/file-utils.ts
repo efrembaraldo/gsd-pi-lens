@@ -367,6 +367,15 @@ export const EXCLUDED_DIRS = [
 	// startup-scan entry budget, so a five-file project reported
 	// `too-many-entries` and never warmed its caches.
 	".omp",
+	// gsd-pi — pi-lens's own host — uses `.gsd` as its configDir (same
+	// `pkg.piConfig?.configDir` rule applied to `@opengsd/gsd-pi`'s package
+	// metadata), so its `<configDir>/agent/sessions/<uuid>.jsonl` transcript
+	// history, `.gsd/runtime/last-error.json` error log, and `.gsd/forensics/`
+	// dump directory all live here. Without this entry, in-process walkers
+	// would read session transcripts (false-positive secrets-lane matches,
+	// #1562 class) and the startup-scan would burn its entry budget on
+	// `.gsd/agent/sessions/*` (#3112 class).
+	".gsd",
 	".ruff_cache", // Python linter cache
 	".worktrees",
 	".claude",
