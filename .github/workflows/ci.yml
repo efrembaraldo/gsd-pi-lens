@@ -654,7 +654,7 @@ jobs:
           fi
           echo "Production --omit=dev build + load OK"
 
-      # The faithful reproduction of `pi install git:github.com/apmantza/pi-lens`
+      # The faithful reproduction of `pi install git:<repo-url>`
       # (#437): pi CLONES the repo and runs `npm install --omit=dev` in a PRISTINE
       # tree (no pre-existing node_modules / dev artifacts), which runs the WHOLE
       # `prepare` — build:dist (npx-resolved tsc, since typescript is a devDep and

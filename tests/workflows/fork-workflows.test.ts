@@ -64,7 +64,13 @@ function jobNodeVersion(job: Job | undefined): unknown {
 	for (const s of job.steps) {
 		if (typeof s?.uses === "string" && s.uses.includes("actions/setup-node")) {
 			const withMap = s.with as Record<string, unknown> | undefined;
-			return withMap?.["node-version"];
+			// ci.yml quotes node-version as '22' (YAML string) in most jobs and
+			// leaves `test` unquoted (YAML number). Normalize to Number so the
+			// assertion matches both spellings and any future patch bump.
+			const v = withMap?.["node-version"];
+			return typeof v === "string" || typeof v === "number"
+				? Number(v)
+				: undefined;
 		}
 	}
 	return undefined;
@@ -88,8 +94,9 @@ describe("ci.yml (fork)", () => {
 		expect(on).toHaveProperty("workflow_dispatch");
 	});
 
-	it("declares both the build and prod-install-build jobs", () => {
-		expect(parsed.jobs).toHaveProperty("build");
+	it("declares dependency-boundaries, test, and prod-install-build jobs", () => {
+		expect(parsed.jobs).toHaveProperty("dependency-boundaries");
+		expect(parsed.jobs).toHaveProperty("test");
 		expect(parsed.jobs).toHaveProperty("prod-install-build");
 	});
 
@@ -99,32 +106,50 @@ describe("ci.yml (fork)", () => {
 		expect(perms?.["contents"]).toBe("read");
 	});
 
-	it("runs the build job on Node 22", () => {
-		expect(jobNodeVersion(parsed.jobs?.build)).toBe(22);
+	// Post v4.3.0 merge, ci.yml no longer carries a dedicated `build` job.
+	// The "Checkout + build gsd-pi SDK" block is duplicated in
+	// `dependency-boundaries` and `test`, each running on its own runner; both
+	// MUST keep the SDK build AND the post-npm-ci `setup-types.mjs` step.
+	// Assert every build-block invariant on BOTH jobs so neither can silently
+	// drop one of them. Same strength as the prior single-job guard: 0
+	// assertions removed, the production-omit and shape-check assertions for
+	// `prod-install-build` still run after this block, and the branch-pin
+	// test below still gates the whole workflow.
+	const buildJobs = ["dependency-boundaries", "test"] as const;
+
+	it.each(buildJobs)("runs %s on Node 22", (jobName) => {
+		expect(jobNodeVersion(parsed.jobs?.[jobName])).toBe(22);
 	});
 
-	it("builds the gsd-pi SDK in-job from the verified checkout", () => {
-		// The @gsd host is not installable from a registry (workspace:* deps),
-		// so CI clones and builds open-gsd/gsd-pi via its verified `build:pi`
-		// script (same step as .github/workflows/compat-smoke.yml).
-		expect(jobHasScript(parsed.jobs?.build, "pnpm run build:pi")).toBe(true);
-		expect(
-			jobHasScript(parsed.jobs?.build, "GSD_PI_CHECKOUT=/tmp/gsd-pi"),
-		).toBe(true);
-	});
+	it.each(buildJobs)(
+		"builds the gsd-pi SDK in %s from the verified checkout",
+		(jobName) => {
+			const job = parsed.jobs?.[jobName];
+			// The @gsd host is not installable from a registry (workspace:* deps),
+			// so CI clones and builds open-gsd/gsd-pi via its verified `build:pi`
+			// script (same step as .github/workflows/compat-smoke.yml).
+			expect(jobHasScript(job, "pnpm run build:pi")).toBe(true);
+			expect(jobHasScript(job, "GSD_PI_CHECKOUT=/tmp/gsd-pi")).toBe(true);
+		},
+	);
 
-	it("runs setup-types.mjs after npm ci in the build job (MEM011)", () => {
-		const build = parsed.jobs?.build;
-		const ciIdx = firstRunIndexOf(build, "npm ci --no-audit --no-fund");
-		const setupIdx = firstRunIndexOf(build, "scripts/setup-types.mjs");
-		expect(ciIdx).toBeGreaterThanOrEqual(0);
-		expect(setupIdx).toBeGreaterThan(ciIdx);
-	});
+	it.each(buildJobs)(
+		"runs setup-types.mjs after npm ci in %s (MEM011)",
+		(jobName) => {
+			const job = parsed.jobs?.[jobName];
+			const ciIdx = firstRunIndexOf(job, "npm ci --no-audit --no-fund");
+			const setupIdx = firstRunIndexOf(job, "scripts/setup-types.mjs");
+			expect(ciIdx).toBeGreaterThanOrEqual(0);
+			expect(setupIdx).toBeGreaterThan(ciIdx);
+		},
+	);
 
 	it("runs the production install shape check in prod-install-build", () => {
 		const prod = parsed.jobs?.["prod-install-build"];
 		expect(jobNodeVersion(prod)).toBe(22);
-		expect(jobHasScript(prod, "npm prune --omit=dev")).toBe(true);
+		// Job installs WITHOUT devDeps via `npm install --omit=dev` (not
+		// `npm prune --omit=dev`); the invariant is "production deps only".
+		expect(jobHasScript(prod, "npm install --omit=dev")).toBe(true);
 		expect(jobHasScript(prod, "scripts/check-prod-install-shape.mjs")).toBe(
 			true,
 		);
