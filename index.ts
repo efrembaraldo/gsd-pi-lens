@@ -122,7 +122,11 @@ import {
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
-import { wireDiagnosticsBusEmitterGetter, type PilensDiagnosticEntry, type PilensDiagnosticsFileEntry } from "./clients/diagnostics-publish.js";
+import {
+	wireDiagnosticsBusEmitterGetter,
+	type PilensDiagnosticEntry,
+	type PilensDiagnosticsFileEntry,
+} from "./clients/diagnostics-publish.js";
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
 import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
@@ -2114,8 +2118,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 							// SDK's getActiveTools hook (declared dynamically, not
 							// on the ExtensionAPI typebox). The `=== "function"`
 							// check on the result is the real runtime gate.
-							pi as unknown as { getActiveTools?: unknown }
-						).getActiveTools !== "function"
+							(pi as unknown as { getActiveTools?: unknown }).getActiveTools
+						) !== "function"
 					) {
 						return undefined;
 					}
