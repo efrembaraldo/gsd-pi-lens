@@ -945,3 +945,26 @@ a worktree whose `node_modules` is a symlink pointing outside it; no unpinned
 own home. See `CONTRIBUTING.md` "Local git hooks" for the human-facing
 version and `docs/pi-lens-subagent.md` for the fuller worktree/probe-hygiene
 contract.
+
+<important if="operating inside gsd-pi or integrating the fork">
+
+## gsd-pi-lens fork
+
+Questa sezione documenta i vincoli fork-only che differenziano `@efrembaraldo/gsd-pi-lens` da upstream `apmantza/pi-lens`. Si applica quando l'agente (a) opera dentro l'host `gsd-pi` oppure (b) sta integrando il fork (merge di un nuovo upstream, bump di versione, estensione di capability fork-only).
+
+- **Host.** Il fork gira sotto `gsd-pi` ([opengsd/gsd-pi](https://github.com/opengsd/gsd-pi)), non sotto upstream `pi-coding-agent`. La configDir dell'host è `.gsd` (analoga a `.pi` upstream). Tipi host sono vendored da `scripts/setup-types.mjs` come `@gsd/pi-coding-agent` e `@gsd/pi-tui`.
+
+- **Scope.** Tutti i package host-forniti sono sotto lo scope `@gsd/*` (non `@earendil-works/*`). La scope-migration guard `tests/workflows/scope-migration.test.ts` verifica zero riferimenti `@earendil-works` nei file shippable.
+
+- **Documentazione host.** Per il modello di sessione, strumenti di lifecycle, e flag di estensione, leggere la documentazione `gsd-pi` installata (`~/.gsd/agent/extensions/.../docs/`) o upstream. Il fork non ridefinisce queste primitive — eredita dall'host.
+
+- **Vincoli `gsd` noti.** (1) `.gsd` (configDir) è escluso da `EXCLUDED_DIRS` (startup scan) e da `SECRETS_LANE_SCRATCH_DIR_NAMES` (secrets lane) — mutation-proof in `tests/clients/scratch-tree-policy-coverage.test.ts`. (2) `process.env.GSD_CODING_AGENT_DIR` viene letto prima di `process.env.PI_CODING_AGENT_DIR` via `resolveAgentDir()` (esportato da `clients/config-locations.ts`); il fingerprint memo include entrambe le chiavi. (3) I flag CLI di estensione non sono inoltrati dall'host `gsd`; i flag del fork vanno configurati via `~/.gsd/extensions/pi-lens.json`.
+
+- **RPC bus R009 (`pilens:rpc:*`).** Il fork pubblica due canali request/response in aggiunta al push esistente: `pilens:rpc:diagnostics` e `pilens:rpc:files-touched`. La response usa un canale correlato `pilens:rpc:<token>:response` con cap `PI_LENS_RPC_MAX_DIAGNOSTICS_PER_RESPONSE=200` e TTL `PI_LENS_RPC_RESPONSE_TTL_MS=5000`. Implementato in `clients/rpc-publish.ts`; conformance in `tests/config/rpc-bus-conformance.test.ts`.
+
+- **Pre-release gate.** `scripts/pre-release-checklist.mjs` esegue 6 check (lint, test, install-shape, tool-registrations, flag-registrations, bus-channels). Post-merge v4.3.0: tool pin = `13`, flag pin = `23`. Uscita `0` ⇒ `READY FOR HUMAN GATE`, `1` ⇒ `BLOCKED: <names>`. Da eseguire prima di ogni bump di versione o di ogni sync upstream.
+
+- **Guard fork-only.** Test che attestano la sopravvivenza delle capability fork-only ad ogni merge upstream: `tests/host-sdk-type-only.test.ts`, `tests/clients/deps-centralization.test.ts`, `tests/clients/pi-host-contract.test.ts`, `tests/workflows/fork-workflows.test.ts`, `tests/workflows/workflow-disposition.test.ts`, `tests/workflows/scope-migration.test.ts`, `tests/workflows/fork-disclosure.test.ts`, `tests/scripts/fork-publish-roundtrip.test.ts`.
+
+</important>
+
