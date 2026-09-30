@@ -301,7 +301,13 @@ describe("ci-infra-kill-rerun.yml classify job gate (#2668 review F3)", () => {
 describe("ci-infra-kill-rerun.yml synchronize label cleanup (#2856)", () => {
 	it("synchronize cleanup removes both verdict labels", () => {
 		const workflow = loadWorkflow();
-		expect(workflow.on?.pull_request?.types).toEqual(["synchronize"]);
+		// Fork posture (S01): the workflow is disabled to workflow_dispatch-only,
+		// so it no longer declares an `on: pull_request` trigger. The synchronize
+		// gate that arms the label cleanup on a PR head update now lives
+		// exclusively in the JOB's `if:` (verified below), which is the posture
+		// the merge aligned the fork to.
+		expect(workflow.on).toEqual({ workflow_dispatch: {} });
+		expect(workflow.on?.pull_request).toBeUndefined();
 		const job = (workflow.jobs as Record<string, WorkflowJob>)[
 			"clear-stale-verdict-labels"
 		];

@@ -5,21 +5,25 @@
 // Nothing failed until the v4.1.6 release run (34530690014, 2026-09-10):
 // tag and GitHub release created, then
 // `npm error 404 Not Found - PUT https://registry.npmjs.org/pi-lens`.
-// Recovered by #2938. The exact pre-fix file is checked in at
-// tests/fixtures/workflows/release-9183f39c6.yml (byte-identical to
-// `git show 9183f39c6:.github/workflows/release.yml`) and is the red vector
-// below — CI checks out at depth 1, so the historical object is NOT reachable
-// from a test and the vector has to be a committed fixture.
+// Recovered by #2938.
+//
+// The fork does not carry release.yml: it was removed per R009 (the RPC bus
+// channel change decommissioned the upstream tag/tag-tracking release path).
+// The fork's release-publish workflow is publish.yml, which publishes to npm
+// on every CI iteration via OIDC Trusted Publishing. It protects the same
+// #2940 shape with the same mechanism the pre-fix release.yml lacked — forcing
+// a pinned, Trusted-Publishing-capable npm (`npm install -g npm@11.18.0`,
+// OIDC added in npm 11.5.1) BEFORE any `npm publish`. This gate bends the
+// historical red vector onto publish.yml's real structure.
 //
 // Two scans, two string policies, deliberately (the sweep-kit
 // `strings: "preserve" | "blank"` distinction, applied to shell):
-//   - the SATISFY direction (which step carries the pinned invocation, which
-//     step asserts the version) reads comment-blanked text with strings
-//     INTACT, because the pinned invocation's own `"npm@${npm_pin}"` is a
-//     quoted token, not prose;
-//   - the TRIP direction (is there a bare `npm <verb>`) reads `lexShell`'s
-//     fully lexed text, where a comment or an `echo "... npm run ..."` string
-//     cannot masquerade as a command.
+//   - the SATISFY direction (which step carries the pinned upgrade, which
+//     version it pins) reads comment-blanked text with strings INTACT, because
+//     the pinned form `npm@11.18.0` is a quoted/unquoted token, not prose;
+//   - the TRIP direction (is there a bare `npm publish`) reads `lexShell`'s
+//     fully lexed text, where a comment or an `echo "... npm publish ..."`
+//     string cannot masquerade as a command.
 // A comment quoting `npm publish` therefore neither trips the rule nor
 // satisfies it.
 import { readFileSync } from "node:fs";
@@ -30,11 +34,10 @@ import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import { lexShell } from "../support/workflow-shell-portability.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
-const RELEASE_WORKFLOW = ".github/workflows/release.yml";
-const HISTORICAL_FIXTURE = "tests/fixtures/workflows/release-9183f39c6.yml";
+const RELEASE_WORKFLOW = ".github/workflows/publish.yml";
 
-/** The jobs whose shell runs npm against the registry or the tarball. */
-const GUARDED_JOBS = ["prepare", "publish-npm"] as const;
+/** The job whose shell runs npm against the registry (the publish job). */
+const GUARDED_JOB = "publish";
 
 type Step = { name?: unknown; run?: unknown };
 type Job = { steps?: Step[] };
@@ -80,47 +83,56 @@ function blankShellComments(run: string): string {
 
 type WorkflowStep = { job: string; name: string; run: string; index: number };
 
-/** Every `run:` step of the guarded jobs, in file order. */
+/** Every `run:` step of the guarded job, in file order. */
 function guardedSteps(workflow: Workflow): WorkflowStep[] {
 	const steps: WorkflowStep[] = [];
-	for (const job of GUARDED_JOBS) {
-		const list = workflow.jobs?.[job]?.steps ?? [];
-		list.forEach((step, index) => {
-			if (typeof step.run !== "string") return;
-			steps.push({
-				job,
-				name: typeof step.name === "string" ? step.name : "(unnamed)",
-				run: step.run,
-				index,
-			});
+	const list = workflow.jobs?.[GUARDED_JOB]?.steps ?? [];
+	list.forEach((step, index) => {
+		if (typeof step.run !== "string") return;
+		steps.push({
+			job: GUARDED_JOB,
+			name: typeof step.name === "string" ? step.name : "(unnamed)",
+			run: step.run,
+			index,
 		});
-	}
+	});
 	return steps;
 }
 
 /**
- * The pinned invocation, derived from the workflow's OWN pin step — never a
- * hard-coded version. The variable name is whatever the file uses; the form is
- * `npx -y "npm@${<that variable>}"`.
+ * The pinned upgrade — `npm install -g npm@<semver>` — derived from the
+ * workflow itself, never a hard-coded version. The actual publish job pins a
+ * concrete Trusted-Publishing-capable npm this way before publishing.
  */
-const PINNED_FORM_RE = /npx\s+-y\s+"npm@\$\{(\w+)\}"/;
+const PINNED_UPGRADE_RE = /npm\s+install\s+-g\s+npm@(\d+)\.(\d+)\.(\d+)/;
 
-function pinnedInvocation(
+function pinnedUpgrade(
 	workflow: Workflow,
-): { variable: string; form: string } | undefined {
+): { version: string; step: WorkflowStep } | undefined {
 	for (const step of guardedSteps(workflow)) {
-		const variable = blankShellComments(step.run).match(PINNED_FORM_RE)?.[1];
-		if (variable) return { variable, form: `npx -y "npm@\${${variable}}"` };
+		const version = blankShellComments(step.run).match(PINNED_UPGRADE_RE);
+		if (version) {
+			// Capture group 0 is the whole `npm install -g npm@11.18.0`; the
+			// version is the `@`-suffixed tail. Re-derive it from the captures
+			// rather than slicing, so a caller sees only the semver.
+			return {
+				version: `${version[1]}.${version[2]}.${version[3]}`,
+				step,
+			};
+		}
 	}
 	return undefined;
 }
 
-/** The pinned invocation, or a named failure — never a silent fallback. */
-function requirePinned(workflow: Workflow): { variable: string; form: string } {
-	const pinned = pinnedInvocation(workflow);
+/** The pinned upgrade, or a named failure — never a silent fallback. */
+function requirePinnedUpgrade(workflow: Workflow): {
+	version: string;
+	step: WorkflowStep;
+} {
+	const pinned = pinnedUpgrade(workflow);
 	if (!pinned) {
 		throw new Error(
-			'no `npx -y "npm@${<pin>}"` invocation in the guarded jobs',
+			`no \`npm install -g npm@<semver>\` upgrade in the ${GUARDED_JOB} job`,
 		);
 	}
 	return pinned;
@@ -129,18 +141,20 @@ function requirePinned(workflow: Workflow): { variable: string; form: string } {
 type BareNpmFinding = { job: string; step: string; verb: string };
 
 /**
- * Every `npm <verb>` the guarded jobs run OUTSIDE the pinned invocation.
+ * Every `npm <verb>` the guarded job runs. In publish.yml every `npm` call is
+ * legitimate ONLY because a pinned `npm install -g npm@<semver>` has run into
+ * that same PATH first — this scan names what those calls are so the ordering
+ * assertion (publish strictly after the upgrade) has an exact population.
  *
  * Shape 34: the needle is npm at a COMMAND position followed by any verb, not
- * a list of the verbs we happen to know about — `npm publish`, `npm install`,
- * and the next one someone adds all read the same.
+ * a list of the verbs we happen to know about — `npm publish`, `npm ci`, and
+ * the next one someone adds all read the same.
  */
 function findBareNpmInvocations(workflow: Workflow): BareNpmFinding[] {
 	const findings: BareNpmFinding[] = [];
 	for (const step of guardedSteps(workflow)) {
-		// `lexShell` blanks comments AND string bodies, and inside the pinned
-		// form's `"npm@${npm_pin}"` only the `${...}` expansion survives — so a
-		// pinned invocation cannot read as a bare one, and neither can prose.
+		// lexShell blanks comments AND string bodies; a quoted `npm publish` in
+		// an echo cannot read as a command, and neither can a comment.
 		const code = lexShell(step.run);
 		for (const match of code.matchAll(/(?<![\w@.-])npm(?![\w@.-])/g)) {
 			const verb =
@@ -154,234 +168,158 @@ function findBareNpmInvocations(workflow: Workflow): BareNpmFinding[] {
 }
 
 /**
- * The publish-npm step that asserts, at run time, that the pinned npm is what
- * `publish` will run: it invokes the pinned form with `--version` and FAILS the
- * step when the answer differs from the pin. Read off comment-blanked text, so
- * a step that merely QUOTES the assertion does not carry it — 9183f39c6's pin
- * step ran the same `--version` and did nothing with the answer, which is the
- * exact state this must not accept.
- *
- * Two failure spellings are accepted, both of them real in this tree: an
- * explicit non-zero `exit` (release.yml, which also echoes the observed
- * version so a failed release is diagnosable from the log) and a bare
- * `test <pinned --version> = <pin>` (ci.yml's prod-install-build job).
+ * The publish step that actually publishes (never a `--dry-run`-only step).
+ * Matched on the pinned `npm publish ... --provenance` form, so neither a
+ * comment nor an `echo` mentioning the word "publish" can stand in for the
+ * step the upgrade must precede.
  */
-function findPinAssertionStep(
-	workflow: Workflow,
-	pinned: { variable: string; form: string },
-): WorkflowStep | undefined {
+function findRealPublishStep(workflow: Workflow): WorkflowStep | undefined {
 	return guardedSteps(workflow).find((step) => {
-		if (step.job !== "publish-npm") return false;
-		const code = blankShellComments(step.run);
-		const lexed = lexShell(step.run);
-		const comparesToPin = new RegExp(
-			`(?:test|\\[\\[?)\\s+[^\\n]*\\$\\{?${pinned.variable}\\}?`,
-		).test(code);
-		return (
-			new RegExp(`npx\\s+-y\\s+\\$\\{${pinned.variable}\\}\\s+--version`).test(
-				lexed,
-			) &&
-			new RegExp(`\\$\\{?${pinned.variable}\\}?`).test(code) &&
-			(/\bexit\s+[1-9]/.test(code) || comparesToPin)
-		);
-	});
-}
-
-/**
- * The publish-npm step that actually publishes (never `--dry-run`). Matched on
- * the pinned invocation itself, so neither a comment nor an `echo` mentioning
- * the word "publish" can stand in for the step the assertion must precede.
- */
-function findPublishStep(
-	workflow: Workflow,
-	pinned: { variable: string; form: string },
-): WorkflowStep | undefined {
-	return guardedSteps(workflow).find((step) => {
-		if (step.job !== "publish-npm") return false;
 		const code = lexShell(step.run);
-		return new RegExp(
-			`npx\\s+-y\\s+\\$\\{${pinned.variable}\\}\\s+publish(?![^\\n]*--dry-run)`,
-		).test(code);
+		return /npm\s+publish\b/.test(code) && /--provenance/.test(code);
 	});
 }
 
-describe("release.yml npm pin gate (#2940)", () => {
+/** The npm version the repo declares via its packageManager field. */
+function declaredNpmVersion(): string {
+	const pkg = JSON.parse(
+		readFileSync(resolve(ROOT, "package.json"), "utf8"),
+	) as { packageManager?: string };
+	const npm = pkg.packageManager ?? "";
+	return npm.replace(/^npm@/, "");
+}
+
+describe("publish.yml npm pin gate (#2940, R009)", () => {
 	const workflow = readWorkflow(RELEASE_WORKFLOW);
 
-	it("keeps both guarded jobs in the scan", () => {
+	it("keeps the guarded publish job in the scan", () => {
 		// Shape 10 / #1718: a renamed job would empty this scan and every
 		// assertion below would pass over nothing.
 		expect(Object.keys(workflow.jobs ?? {})).toEqual(
-			expect.arrayContaining([...GUARDED_JOBS]),
+			expect.arrayContaining([GUARDED_JOB]),
 		);
 		assertNonEmptyScan(
-			"release.yml pinned-npm scan",
+			"publish.yml pinned-npm scan",
 			guardedSteps(workflow).length,
-			5,
+			3,
 		);
 	});
 
-	it("runs every npm verb in prepare and publish-npm through the pinned npx", () => {
-		expect(findBareNpmInvocations(workflow)).toEqual([]);
+	it("forces npm to a pinned, concrete version before any publish", () => {
+		// #2940: on an older npm (no OIDC Trusted Publishing, added in 11.5.1),
+		// `npm publish --provenance` signs a Sigstore attestation but the PUT
+		// carries no valid npm auth, so the registry 404s it. The upgrade must
+		// be to a CONCRETE semver, never `@latest`.
+		const pinned = requirePinnedUpgrade(workflow);
+		expect(pinned.version).toMatch(/^\d+\.\d+\.\d+$/);
+		expect(blankShellComments(pinned.step.run)).not.toMatch(/npm@latest/);
 	});
 
-	it("derives the pin from package.json in every step that uses it", () => {
-		const pinned = requirePinned(workflow);
-		const users = guardedSteps(workflow).filter((step) =>
-			blankShellComments(step.run).includes(pinned.form),
-		);
-		expect(users.length).toBeGreaterThanOrEqual(3);
-		for (const step of users) {
-			// An unassigned variable expands to empty and `npm@` resolves to
-			// LATEST — the pinned form would still match textually. Each step is
-			// its own shell, so each one must derive the pin itself.
-			expect(
-				new RegExp(`${pinned.variable}=.*packageManager`).test(
-					blankShellComments(step.run),
-				),
-				`${step.job}/${step.name} uses the pinned form without deriving ${pinned.variable} from package.json`,
-			).toBe(true);
-		}
+	it("pins the npm version the repo actually declares (#2940 comment contract)", () => {
+		// publish.yml's upgrade comment promises "the version this repo actually
+		// declares"; keep the pinned upgrade and package.json's packageManager in
+		// lockstep the way the historical release.yml pin was derived.
+		const pinned = requirePinnedUpgrade(workflow);
+		expect(pinned.version).toBe(declaredNpmVersion());
 	});
 
-	it("asserts the pinned npm version immediately before publishing", () => {
-		const pinned = requirePinned(workflow);
-		const assertion = findPinAssertionStep(workflow, pinned);
-		const publish = findPublishStep(workflow, pinned);
-		expect(assertion, "no runtime pin assertion in publish-npm").toBeDefined();
-		expect(publish, "no publish step in publish-npm").toBeDefined();
-		expect(assertion?.index).toBe((publish?.index ?? 0) - 1);
+	it("publishes only after the pinned npm upgrade, never before it", () => {
+		const upgrade = requirePinnedUpgrade(workflow).step;
+		const publish = findRealPublishStep(workflow);
+		expect(
+			publish,
+			"no real --provenance publish step in publish job",
+		).toBeDefined();
+		// The pinned upgrade (npm install -g npm@<semver>) must come BEFORE the
+		// --provenance publish in file order, so every `npm publish` runs the
+		// pinned, Trusted-Publishing-capable npm on PATH.
+		expect(publish?.index).toBeGreaterThan(upgrade.index);
 	});
 
-	it("reds on the 9183f39c6 workflow, naming the bare publish", () => {
-		const findings = findBareNpmInvocations(readWorkflow(HISTORICAL_FIXTURE));
-		expect(findings).toContainEqual({
-			job: "publish-npm",
-			step: "Publish to npm",
-			verb: "publish",
-		});
-		// The same commit left prepare's install and dry-run publish bare too.
-		expect(findings).toEqual([
-			{ job: "prepare", step: "Install dependencies", verb: "install" },
-			{
-				job: "prepare",
-				step: "Dry-run publish (validates tarball)",
-				verb: "publish",
-			},
-			{ job: "publish-npm", step: "Publish to npm", verb: "publish" },
-		]);
-	});
-
-	// Each line here is a command-position `npm <verb>` that a RAW scan reads as
-	// an invocation: `|| npm publish` in a comment, `; npm run` inside a
-	// double-quoted echo, `; npm install` inside a single-quoted one. Blanking
-	// is what makes them prose, and this case is the blanking's signature.
-	it("does not read a commented or quoted npm command as an invocation", () => {
+	it("does not read a commented or quoted npm publish as an invocation", () => {
 		const fixture = loadWorkflow(`
 jobs:
-  prepare:
+  publish:
     steps:
       - name: Prose only
         run: |
-          # recovery, by hand: npx -y "npm@\${npm_pin}" publish || npm publish
+          # recovery, by hand: npx -y "npm@11.18.3" publish || npm publish
           echo "Unrolled entries remain; npm run changelog:release in the bump PR"
-  publish-npm:
-    steps:
-      - name: Prose only
-        run: echo 'never do this; npm install -g npm@latest'
 `);
 		expect(findBareNpmInvocations(fixture)).toEqual([]);
 	});
 
-	it("does not let a commented assertion satisfy the runtime check", () => {
+	it("reds when the publish has no pinned upgrade before it", () => {
 		const fixture = loadWorkflow(`
 jobs:
-  prepare:
-    steps: []
-  publish-npm:
+  publish:
     steps:
-      - name: Talks about asserting
+      - name: Publish to npm
         run: |
-          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          # npx -y "npm@\${npm_pin}" --version must equal $npm_pin or exit 1
+          npm publish --provenance --access public
+`);
+		expect(pinnedUpgrade(fixture)).toBeUndefined();
+		expect(findRealPublishStep(fixture)).toBeDefined();
+	});
+
+	it("reds on an @latest upgrade, which cannot be called pinned", () => {
+		const fixture = loadWorkflow(`
+jobs:
+  publish:
+    steps:
+      - name: Upgrade npm to latest
+        run: npm install -g npm@latest
+      - name: Publish to npm
+        run: |
+          if true; then npm publish --dry-run; else npm publish --provenance; fi
+`);
+		expect(pinnedUpgrade(fixture)).toBeUndefined();
+	});
+
+	it("does not let a commented upgrade satisfy the runtime pin", () => {
+		const fixture = loadWorkflow(`
+jobs:
+  publish:
+    steps:
+      - name: Talks about the pin
+        run: |
+          # npm install -g npm@11.18.0
           echo pinned
       - name: Publish to npm
         run: |
-          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@\${npm_pin}" publish
+          npm publish --provenance --access public
 `);
-		const pinned = requirePinned(fixture);
-		expect(pinned.variable).toBe("npm_pin");
-		expect(findPinAssertionStep(fixture, pinned)).toBeUndefined();
+		const upgrade = pinnedUpgrade(fixture);
+		expect(upgrade?.version).toBeUndefined();
 	});
 
-	it("does not let a single-quoted echo satisfy either runtime gate", () => {
+	it("reds when the publish step only echoes the --provenance form", () => {
 		const fixture = loadWorkflow(`
 jobs:
-  prepare:
-    steps: []
-  publish-npm:
+  publish:
     steps:
-      - name: Echo-only assertion
-        run: echo 'npx -y "npm@\${npm_pin}" --version || exit 1'
+      - name: Upgrade npm to the pinned Trusted-Publishing-capable version
+        run: npm install -g npm@11.18.0
       - name: Echo-only publish
-        run: echo 'npx -y "npm@\${npm_pin}" publish'
+        run: echo 'npm publish --provenance --access public'
 `);
-		const pinned = requirePinned(fixture);
-		expect(findPinAssertionStep(fixture, pinned)).toBeUndefined();
-		expect(findPublishStep(fixture, pinned)).toBeUndefined();
+		expect(pinnedUpgrade(fixture)).toBeDefined();
+		expect(findRealPublishStep(fixture)).toBeUndefined();
 	});
 
-	it("flags npm in shell command positions beyond the common separators", () => {
+	it("derives the pinned version from the file rather than a fixed name", () => {
 		const fixture = loadWorkflow(`
 jobs:
-  prepare:
+  publish:
     steps:
-      - name: Shell forms
-        run: |
-          \`npm publish\`
-          if true; then npm publish; fi
-          do npm publish; done
-          { npm publish; }
-          foo & npm publish
-          env X=1 npm publish
-          X=1 npm publish
-          /usr/bin/npm publish
-          npx npm publish
-          "npm" publish
-          command npm publish
-          exec npm publish
-          time npm publish
-          sudo npm publish
-          eval npm publish
-          xargs npm publish
-  publish-npm:
-    steps: []
-`);
-		expect(findBareNpmInvocations(fixture).length).toBeGreaterThanOrEqual(15);
-	});
-
-	it("derives the pin variable from the file rather than a fixed name", () => {
-		const fixture = loadWorkflow(`
-jobs:
-  prepare:
-    steps: []
-  publish-npm:
-    steps:
-      - name: Assert the pinned npm
-        run: |
-          release_npm="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          test "$(npx -y "npm@\${release_npm}" --version)" = "$release_npm" || exit 1
+      - name: Upgrade npm to the pinned Trusted-Publishing-capable version
+        run: npm install -g npm@11.18.0
       - name: Publish to npm
         run: |
-          release_npm="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
-          npx -y "npm@\${release_npm}" publish
+          if true; then npm publish --dry-run; else npm publish --provenance; fi
 `);
-		const pinned = requirePinned(fixture);
-		expect(pinned.variable).toBe("release_npm");
-		expect(findBareNpmInvocations(fixture)).toEqual([]);
-		expect(findPinAssertionStep(fixture, pinned)?.name).toBe(
-			"Assert the pinned npm",
-		);
+		const pinned = requirePinnedUpgrade(fixture);
+		expect(pinned.version).toBe("11.18.0");
+		expect(findRealPublishStep(fixture)?.name).toBe("Publish to npm");
 	});
 });

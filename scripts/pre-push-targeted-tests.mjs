@@ -67,6 +67,7 @@ export const TREE_SCANNING_GOVERNANCE_TESTS = [
 	"tests/config/degradation-kind-order.test.ts",
 	"tests/config/sweep-floor-coverage.test.ts",
 	"tests/config/tracked-control-bytes.test.ts",
+	"tests/config/rpc-bus-conformance.test.ts",
 ];
 
 const PRODUCTION_ROOTS = ["clients/", "tools/", "mcp/", "scripts/"];
