@@ -37,12 +37,16 @@
  *                        (bracket-balanced, refrattario a refactor) più
  *                        il loader top-level `const X = createYTool(
  *                        ...)`, dedupe via Set, conta `create*Tool(`.
- *                        Atteso 15 (8 + 1 loader + 6). Fail se <10 o
+ *                        Atteso 13 (7 always-active + 5 lazy + 1 loader). Fail se <10 o
  *                        >25 (rottura strutturale). Warn ma pass se
- *                        count ∈ [10,25] e ≠15.
+ *                        count ∈ [10,25] e ≠13.
  *   flag-registrations  conta `name: "<flag>"` in
- *                        clients/lens-flag-registry.ts. Pass se count>0;
- *                        fail con detail="no flag entries" se count=0.
+ *                        clients/lens-flag-registry.ts. Pin expected=23 (post-merge v4.3.0
+ *                        misurato: 20 baseline v4.1.6 + 2 nuovi upstream
+ *                        lens-compact-lsp-status / lens-hide-lsp-status + 1 fork
+ *                        error-debt-baseline). Fail con detail="count={n} expected=23
+ *                        structural-break" se count > 0 e ≠23. Fail con detail="no
+ *                        flag entries" se count=0.
  *   bus-channels        verifica 8 literal esatti nei 5 publisher modules
  *                        + 1 template-literal `pilens:rpc:${...}:response`
  *                        in rpcResponseChannel. Pass se <2 missing.
@@ -426,7 +430,7 @@ function checkToolRegistrations() {
 
 	const durationMs = Date.now() - start;
 	const found = toolNames.size;
-	const expected = 15;
+	const expected = 13;
 
 	// Structural break: count is far from the expected band.
 	if (found < 10 || found > 25) {
@@ -449,7 +453,7 @@ function checkToolRegistrations() {
 	return {
 		ok: true,
 		durationMs,
-		detail: `count=${found} (8 always-active + 1 loader + 6 lazy)`,
+		detail: `count=${found} (7 always-active + 5 lazy + 1 loader)`,
 	};
 }
 
@@ -467,6 +471,16 @@ function checkFlagRegistrations() {
 	const matches = text.match(/^\s+name:\s+"[^"]+"/gm) ?? [];
 	const durationMs = Date.now() - start;
 	const found = matches.length;
+	const expected = 23;
+
+	// Pin: fail loudly on drift vs the measured post-merge value (R031).
+	if (found !== expected && found > 0) {
+		return {
+			ok: false,
+			durationMs,
+			detail: `count=${found} expected=${expected} structural-break`,
+		};
+	}
 	if (found === 0) {
 		return {
 			ok: false,
@@ -477,7 +491,7 @@ function checkFlagRegistrations() {
 	return {
 		ok: true,
 		durationMs,
-		detail: `count=${found}`,
+		detail: `count=${found} expected=${expected}`,
 	};
 }
 
