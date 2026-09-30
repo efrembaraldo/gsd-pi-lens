@@ -954,7 +954,7 @@ Questa sezione documenta i vincoli fork-only che differenziano `@efrembaraldo/gs
 
 - **Host.** Il fork gira sotto `gsd-pi` ([opengsd/gsd-pi](https://github.com/opengsd/gsd-pi)), non sotto upstream `pi-coding-agent`. La configDir dell'host è `.gsd` (analoga a `.pi` upstream). Tipi host sono vendored da `scripts/setup-types.mjs` come `@gsd/pi-coding-agent` e `@gsd/pi-tui`.
 
-- **Scope.** Tutti i package host-forniti sono sotto lo scope `@gsd/*` (non `@earendil-works/*`). La scope-migration guard `tests/workflows/scope-migration.test.ts` verifica zero riferimenti `@earendil-works` nei file shippable.
+- **Scope.** Tutti i package host-forniti sono sotto lo scope `@gsd/*`. La scope-migration guard `tests/workflows/scope-migration.test.ts` verifica zero riferimenti allo scope upstream legacy nei file shippable.
 
 - **Documentazione host.** Per il modello di sessione, strumenti di lifecycle, e flag di estensione, leggere la documentazione `gsd-pi` installata (`~/.gsd/agent/extensions/.../docs/`) o upstream. Il fork non ridefinisce queste primitive — eredita dall'host.
 
