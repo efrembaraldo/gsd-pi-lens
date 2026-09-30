@@ -12,4 +12,4 @@ fi
 
 npm run check:lockfile && npm run changelog:check && npm run lint && \
   git diff --cached --name-only --diff-filter=ACMR -z | \
-  xargs -0 -r npx --no-install oxfmt --check
+  xargs -0 -r npx --no-install oxfmt --check --no-error-on-unmatched-pattern
