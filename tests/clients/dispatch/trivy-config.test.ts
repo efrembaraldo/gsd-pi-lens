@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { suppressTrivyConfigDockerOverlap } from "../../../clients/dispatch/dispatcher.js";
 import {
 	looksLikeCloudFormationTemplate,
@@ -213,6 +213,13 @@ describe("trivy-config run() — CloudFormation content gate", () => {
 		);
 	});
 
+	// Invariants #4/#29: settle the mkdtemp root on EVERY path (pass or fail),
+	// so pi-lens-trivy-config-cfn-test-* never outlives its owning file into
+	// the tmp-fixture-hygiene census (#2912).
+	afterEach(() => {
+		fs.rmSync(cfnCwd, { recursive: true, force: true });
+	});
+
 	it("scans a CloudFormation yaml template", async () => {
 		safeSpawnAsync.mockResolvedValue({
 			error: null,
@@ -296,6 +303,13 @@ describe("trivy-config run() — compose flag gate (S05)", () => {
 		composeCwd = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-trivy-config-compose-test-"),
 		);
+	});
+
+	// Invariants #4/#29: settle the mkdtemp root on EVERY path (pass or fail),
+	// so pi-lens-trivy-config-compose-test-* never outlives its owning file into
+	// the tmp-fixture-hygiene census (#2912).
+	afterEach(() => {
+		fs.rmSync(composeCwd, { recursive: true, force: true });
 	});
 
 	// The headline gate: a real docker-compose.yml file with version: "3.8"

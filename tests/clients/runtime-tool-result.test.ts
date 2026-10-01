@@ -28,10 +28,8 @@ import {
 	resetVerifiedPathAttributionGuessCount,
 } from "../../clients/path-attribution-telemetry.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import {
-	createBashToolDefinition,
-	createReadToolDefinition,
-} from "@gsd/pi-coding-agent";
+import { createBashToolDefinition } from "@gsd/pi-coding-agent/core/tools/bash.js";
+import { createReadToolDefinition } from "@gsd/pi-coding-agent/core/tools/read.js";
 
 const readFileSyncSpy = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {

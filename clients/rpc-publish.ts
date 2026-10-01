@@ -117,9 +117,17 @@ const moduleLiveEmitter = createLiveBusEmitter();
  * Bounded by `pendingRequestTtl` (lazy cleanup): on every new receipt we drop
  * entries whose `Date.now() - ts > ttl` so the map never accumulates dead
  * state for tokens that never got a response (a host bug or a malicious
- * emitter could otherwise grow the map unboundedly).
+ * emitter could otherwise grow the map unboundedly). A hard entry cap
+ * (`MAX_REQUEST_TIMESTAMPS`) is the second bound: even a flood of live tokens
+ * faster than the TTL ever expires cannot grow the map past it.
  */
 const requestReceivedAt = new Map<string, number>();
+
+/** Hard cap on live receipt-timestamp entries. Insertion order approximates
+ *  age (oldest first), so over-cap eviction drops the oldest tokens first.
+ *  ADR #2981 / invariant 46: the map is content-keyed and bound by this cap
+ *  plus the TTL cleanup in {@link pruneStaleRequestTimestamps}.*/
+const MAX_REQUEST_TIMESTAMPS = 8192;
 
 /** Last `events` object the subscriber was wired against, plus the two
  *  listener references, so a re-wire can detach the old listeners before
@@ -282,12 +290,22 @@ function capDiagnosticsFiles(
 }
 
 /** Bound the in-memory request-timestamp cache: drop entries whose age
- *  exceeds the TTL on every new receipt so the map never grows unbounded. */
+ *  exceeds the TTL on every new receipt so the map never grows unbounded,
+ *  and enforce the hard entry cap (ADR #2981 / invariant 46) so even a
+ *  flood of live tokens cannot grow it past {@link MAX_REQUEST_TIMESTAMPS}.
+ *  Map preserves insertion order, so over-cap eviction drops the oldest
+ *  tokens first. */
 function pruneStaleRequestTimestamps(ttlMs: number): void {
 	if (requestReceivedAt.size === 0) return;
 	const now = Date.now();
 	for (const [token, ts] of requestReceivedAt) {
 		if (now - ts > ttlMs) requestReceivedAt.delete(token);
+	}
+	if (requestReceivedAt.size > MAX_REQUEST_TIMESTAMPS) {
+		for (const token of requestReceivedAt.keys()) {
+			if (requestReceivedAt.size <= MAX_REQUEST_TIMESTAMPS) break;
+			requestReceivedAt.delete(token);
+		}
 	}
 }
 
@@ -303,7 +321,7 @@ interface HandleDiagnosticsCtx {
 	liveEmitter: LiveBusEmitter;
 	receivedAt: number;
 	getDiagnosticsState: GetDiagnosticsState;
-	dbg?: (msg: string) => void;
+	dbg?: ((msg: string) => void) | undefined;
 }
 
 function buildDiagnosticsPayload(

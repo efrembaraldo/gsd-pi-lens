@@ -187,9 +187,11 @@ function buildAncestryChain(node: any, types: string[]): AncestorSymbol[] {
  */
 function detectFrontmatterEnd(allLines: string[]): number | undefined {
 	if (allLines.length === 0) return undefined;
-	if (allLines[0].trim() !== "---") return undefined;
+	const opening = allLines[0];
+	if (opening === undefined || opening.trim() !== "---") return undefined;
 	for (let i = 1; i < allLines.length; i++) {
-		if (allLines[i].trim() === "---") return i;
+		const line = allLines[i];
+		if (line !== undefined && line.trim() === "---") return i;
 	}
 	return undefined;
 }

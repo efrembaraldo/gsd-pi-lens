@@ -9,7 +9,7 @@
 // dependencies, and the tarball must be reachable. The full live install is
 // then a one-liner a maintainer can run on any box that does have `pi`.
 //
-// flake-shape: real-network — the npm registry is the system under test
+// flake-shape: real-process-spawn — the npm registry is the system under test
 // (publish presence, dist-tag, tarball reachability); an in-process stub
 // would re-assert whatever the test author typed, not what the registry
 // currently says. The test self-skips when the registry is unreachable so

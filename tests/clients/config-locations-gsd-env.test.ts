@@ -25,10 +25,11 @@
  *   - The production memo (`resetGlobalConfigLocationCache()`) is reset
  *     both before and after every test, so a previous test's fingerprint
  *     cannot serve a stale resolution.
- *   - The temp-home prefix `pilens-gsdenv-` is distinct from the upstream
+ *   - The temp-home prefix `pi-lens-gsdenv-` is distinct from the upstream
  *     template's `pi-lens-globalcfg-`, so this file's tmp dirs cannot
  *     crosstalk with the global-config-location suite (#3306 / #3314 family
- *     of ownership-aware tmp hygiene).
+ *     of ownership-aware tmp hygiene). It stays in the `pi-lens-` census
+ *     namespace so the tmp-fixture-hygiene owner scan can attribute any leak.
  *
  * Three env scenarios (verbatim from the slice plan):
  *   1. SOLO `GSD_CODING_AGENT_DIR` → `source: "pi-coding-agent-dir"`,
@@ -84,7 +85,7 @@ const OVERRIDDEN_ENV_KEYS = [
 type AgentDirEnvKey = "GSD_CODING_AGENT_DIR" | "PI_CODING_AGENT_DIR";
 
 function makeTempHome(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-gsdenv-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gsdenv-"));
 	tmpDirs.push(dir);
 	return dir;
 }

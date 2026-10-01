@@ -13,12 +13,14 @@
 //      host sources and assert the host version off ./vendor/.
 //
 //   2. Runtime materialization (stadio 2) — copies the runtime JS (plus .d.ts
-//      and source-map siblings) of @gsd/pi-tui, @gsd/native,
-//      get-east-asian-width and marked into ./node_modules/. This unblocks
-//      vitest at runtime: tests load clients/test-runner-delivery.ts →
-//      clients/tui-fit.ts → clients/deps/pi-tui.ts → @gsd/pi-tui, and @gsd is
-//      absent from the npm registry. Without this staging, `npx vitest` fails
-//      with module resolution errors, not type errors.
+//      and source-map siblings) of @gsd/pi-coding-agent, @gsd/pi-tui,
+//      @gsd/native, get-east-asian-width and marked into ./node_modules/.
+//      This unblocks vitest at runtime: tests load clients/test-runner-delivery.ts
+//      → clients/tui-fit.ts → clients/deps/pi-tui.ts → @gsd/pi-tui, and
+//      tests/clients/runtime-tool-result.test.ts imports the real vendored
+//      tool-definition factories from @gsd/pi-coding-agent/dist/core/tools.
+//      @gsd is absent from the npm registry. Without this staging, `npx vitest`
+//      fails with module resolution errors, not type errors.
 //
 //      The full closure is copied because @gsd/pi-tui/dist/utils.js statically
 //      imports "@gsd/native", "@gsd/native/text", and "get-east-asian-width";
@@ -90,6 +92,14 @@ const VENDOR_PACKAGES = [
 // `try { return isNativeAddonLoaded(); } catch { return false; }` wrapper then
 // degrades to its JS fallback (verified against dist/utils.js sourcesContent).
 const RUNTIME_PACKAGES = [
+	{
+		scope: "@gsd",
+		name: "pi-coding-agent",
+		sentinel: ["dist/index.js"],
+		sourcePath: (checkout) => join(checkout, "packages", "pi-coding-agent"),
+		copyFiles: ["package.json"],
+		copyDirs: ["dist"],
+	},
 	{
 		scope: "@gsd",
 		name: "pi-tui",
