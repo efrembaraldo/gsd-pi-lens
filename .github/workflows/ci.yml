@@ -308,6 +308,19 @@ jobs:
         with:
           node-version: '22'
 
+      # The @gsd host is not installable from a registry (workspace:* deps,
+      # 404) and no monorepo package ships a `pi` bin, so CI clones the
+      # open-gsd/gsd-pi checkout and builds its SDK sources. `build:pi` is the
+      # verified root script (same proven step as compat-smoke.yml Layer A).
+      - name: Checkout + build gsd-pi SDK
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/open-gsd/gsd-pi.git /tmp/gsd-pi
+          cd /tmp/gsd-pi
+          corepack enable
+          pnpm install
+          pnpm run build:pi
+          echo "GSD_PI_CHECKOUT=/tmp/gsd-pi" >> "$GITHUB_ENV"
       # Lockfile-locked and script-free (SonarCloud githubactions:S8543 /
       # S6505 flagged the copied `npm install` here); the one piece of
       # `prepare` the targeted vitest files need is the grammar download, run
@@ -315,6 +328,11 @@ jobs:
       # lockfile-in-sync check depends on it.
       - name: Install dependencies
         run: npm ci --no-audit --no-fund --ignore-scripts
+
+      # npm ci prunes extraneous packages from node_modules/@gsd/*, so the
+      # host-provided types must be restored AFTER the install, never before.
+      - name: Restore host-provided @gsd types
+        run: node scripts/setup-types.mjs
 
       - name: Download core grammars
         run: node scripts/download-grammars.js --core --dest grammars
@@ -586,8 +604,31 @@ jobs:
         with:
           node-version: '22'
 
+      # The @gsd host is not installable from a registry (workspace:* deps,
+      # 404) and no monorepo package ships a `pi` bin, so CI clones the
+      # open-gsd/gsd-pi checkout and builds its SDK sources. `build:pi` is the
+      # verified root script (same proven step as compat-smoke.yml Layer A).
+      # Explicit `shell: bash`: this job runs on windows-latest, where the
+      # step default is PowerShell and this script's syntax is bash-only.
+      - name: Checkout + build gsd-pi SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/open-gsd/gsd-pi.git /tmp/gsd-pi
+          cd /tmp/gsd-pi
+          corepack enable
+          pnpm install
+          pnpm run build:pi
+          echo "GSD_PI_CHECKOUT=/tmp/gsd-pi" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+
+      # npm ci prunes extraneous packages from node_modules/@gsd/*, so the
+      # host-provided types must be restored AFTER the install, never before.
+      - name: Restore host-provided @gsd types
+        shell: bash
+        run: node scripts/setup-types.mjs
 
       - name: Build
         run: npm run build
@@ -713,13 +754,10 @@ jobs:
       # which is the regression this job exists to catch (#1926).
       - name: Supply host-provided packages the way pi does (#1926)
         run: | # zizmor: ignore[adhoc-packages]
-          SUPPLY=scripts/supply-host-provided-deps.mjs
-          HOST_PKGS=()
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] && HOST_PKGS+=("$pkg")
-          done < <(node "$SUPPLY" --install-args)
-          echo "Supplying: ${HOST_PKGS[*]}"
-          npm install --no-save --no-audit --no-fund "${HOST_PKGS[@]}"
+          # --install-args cannot supply @gsd/pi-tui (workspace-only, E404 on
+          # the registry); --install extracts it from @opengsd/gsd-pi, the
+          # same way the install-test job does.
+          node scripts/supply-host-provided-deps.mjs --install "$PWD"
 
       - name: Verify dist built and the compiled entry loads
         run: |
@@ -769,13 +807,10 @@ jobs:
           node scripts/check-prod-install-shape.mjs
           # Then supply them, as pi does, so the load check can still see a
           # genuinely missing dep instead of stopping at the first host package.
-          SUPPLY=scripts/supply-host-provided-deps.mjs
-          HOST_PKGS=()
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] && HOST_PKGS+=("$pkg")
-          done < <(node "$SUPPLY" --install-args)
-          echo "Supplying: ${HOST_PKGS[*]}"
-          npm install --no-save --no-audit --no-fund "${HOST_PKGS[@]}"
+          # --install-args cannot supply @gsd/pi-tui (workspace-only, E404 on
+          # the registry); --install extracts it from @opengsd/gsd-pi, the
+          # same way the install-test job does.
+          node scripts/supply-host-provided-deps.mjs --install "$PWD"
           ALLOW=$(node scripts/supply-host-provided-deps.mjs --allow-pattern)
           node dist/index.js 2>&1 | tee /tmp/gh-load.txt || true
           if grep -q "ERR_MODULE_NOT_FOUND\|Cannot find module" /tmp/gh-load.txt \
