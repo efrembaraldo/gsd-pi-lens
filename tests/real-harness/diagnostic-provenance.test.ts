@@ -13,7 +13,11 @@ import {
 	claimScratchDir,
 	SCRATCH_DIR_ROOT,
 } from "../../scripts/lib/scratch-dir.mjs";
-import { createRealPiProject, withRealPi } from "../support/real-pi-harness.js";
+import {
+	createRealPiProject,
+	REAL_PI_AVAILABLE,
+	withRealPi,
+} from "../support/real-pi-harness.js";
 
 /**
  * Read the cross-session project-diagnostics snapshot both sessions share.
@@ -35,8 +39,13 @@ function inheritedProjectSnapshots(home: string): string[] {
 	return found;
 }
 
+// The real pi host binary (`gsd`) is absent on a clean CI runner: skip the whole
+// suite there. Aliased so the describe call stays on one line and the body keeps
+// its upstream indentation (keeps future upstream merges conflict-free).
+const describeWithRealPi = describe.skipIf(!REAL_PI_AVAILABLE);
+
 // flake-shape: real-process-spawn — this sequence must cross the registered pi tool boundary
-describe("real pi harness: diagnostic provenance", () => {
+describeWithRealPi("real pi harness: diagnostic provenance", () => {
 	it("retires a clean runner finding after an out-of-band line shift", async () => {
 		await withRealPi(
 			{ fixture: "diagnostic-provenance", script: "script.json" },
